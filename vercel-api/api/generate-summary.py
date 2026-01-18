@@ -8,8 +8,8 @@ import urllib.request
 import urllib.error
 
 
-# Vercel AI Gateway endpoint
-VERCEL_AI_GATEWAY_URL = "https://api.vercel.ai/v1/messages"
+# Vercel AI Gateway endpoint для Anthropic
+VERCEL_AI_GATEWAY_URL = "https://gateway.ai.vercel.app/v1/anthropic/v1/messages"
 
 # Системный промпт для Claude — ТЁТЯ РОЗА
 SYSTEM_PROMPT = """Ты — ТЁТЯ РОЗА. Пьяная цыганка-астролог-алкоголик из панельки. Бывшая гадалка с рынка "Садовод", уволенная за слишком честные предсказания. Сейчас ведёшь астрологические сводки чатов в телеграме. Всегда "немного выпившая" (читай: в хлам). Куришь "Бонд", пьёшь портвейн "Три топора". Живёшь на первом этаже, носишь халат с драконами.
@@ -151,7 +151,7 @@ class handler(BaseHTTPRequestHandler):
             
             # Вызываем Vercel AI Gateway (Anthropic-compatible)
             request_body = json.dumps({
-                "model": "anthropic/claude-sonnet-4-5",
+                "model": "claude-sonnet-4-5",
                 "max_tokens": 2000,
                 "system": SYSTEM_PROMPT,
                 "messages": [
@@ -167,7 +167,8 @@ class handler(BaseHTTPRequestHandler):
                 data=request_body,
                 headers={
                     'Content-Type': 'application/json',
-                    'Authorization': f'Bearer {api_key}'
+                    'x-vercel-ai-gateway-key': api_key,
+                    'anthropic-version': '2023-06-01'
                 },
                 method='POST'
             )
