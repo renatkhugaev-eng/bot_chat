@@ -17,13 +17,28 @@ from config import BOT_TOKEN, CLASSES, CRIMES, RANDOM_EVENTS, WELCOME_MESSAGES, 
 import aiohttp
 import json
 import os
+from dotenv import load_dotenv
 
-from database import (
-    init_db, get_player, create_player, set_player_class, update_player_stats,
-    get_top_players, is_in_jail, put_in_jail, get_all_active_players,
-    add_to_treasury, get_treasury, log_event, add_achievement,
-    save_chat_message, get_chat_statistics
-)
+load_dotenv()
+
+# Выбор базы данных: PostgreSQL (продакшн) или SQLite (локально)
+USE_POSTGRES = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
+
+if USE_POSTGRES:
+    from database_postgres import (
+        init_db, get_player, create_player, set_player_class, update_player_stats,
+        get_top_players, is_in_jail, put_in_jail, get_all_active_players,
+        add_to_treasury, get_treasury, log_event, add_achievement,
+        save_chat_message, get_chat_statistics, get_player_achievements, close_db
+    )
+else:
+    from database import (
+        init_db, get_player, create_player, set_player_class, update_player_stats,
+        get_top_players, is_in_jail, put_in_jail, get_all_active_players,
+        add_to_treasury, get_treasury, log_event, add_achievement,
+        save_chat_message, get_chat_statistics, get_player_achievements
+    )
+    close_db = None
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
     calculate_crime_success, calculate_crime_reward, get_random_crime_message,
@@ -741,8 +756,6 @@ async def cmd_achievements(message: Message):
         return
     
     user_id = message.from_user.id
-    
-    from database import get_player_achievements
     earned = await get_player_achievements(user_id)
     
     text = "🏆 *ТВОИ ДОСТИЖЕНИЯ*\n\n"

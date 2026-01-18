@@ -1,1 +1,1 @@
-anthropic>=0.18.0
+# Vercel AI Gateway - используем встроенный urllib, зависимостей нет

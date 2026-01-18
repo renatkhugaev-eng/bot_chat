@@ -1,11 +1,15 @@
 """
-Vercel Serverless Function для генерации сводки чата через Claude API
+Vercel Serverless Function для генерации сводки чата через Vercel AI Gateway + Claude
 """
 import json
 import os
 from http.server import BaseHTTPRequestHandler
-import anthropic
+import urllib.request
+import urllib.error
 
+
+# Vercel AI Gateway endpoint
+VERCEL_AI_GATEWAY_URL = "https://api.vercel.ai/v1/messages"
 
 # Системный промпт для Claude
 SYSTEM_PROMPT = """Ты — ведущий криминальной хроники "Дежурная часть" из 90-х годов, но с чёрным юмором и самоиронией. 
@@ -102,37 +106,49 @@ class handler(BaseHTTPRequestHandler):
             chat_title = data.get("chat_title", "Чат")
             hours = data.get("hours", 5)
             
-            # Проверяем API ключ
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            # Проверяем API ключ Vercel AI Gateway
+            api_key = os.environ.get("VERCEL_AI_GATEWAY_KEY")
             if not api_key:
                 self.send_response(500)
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({
-                    "error": "ANTHROPIC_API_KEY not configured"
+                    "error": "VERCEL_AI_GATEWAY_KEY not configured"
                 }).encode())
                 return
             
             # Форматируем данные
             user_prompt = format_statistics_for_prompt(statistics, chat_title, hours)
             
-            # Вызываем Claude API
-            client = anthropic.Anthropic(api_key=api_key)
-            
-            message = client.messages.create(
-                model="claude-sonnet-4-20250514",  # Claude Sonnet 4 - последняя версия
-                max_tokens=2000,
-                system=SYSTEM_PROMPT,
-                messages=[
+            # Вызываем Vercel AI Gateway (Anthropic-compatible)
+            request_body = json.dumps({
+                "model": "anthropic/claude-sonnet-4-5",
+                "max_tokens": 2000,
+                "system": SYSTEM_PROMPT,
+                "messages": [
                     {
                         "role": "user",
                         "content": f"Составь криминальную сводку по этим данным чата:\n\n{user_prompt}"
                     }
                 ]
+            }).encode('utf-8')
+            
+            req = urllib.request.Request(
+                VERCEL_AI_GATEWAY_URL,
+                data=request_body,
+                headers={
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {api_key}'
+                },
+                method='POST'
             )
             
-            # Извлекаем текст ответа
-            summary = message.content[0].text
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode('utf-8'))
+            
+            # Извлекаем текст ответа (Anthropic format)
+            summary = result.get("content", [{}])[0].get("text", "Ошибка генерации")
+            tokens_used = result.get("usage", {}).get("input_tokens", 0) + result.get("usage", {}).get("output_tokens", 0)
             
             # Отправляем ответ
             self.send_response(200)
@@ -140,19 +156,20 @@ class handler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             
-            response = {
+            response_data = {
                 "summary": summary,
-                "tokens_used": message.usage.input_tokens + message.usage.output_tokens
+                "tokens_used": tokens_used
             }
             
-            self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+            self.wfile.write(json.dumps(response_data, ensure_ascii=False).encode('utf-8'))
             
-        except anthropic.APIError as e:
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8') if e.fp else str(e)
             self.send_response(500)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({
-                "error": f"Claude API error: {str(e)}"
+                "error": f"AI Gateway error: {e.code} - {error_body}"
             }).encode())
             
         except Exception as e:
