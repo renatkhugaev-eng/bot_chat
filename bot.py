@@ -7,7 +7,7 @@ from typing import Optional
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ChatMemberUpdated
+    ChatMemberUpdated, BufferedInputFile
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
@@ -737,9 +737,12 @@ async def cmd_help(message: Message):
 *Развлечения:*
 /casino — Казино для настоящих пацанов
 /treasury — Воровской общак
+/pic — 🖼️ Найти картинку по запросу
+/poem — 📜 Стих-унижение в стиле классиков
 
 *Аналитика:*
 /svodka — 📺 Криминальная сводка чата за 5 часов (AI)
+/describe — 🔮 Тётя Роза опишет фото
 
 *Инфо:*
 /help — Эта справка
@@ -982,6 +985,7 @@ async def cmd_take(message: Message):
 # URL твоего Vercel API (замени на свой после деплоя)
 VERCEL_API_URL = os.getenv("VERCEL_API_URL", "https://your-vercel-app.vercel.app/api/generate-summary")
 VISION_API_URL = os.getenv("VISION_API_URL", "")
+POEM_API_URL = os.getenv("POEM_API_URL", "")
 
 
 # ==================== ОПИСАНИЕ ФОТО ====================
@@ -1060,6 +1064,260 @@ async def cmd_describe_photo(message: Message):
     except Exception as e:
         logger.error(f"Error in describe command: {e}")
         await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+
+
+# ==================== СТИХИ-УНИЖЕНИЯ ====================
+
+@router.message(Command("poem", "stih", "стих"))
+async def cmd_poem(message: Message):
+    """Сгенерировать стих-унижение про человека в стиле русских классиков"""
+    if message.chat.type == "private":
+        await message.answer("❌ Стихи работают только в групповых чатах!")
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    # Определяем цель
+    target_user = None
+    target_name = None
+    
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        target_name = target_user.first_name
+    else:
+        # Пробуем получить имя из текста команды
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            target_name = parts[1].strip().replace("@", "")
+        else:
+            await message.answer(
+                "📜 *Как заказать стих:*\n\n"
+                "1️⃣ Ответь на сообщение: `/poem`\n"
+                "2️⃣ Или укажи имя: `/poem Вася`\n\n"
+                "Тётя Роза напишет стих в стиле Пушкина, Лермонтова, Маяковского, Есенина или Бродского! 🪶",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+    
+    if not target_name:
+        target_name = "Аноним"
+    
+    # Проверяем API URL
+    poem_api_url = os.getenv("POEM_API_URL") or VERCEL_API_URL.replace("/summary", "/poem")
+    
+    if not poem_api_url or "your-vercel" in poem_api_url:
+        await message.answer("❌ API для стихов не настроен!")
+        return
+    
+    # Кулдаун 30 секунд
+    can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "poem", 30)
+    if not can_do:
+        await message.answer(f"⏰ Муза отдыхает! Подожди {cooldown_remaining} сек")
+        return
+    
+    # Показываем что работаем
+    processing_msg = await message.answer(f"🪶 Тётя Роза берёт перо и вдохновляется... ✨")
+    
+    try:
+        # Собираем контекст (последние сообщения человека)
+        context = ""
+        if target_user:
+            # Можно добавить логику сбора сообщений из БД
+            context = f"Активный участник чата, ник: {target_user.username or 'нет'}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                poem_api_url,
+                json={
+                    "name": target_name,
+                    "context": context
+                },
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    
+                    if "error" in result:
+                        await processing_msg.edit_text(f"❌ Ошибка: {result['error']}")
+                        return
+                    
+                    poem = result.get("poem", "Муза молчит...")
+                    
+                    await processing_msg.edit_text(poem)
+                else:
+                    error = await response.text()
+                    logger.error(f"Poem API error: {response.status} - {error}")
+                    await processing_msg.edit_text("❌ Муза сегодня не в духе. Попробуй позже!")
+                    
+    except asyncio.TimeoutError:
+        await processing_msg.edit_text("⏰ Муза задумалась слишком надолго...")
+    except Exception as e:
+        logger.error(f"Error in poem command: {e}")
+        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+
+
+# ==================== ПОИСК КАРТИНОК (SerpAPI - Google Images) ====================
+
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
+
+
+async def search_images_serpapi(query: str, num_results: int = 20) -> list:
+    """Поиск картинок через SerpAPI (Google Images)"""
+    if not SERPAPI_KEY:
+        logger.error("SERPAPI_KEY not set!")
+        return []
+    
+    try:
+        params = {
+            "engine": "google_images",
+            "q": query,
+            "api_key": SERPAPI_KEY,
+            "num": num_results,
+            "safe": "off",
+            "hl": "ru",
+            "gl": "ru",
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://serpapi.com/search",
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("images_results", [])
+                else:
+                    error = await response.text()
+                    logger.error(f"SerpAPI error: {response.status} - {error}")
+                    return []
+    except Exception as e:
+        logger.error(f"SerpAPI search error: {e}")
+        return []
+
+
+@router.message(Command("pic", "findpic", "photo_search", "картинка"))
+async def cmd_find_pic(message: Message):
+    """Найти и отправить картинку по запросу через Google Images"""
+    # Получаем текст запроса
+    query = message.text.split(maxsplit=1)
+    
+    if len(query) < 2:
+        await message.answer(
+            "🔍 *Как искать картинки:*\n\n"
+            "`/pic как какает птичка`\n"
+            "`/pic котик в шапке`\n"
+            "`/pic грустный кот на работе`\n\n"
+            "Ищу через Google Images! 🖼️",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    search_query = query[1].strip()
+    
+    if len(search_query) < 2:
+        await message.answer("❌ Запрос слишком короткий! Напиши хотя бы 2 символа.")
+        return
+    
+    if not SERPAPI_KEY:
+        await message.answer("❌ API ключ для поиска не настроен!")
+        return
+    
+    # Кулдаун 5 секунд
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "pic_search", 5)
+    if not can_do:
+        await message.answer(f"⏰ Подожди {cooldown_remaining} сек перед следующим поиском!")
+        return
+    
+    # Показываем что ищем
+    processing_msg = await message.answer(f"🔍 Ищу в Google: *{search_query}*...", parse_mode=ParseMode.MARKDOWN)
+    
+    try:
+        # Ищем картинки через SerpAPI (больше результатов для выбора)
+        results = await search_images_serpapi(search_query, 20)
+        
+        if not results:
+            await processing_msg.edit_text(
+                f"😔 Не нашёл картинок по запросу *{search_query}*\n"
+                f"Попробуй другой запрос!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Перемешиваем топ-10 результатов для разнообразия
+        top_results = results[:10]
+        random.shuffle(top_results)
+        
+        # Пробуем отправить картинку (перебираем результаты, если первая не загрузится)
+        sent = False
+        for result in top_results:
+            image_url = result.get('original') or result.get('thumbnail')
+            if not image_url:
+                continue
+            
+            try:
+                # Скачиваем картинку
+                async with aiohttp.ClientSession() as session:
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    }
+                    async with session.get(
+                        image_url, 
+                        timeout=aiohttp.ClientTimeout(total=15),
+                        headers=headers
+                    ) as response:
+                        if response.status != 200:
+                            continue
+                        
+                        content_type = response.headers.get('Content-Type', '')
+                        if not content_type.startswith('image/'):
+                            continue
+                        
+                        image_data = await response.read()
+                        
+                        # Проверяем размер (не больше 10 МБ)
+                        if len(image_data) > 10 * 1024 * 1024:
+                            continue
+                        
+                        # Минимальный размер (не меньше 5 КБ - иначе битая)
+                        if len(image_data) < 5 * 1024:
+                            continue
+                        
+                        # Определяем расширение
+                        if 'png' in content_type:
+                            ext = 'png'
+                        elif 'gif' in content_type:
+                            ext = 'gif'
+                        elif 'webp' in content_type:
+                            ext = 'webp'
+                        else:
+                            ext = 'jpg'
+                        
+                        # Отправляем без подписи
+                        photo = BufferedInputFile(image_data, filename=f"image.{ext}")
+                        
+                        await processing_msg.delete()
+                        await message.answer_photo(photo)
+                        sent = True
+                        break
+            
+            except Exception as e:
+                logger.warning(f"Failed to download image {image_url}: {e}")
+                continue
+        
+        if not sent:
+            await processing_msg.edit_text(
+                f"😔 Нашёл картинки, но не смог их загрузить.\n"
+                f"Попробуй другой запрос!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
+    except Exception as e:
+        logger.error(f"Error in pic search: {e}")
+        await processing_msg.edit_text(f"❌ Ошибка поиска: {str(e)[:100]}")
 
 
 @router.message(Command("svodka", "summary", "digest"))
