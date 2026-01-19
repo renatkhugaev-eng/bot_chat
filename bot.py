@@ -1025,7 +1025,7 @@ async def cmd_svodka(message: Message):
                     "chat_title": message.chat.title or "Чат",
                     "hours": 5
                 },
-                timeout=aiohttp.ClientTimeout(total=60)
+                timeout=aiohttp.ClientTimeout(total=120)
             ) as response:
                 if response.status == 200:
                     result = await response.json()
