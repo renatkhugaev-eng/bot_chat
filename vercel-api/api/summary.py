@@ -1,5 +1,5 @@
 """
-Vercel Serverless Function для генерации сводки чата через Vercel AI Gateway + Claude
+Vercel Serverless Function для генерации сводки чата через Anthropic API
 """
 import json
 import os
@@ -8,8 +8,8 @@ import urllib.request
 import urllib.error
 
 
-# Vercel AI Gateway endpoint для Anthropic
-VERCEL_AI_GATEWAY_URL = "https://gateway.ai.vercel.app/v1/anthropic/v1/messages"
+# Vercel AI Gateway endpoint (Anthropic-compatible)
+AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
 
 # Системный промпт для Claude — ТЁТЯ РОЗА
 SYSTEM_PROMPT = """Ты — ТЁТЯ РОЗА. Пьяная цыганка-астролог-алкоголик из панельки. Бывшая гадалка с рынка "Садовод", уволенная за слишком честные предсказания. Сейчас ведёшь астрологические сводки чатов в телеграме. Всегда "немного выпившая" (читай: в хлам). Куришь "Бонд", пьёшь портвейн "Три топора". Живёшь на первом этаже, носишь халат с драконами.
@@ -86,7 +86,7 @@ def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> st
     reply_pairs_text = ""
     if stats.get("reply_pairs"):
         for pair in stats["reply_pairs"][:5]:
-            reply_pairs_text += f"- {pair['first_name']} → {pair['reply_to_first_name']}: {pair['replies']} ответов\n"
+            reply_pairs_text += f"- {pair['first_name']} -> {pair['reply_to_first_name']}: {pair['replies']} ответов\n"
     
     # Активность по часам
     hourly_text = ""
@@ -97,7 +97,7 @@ def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> st
     # Выборка сообщений
     messages_sample = ""
     if stats.get("recent_messages"):
-        for msg in stats["recent_messages"][-20:]:  # Последние 20
+        for msg in stats["recent_messages"][-20:]:
             if msg.get("message_text"):
                 text = msg["message_text"][:100]
                 messages_sample += f"[{msg['first_name']}]: {text}\n"
@@ -105,20 +105,20 @@ def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> st
     return f"""
 ДАННЫЕ ЧАТА "{chat_title}" ЗА ПОСЛЕДНИЕ {hours} ЧАСОВ:
 
-📊 ОБЩАЯ СТАТИСТИКА:
+ОБЩАЯ СТАТИСТИКА:
 - Всего сообщений: {stats.get('total_messages', 0)}
 - Типы: {types_text}
 
-👥 ТОП АВТОРОВ (по количеству сообщений):
+ТОП АВТОРОВ (по количеству сообщений):
 {top_authors_text if top_authors_text else "Нет данных"}
 
-💬 КТО С КЕМ ОБЩАЛСЯ (ответы):
+КТО С КЕМ ОБЩАЛСЯ (ответы):
 {reply_pairs_text if reply_pairs_text else "Нет данных о диалогах"}
 
-⏰ АКТИВНОСТЬ:
+АКТИВНОСТЬ:
 {hourly_text if hourly_text else "Нет данных"}
 
-📝 ВЫБОРКА ПОСЛЕДНИХ СООБЩЕНИЙ:
+ВЫБОРКА ПОСЛЕДНИХ СООБЩЕНИЙ:
 {messages_sample if messages_sample else "Нет текстовых сообщений"}
 """
 
@@ -127,7 +127,7 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             # Читаем тело запроса
-            content_length = int(self.headers['Content-Length'])
+            content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
             data = json.loads(post_data.decode('utf-8'))
             
@@ -136,22 +136,17 @@ class handler(BaseHTTPRequestHandler):
             hours = data.get("hours", 5)
             
             # Проверяем API ключ Vercel AI Gateway
-            api_key = os.environ.get("VERCEL_AI_GATEWAY_KEY")
+            api_key = os.environ.get("VERCEL_AI_GATEWAY_KEY", "").strip()
             if not api_key:
-                self.send_response(500)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "error": "VERCEL_AI_GATEWAY_KEY not configured"
-                }).encode())
+                self._send_error(500, "VERCEL_AI_GATEWAY_KEY not configured")
                 return
             
             # Форматируем данные
             user_prompt = format_statistics_for_prompt(statistics, chat_title, hours)
             
-            # Вызываем Vercel AI Gateway (Anthropic-compatible)
+            # Вызываем Vercel AI Gateway
             request_body = json.dumps({
-                "model": "claude-sonnet-4-5",
+                "model": "anthropic/claude-sonnet-4.5",
                 "max_tokens": 2000,
                 "system": SYSTEM_PROMPT,
                 "messages": [
@@ -163,57 +158,54 @@ class handler(BaseHTTPRequestHandler):
             }).encode('utf-8')
             
             req = urllib.request.Request(
-                VERCEL_AI_GATEWAY_URL,
+                AI_GATEWAY_URL,
                 data=request_body,
                 headers={
                     'Content-Type': 'application/json',
-                    'x-vercel-ai-gateway-key': api_key,
+                    'Authorization': f'Bearer {api_key}',
                     'anthropic-version': '2023-06-01'
                 },
                 method='POST'
             )
             
-            with urllib.request.urlopen(req, timeout=60) as response:
+            with urllib.request.urlopen(req, timeout=90) as response:
                 result = json.loads(response.read().decode('utf-8'))
             
-            # Извлекаем текст ответа (Anthropic format)
+            # Извлекаем текст ответа
             summary = result.get("content", [{}])[0].get("text", "Ошибка генерации")
             tokens_used = result.get("usage", {}).get("input_tokens", 0) + result.get("usage", {}).get("output_tokens", 0)
             
             # Отправляем ответ
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            
-            response_data = {
+            self._send_json(200, {
                 "summary": summary,
                 "tokens_used": tokens_used
-            }
-            
-            self.wfile.write(json.dumps(response_data, ensure_ascii=False).encode('utf-8'))
+            })
             
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8') if e.fp else str(e)
-            self.send_response(500)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "error": f"AI Gateway error: {e.code} - {error_body}"
-            }).encode())
+            self._send_error(500, f"AI Gateway error: {e.code} - {error_body}")
             
         except Exception as e:
-            self.send_response(500)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "error": str(e)
-            }).encode())
+            self._send_error(500, str(e))
+    
+    def do_GET(self):
+        """Health check"""
+        self._send_json(200, {"status": "ok", "service": "teta-roza-summary"})
     
     def do_OPTIONS(self):
         """Handle CORS preflight"""
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
+    
+    def _send_json(self, status: int, data: dict):
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+    
+    def _send_error(self, status: int, message: str):
+        self._send_json(status, {"error": message})
