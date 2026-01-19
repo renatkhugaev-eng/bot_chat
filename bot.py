@@ -29,7 +29,8 @@ if USE_POSTGRES:
         init_db, get_player, create_player, set_player_class, update_player_stats,
         get_top_players, is_in_jail, put_in_jail, get_all_active_players,
         add_to_treasury, get_treasury, log_event, add_achievement,
-        save_chat_message, get_chat_statistics, get_player_achievements, close_db
+        save_chat_message, get_chat_statistics, get_player_achievements, close_db,
+        save_summary, get_previous_summaries, save_memory, get_memories
     )
 else:
     from database import (
@@ -1063,7 +1064,7 @@ async def cmd_describe_photo(message: Message):
 
 @router.message(Command("svodka", "summary", "digest"))
 async def cmd_svodka(message: Message):
-    """Генерация сводки чата через AI"""
+    """Генерация сводки чата через AI с памятью"""
     if message.chat.type == "private":
         await message.answer("❌ Сводка работает только в групповых чатах!")
         return
@@ -1094,7 +1095,11 @@ async def cmd_svodka(message: Message):
         cooldowns.pop((user_id, chat_id, "svodka"), None)
         return
     
-    # Отправляем запрос к Vercel API
+    # Получаем память (предыдущие сводки и воспоминания)
+    previous_summaries = await get_previous_summaries(chat_id, limit=3)
+    memories = await get_memories(chat_id, limit=20)
+    
+    # Отправляем запрос к Vercel API с памятью
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -1102,13 +1107,57 @@ async def cmd_svodka(message: Message):
                 json={
                     "statistics": stats,
                     "chat_title": message.chat.title or "Чат",
-                    "hours": 5
+                    "hours": 5,
+                    "previous_summaries": previous_summaries,
+                    "memories": memories
                 },
                 timeout=aiohttp.ClientTimeout(total=120)
             ) as response:
                 if response.status == 200:
                     result = await response.json()
                     summary = result.get("summary", "Ошибка генерации сводки")
+                    
+                    # Сохраняем сводку в память
+                    top_author = stats['top_authors'][0] if stats['top_authors'] else {}
+                    drama_pairs_str = ", ".join([
+                        f"{p.get('first_name', '?')} и {p.get('reply_to_first_name', '?')}"
+                        for p in stats.get('reply_pairs', [])[:3]
+                    ]) if stats.get('reply_pairs') else None
+                    
+                    await save_summary(
+                        chat_id=chat_id,
+                        summary_text=summary[:2000],  # Ограничиваем размер
+                        top_talker_username=top_author.get('username'),
+                        top_talker_name=top_author.get('first_name'),
+                        top_talker_count=top_author.get('msg_count'),
+                        drama_pairs=drama_pairs_str
+                    )
+                    
+                    # Сохраняем воспоминания о топ-участниках
+                    for author in stats['top_authors'][:5]:
+                        if author.get('msg_count', 0) >= 10:
+                            await save_memory(
+                                chat_id=chat_id,
+                                user_id=author.get('user_id', 0),
+                                username=author.get('username'),
+                                first_name=author.get('first_name'),
+                                memory_type="activity",
+                                memory_text=f"написал {author['msg_count']} сообщений за 5 часов",
+                                relevance_score=min(author['msg_count'] // 10, 10)
+                            )
+                    
+                    # Сохраняем воспоминания о парочках
+                    for pair in stats.get('reply_pairs', [])[:3]:
+                        if pair.get('replies', 0) >= 5:
+                            await save_memory(
+                                chat_id=chat_id,
+                                user_id=pair.get('user_id', 0),
+                                username=pair.get('username'),
+                                first_name=pair.get('first_name'),
+                                memory_type="relationship",
+                                memory_text=f"активно общался с {pair.get('reply_to_first_name', '?')}",
+                                relevance_score=min(pair['replies'], 10)
+                            )
                     
                     # Разбиваем на части если слишком длинное
                     if len(summary) > 4000:

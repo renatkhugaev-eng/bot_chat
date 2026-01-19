@@ -74,6 +74,51 @@ async def init_db():
         except Exception:
             pass  # Колонка уже существует
         
+        # Таблица сводок (память между сессиями)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_summaries (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                summary_text TEXT NOT NULL,
+                key_facts TEXT,
+                top_talker_username TEXT,
+                top_talker_name TEXT,
+                top_talker_count INTEGER,
+                drama_pairs TEXT,
+                memorable_quotes TEXT,
+                created_at BIGINT NOT NULL
+            )
+        """)
+        
+        # Индекс для быстрого поиска сводок по чату
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_summaries_chat 
+            ON chat_summaries(chat_id, created_at DESC)
+        """)
+        
+        # Таблица воспоминаний о участниках (долгосрочная память)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_memories (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                memory_type TEXT NOT NULL,
+                memory_text TEXT NOT NULL,
+                relevance_score INTEGER DEFAULT 5,
+                created_at BIGINT NOT NULL,
+                expires_at BIGINT,
+                UNIQUE(chat_id, user_id, memory_type, memory_text)
+            )
+        """)
+        
+        # Индекс для поиска воспоминаний
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_chat_user 
+            ON chat_memories(chat_id, user_id)
+        """)
+        
         # Таблица игроков
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS players (
@@ -449,3 +494,110 @@ async def cleanup_old_messages(days: int = 7):
         await conn.execute("""
             DELETE FROM chat_messages WHERE created_at < $1
         """, cutoff_time)
+
+
+# ==================== СИСТЕМА ПАМЯТИ ====================
+
+async def save_summary(
+    chat_id: int,
+    summary_text: str,
+    key_facts: str = None,
+    top_talker_username: str = None,
+    top_talker_name: str = None,
+    top_talker_count: int = None,
+    drama_pairs: str = None,
+    memorable_quotes: str = None
+):
+    """Сохранить сводку в память"""
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO chat_summaries 
+            (chat_id, summary_text, key_facts, top_talker_username, top_talker_name, 
+             top_talker_count, drama_pairs, memorable_quotes, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        """, chat_id, summary_text, key_facts, top_talker_username, top_talker_name,
+             top_talker_count, drama_pairs, memorable_quotes, int(time.time()))
+
+
+async def get_previous_summaries(chat_id: int, limit: int = 3) -> List[Dict[str, Any]]:
+    """Получить предыдущие сводки для контекста"""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT summary_text, key_facts, top_talker_username, top_talker_name,
+                   top_talker_count, drama_pairs, memorable_quotes, created_at
+            FROM chat_summaries 
+            WHERE chat_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+        """, chat_id, limit)
+        return [dict(row) for row in rows]
+
+
+async def save_memory(
+    chat_id: int,
+    user_id: int,
+    username: str,
+    first_name: str,
+    memory_type: str,
+    memory_text: str,
+    relevance_score: int = 5,
+    expires_days: int = 30
+):
+    """Сохранить воспоминание о участнике"""
+    expires_at = int(time.time()) + (expires_days * 24 * 3600) if expires_days else None
+    
+    async with pool.acquire() as conn:
+        # Upsert - обновляем если такое воспоминание уже есть
+        await conn.execute("""
+            INSERT INTO chat_memories 
+            (chat_id, user_id, username, first_name, memory_type, memory_text, 
+             relevance_score, created_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (chat_id, user_id, memory_type, memory_text) 
+            DO UPDATE SET relevance_score = chat_memories.relevance_score + 1,
+                          created_at = $8
+        """, chat_id, user_id, username, first_name, memory_type, memory_text,
+             relevance_score, int(time.time()), expires_at)
+
+
+async def get_memories(chat_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+    """Получить воспоминания о чате"""
+    current_time = int(time.time())
+    
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT user_id, username, first_name, memory_type, memory_text, 
+                   relevance_score, created_at
+            FROM chat_memories 
+            WHERE chat_id = $1 
+              AND (expires_at IS NULL OR expires_at > $2)
+            ORDER BY relevance_score DESC, created_at DESC
+            LIMIT $3
+        """, chat_id, current_time, limit)
+        return [dict(row) for row in rows]
+
+
+async def get_user_memories(chat_id: int, user_id: int) -> List[Dict[str, Any]]:
+    """Получить воспоминания о конкретном участнике"""
+    current_time = int(time.time())
+    
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT memory_type, memory_text, relevance_score, created_at
+            FROM chat_memories 
+            WHERE chat_id = $1 AND user_id = $2
+              AND (expires_at IS NULL OR expires_at > $3)
+            ORDER BY relevance_score DESC
+            LIMIT 10
+        """, chat_id, user_id, current_time)
+        return [dict(row) for row in rows]
+
+
+async def cleanup_expired_memories():
+    """Удалить истёкшие воспоминания"""
+    current_time = int(time.time())
+    
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM chat_memories WHERE expires_at IS NOT NULL AND expires_at < $1
+        """, current_time)

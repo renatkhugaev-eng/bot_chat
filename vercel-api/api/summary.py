@@ -121,7 +121,22 @@ SYSTEM_PROMPT = """<persona>
 ✓ Есть философское изречение
 ✓ Текст читается как МОНОЛОГ пьяной тётки, а не как отчёт
 ✓ Длина 400-600 слов
+✓ Если есть память о прошлом — ИСПОЛЬЗУЙ ЕЁ!
 </quality_checklist>
+
+<memory_usage>
+КРИТИЧЕСКИ ВАЖНО: Если тебе дана ПАМЯТЬ О ПРОШЛЫХ СВОДКАХ — ты ОБЯЗАНА её использовать!
+
+Примеры как ссылаться на прошлое:
+- "О, @vasya опять тут. На прошлой неделе он обещал заткнуться про крипту. И чё? 45 сообщений. Пиздабол, я же говорила."
+- "А помните @masha флиртовала с @petya? Ну и где они теперь? Правильно — она с другим, а он молчит в тряпочку. Карты не врут."
+- "Чат всё тот же — те же ебланы, те же темы, та же хуйня. Стабильность, блять."
+- "@sergey раньше был молчуном, а теперь смотри — разговорился. Видимо таблетки сменил."
+
+Если кто-то был "флудером дня" в прошлый раз — упомяни это!
+Если были "парочки" — спроси как у них дела!
+Если кто-то обещал что-то — напомни!
+</memory_usage>
 
 <example>
 Вот пример ИДЕАЛЬНОГО ответа (копируй этот стиль):
@@ -149,6 +164,46 @@ def format_name_with_username(first_name: str, username: str = None) -> str:
     if username:
         return f"{first_name} (@{username})"
     return first_name or "Аноним"
+
+
+def format_memory_for_prompt(previous_summaries: list, memories: list) -> str:
+    """Форматирование памяти для промпта"""
+    memory_text = ""
+    
+    # Предыдущие сводки
+    if previous_summaries:
+        memory_text += "\n<previous_summaries>\n"
+        memory_text += "ЧТО БЫЛО РАНЬШЕ (помни и ссылайся!):\n\n"
+        for i, summary in enumerate(previous_summaries[:3], 1):
+            # Конвертируем timestamp в читаемую дату
+            import datetime
+            date = datetime.datetime.fromtimestamp(summary.get('created_at', 0))
+            date_str = date.strftime("%d.%m в %H:%M")
+            
+            memory_text += f"--- СВОДКА #{i} от {date_str} ---\n"
+            if summary.get('top_talker_name'):
+                memory_text += f"Главный пиздабол был: {summary['top_talker_name']}"
+                if summary.get('top_talker_username'):
+                    memory_text += f" (@{summary['top_talker_username']})"
+                memory_text += f" — {summary.get('top_talker_count', '?')} сообщений\n"
+            if summary.get('drama_pairs'):
+                memory_text += f"Парочки/драмы: {summary['drama_pairs']}\n"
+            if summary.get('key_facts'):
+                memory_text += f"Ключевые факты: {summary['key_facts']}\n"
+            memory_text += "\n"
+        memory_text += "</previous_summaries>\n"
+    
+    # Воспоминания о участниках
+    if memories:
+        memory_text += "\n<memories>\n"
+        memory_text += "ЧТО ТЫ ПОМНИШЬ О УЧАСТНИКАХ:\n"
+        for mem in memories[:15]:
+            name = mem.get('first_name', 'Кто-то')
+            username = f" (@{mem['username']})" if mem.get('username') else ""
+            memory_text += f"- {name}{username}: {mem.get('memory_text', '')}\n"
+        memory_text += "</memories>\n"
+    
+    return memory_text
 
 
 def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> str:
@@ -241,6 +296,8 @@ class handler(BaseHTTPRequestHandler):
             statistics = data.get("statistics", {})
             chat_title = data.get("chat_title", "Чат")
             hours = data.get("hours", 5)
+            previous_summaries = data.get("previous_summaries", [])
+            memories = data.get("memories", [])
             
             # Проверяем API ключ Vercel AI Gateway
             api_key = os.environ.get("VERCEL_AI_GATEWAY_KEY", "").strip()
@@ -250,6 +307,9 @@ class handler(BaseHTTPRequestHandler):
             
             # Форматируем данные с XML-разметкой
             user_prompt = format_statistics_for_prompt(statistics, chat_title, hours)
+            
+            # Добавляем память если есть
+            memory_prompt = format_memory_for_prompt(previous_summaries, memories)
             
             # Вызываем Vercel AI Gateway с Claude Sonnet 4.5
             request_body = json.dumps({
@@ -262,6 +322,8 @@ class handler(BaseHTTPRequestHandler):
                         "content": f"""<request>
 Тётя Роза, время раскладывать карты! Посмотри что творилось в чате и выдай свою фирменную сводку.
 
+{memory_prompt}
+
 {user_prompt}
 
 Помни: 
@@ -269,6 +331,7 @@ class handler(BaseHTTPRequestHandler):
 - Буллинг каждого участника обязателен  
 - Мат — это часть твоей души
 - Связывай людей в драмы и интриги
+- ЕСЛИ ЕСТЬ ПАМЯТЬ О ПРОШЛОМ — ОБЯЗАТЕЛЬНО ССЫЛАЙСЯ НА НЕЁ!
 - Закончи философией и пророчеством
 </request>"""
                     }
