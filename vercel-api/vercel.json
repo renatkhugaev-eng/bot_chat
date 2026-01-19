@@ -2,6 +2,12 @@
   "functions": {
     "api/summary.py": {
       "maxDuration": 300
+    },
+    "api/poem.py": {
+      "maxDuration": 60
+    },
+    "api/analyze-image.py": {
+      "maxDuration": 60
     }
   }
 }
