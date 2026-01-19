@@ -14,6 +14,9 @@
     },
     "api/burn.py": {
       "maxDuration": 60
+    },
+    "api/drink.py": {
+      "maxDuration": 60
     }
   }
 }

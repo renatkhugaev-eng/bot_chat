@@ -742,6 +742,7 @@ async def cmd_help(message: Message):
 /poem — 📜 Стих-унижение в стиле классиков
 /диагноз — 🏥 Психиатрический диагноз от Тёти Розы
 /сжечь — 🔥 Сжечь человека на костре правды
+/бухнуть — 🍻 Бухнуть и слить секреты
 
 *Аналитика:*
 /svodka — 📺 Криминальная сводка чата за 5 часов (AI)
@@ -1411,6 +1412,111 @@ async def cmd_burn(message: Message):
         await processing_msg.edit_text("⏰ Долго горит... слишком много пиздежа было")
     except Exception as e:
         logger.error(f"Error in burn command: {e}")
+        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+
+
+# ==================== БУХНУТЬ С ЧЕЛОВЕКОМ ====================
+
+@router.message(Command("drink", "бухнуть", "выпить", "бухло", "накатить"))
+async def cmd_drink(message: Message):
+    """Бухнуть с человеком и слить его секреты"""
+    if message.chat.type == "private":
+        await message.answer("❌ Бухать только в компании!")
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    target_user = None
+    target_name = None
+    target_username = None
+    target_user_id = None
+    
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        target_name = target_user.first_name
+        target_username = target_user.username
+        target_user_id = target_user.id
+    else:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            target_name = parts[1].strip().replace("@", "")
+        else:
+            await message.answer(
+                "🍻 *Как бухнуть с человеком:*\n\n"
+                "1️⃣ Ответь на сообщение: `/бухнуть`\n"
+                "2️⃣ Или укажи имя: `/бухнуть Вася`\n\n"
+                "Тётя Роза напоит и сольёт все секреты! 🍺",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+    
+    if not target_name:
+        target_name = "этот хрен"
+    
+    drink_api_url = VERCEL_API_URL.replace("/summary", "/drink")
+    
+    can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "drink", 30)
+    if not can_do:
+        await message.answer(f"⏰ Тётя Роза ещё не протрезвела! Подожди {cooldown_remaining} сек")
+        return
+    
+    processing_msg = await message.answer(f"🍻 Тётя Роза открывает бутылку и зовёт {target_name} бухать... 🥃")
+    
+    try:
+        context_parts = []
+        messages_found = 0
+        
+        if target_user_id and USE_POSTGRES:
+            try:
+                user_messages = await get_user_messages(chat_id, target_user_id, limit=100)
+                if user_messages:
+                    texts = [msg['message_text'] for msg in user_messages if msg.get('message_text') and len(msg.get('message_text', '')) > 3]
+                    messages_found = len(texts)
+                    
+                    if texts:
+                        interesting = sorted(texts, key=len, reverse=True)[:15]
+                        recent = texts[:15]
+                        all_texts = list(dict.fromkeys(interesting + recent))[:20]
+                        
+                        for i, text in enumerate(all_texts, 1):
+                            truncated = text[:200] + "..." if len(text) > 200 else text
+                            context_parts.append(f'{i}. "{truncated}"')
+            except Exception as e:
+                logger.warning(f"Could not fetch user messages for drink: {e}")
+        
+        context = "\n".join(context_parts) if context_parts else "Молчал как партизан, но по роже видно — лузер"
+        
+        logger.info(f"Drink request: target={target_name}, messages={messages_found}")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                drink_api_url,
+                json={
+                    "name": target_name,
+                    "username": target_username or "",
+                    "context": context
+                },
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    
+                    if "error" in result:
+                        await processing_msg.edit_text(f"❌ Ошибка: {result['error']}")
+                        return
+                    
+                    drink_text = result.get("result", "Отказался бухать — ссыкло")
+                    await processing_msg.edit_text(drink_text)
+                else:
+                    error = await response.text()
+                    logger.error(f"Drink API error: {response.status} - {error}")
+                    await processing_msg.edit_text("❌ Тётя Роза уже в отключке. Попробуй позже!")
+                    
+    except asyncio.TimeoutError:
+        await processing_msg.edit_text("⏰ Слишком долго бухали... оба вырубились")
+    except Exception as e:
+        logger.error(f"Error in drink command: {e}")
         await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
 
 
