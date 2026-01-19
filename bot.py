@@ -115,58 +115,24 @@ _Бот сделан каналом_ [Чернила и Кровь](https://t.me
         await message.answer(welcome_private, parse_mode=ParseMode.MARKDOWN)
         return
     
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    
-    player = await get_player(user_id, chat_id)
-    
-    if player and player['player_class']:
-        await message.answer(
-            f"😏 Йоу, {message.from_user.first_name}! Ты уже в деле, чё припёрся?\n"
-            f"Используй /profile чтобы глянуть своё досье, или /help если память отшибло."
-        )
-        return
-    
-    # Создаём игрока если его нет
-    if not player:
-        await create_player(
-            user_id, chat_id,
-            message.from_user.username or "",
-            message.from_user.first_name
-        )
-    
-    # Показываем выбор класса с угарным приветствием
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"{data['emoji']} {data['name']}",
-            callback_data=f"class_{class_id}"
-        )]
-        for class_id, data in CLASSES.items()
-    ])
-    
-    classes_text = "\n".join([
-        f"{data['emoji']} *{data['name']}* — {data['description']}"
-        for data in CLASSES.values()
-    ])
-    
     welcome_group = f"""
 🔫 *ГИЛЬДИЯ БЕСПРЕДЕЛА*
-_Добро пожаловать в ад, {message.from_user.first_name}!_
+_Добро пожаловать, {message.from_user.first_name}!_
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-Здесь:
-• Тётя Роза следит за каждым сообщением 👁
-• *Сводки* чата с унижениями и матом 📺
-• Можно *сжечь*, *бухнуть* и *унизить* друзей
+Тётя Роза следит за каждым сообщением 👁
 
-━━━━━━━━━━━━━━━━━━━━━━━━
+*Что умеет бот:*
+📺 /svodka — сводка чата с матом
+🔥 /сжечь — сжечь друга на костре
+🍻 /бухнуть — бухнуть и слить секреты
+🏥 /диагноз — диагноз из подвала
+📜 /poem — стих-унижение
+🍭 /пососи — философское напутствие
+🖼 /pic — найти картинку
 
-🚧 *RPG В РАЗРАБОТКЕ:*
-
-{classes_text}
-
-👇 *Жми на класс (тестируем):*
+/help — все команды
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 _Бот сделан каналом_ [Чернила и Кровь](https://t.me/dark_bookshelf)
@@ -174,8 +140,8 @@ _Бот сделан каналом_ [Чернила и Кровь](https://t.me
     
     await message.answer(
         welcome_group,
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True
     )
 
 
