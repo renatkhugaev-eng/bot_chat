@@ -4,9 +4,13 @@ Vercel Serverless Function: Генерация стихов-унижений в 
 import json
 import os
 import random
-import httpx
+from http.server import BaseHTTPRequestHandler
+import urllib.request
+import urllib.error
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+
+# Vercel AI Gateway endpoint
+AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
 
 POETS = {
     "pushkin": {
@@ -68,8 +72,7 @@ POETS = {
     }
 }
 
-SYSTEM_PROMPT = """
-<persona>
+SYSTEM_PROMPT = """<persona>
 Ты — ТЁТЯ РОЗА, пьяная цыганка-поэтесса из панельки. Бывшая учительница литературы, которую выгнали за "нестандартные методы преподавания".
 </persona>
 
@@ -89,6 +92,7 @@ SYSTEM_PROMPT = """
 - горЯ / мОря ✗ (это НЕ рифма!)
 - дЕНЬ / лЕНЬ ✓
 - рабОТА / забОТА ✓
+Созвучия должны быть идеальными на слух!
 </rhyme_rules>
 
 {poet_style}
@@ -101,102 +105,104 @@ SYSTEM_PROMPT = """
 
 <about_person>
 Имя: {name}
-Информация из чата: {context}
-</about_person>
-"""
+Информация: {context}
+</about_person>"""
 
-async def generate_poem(name: str, context: str = "") -> dict:
-    """Генерация стиха через OpenRouter API"""
+
+class handler(BaseHTTPRequestHandler):
     
-    if not OPENROUTER_API_KEY:
-        return {"error": "API key not configured"}
-    
-    # Выбираем случайного поэта
-    poet_id = random.choice(list(POETS.keys()))
-    poet = POETS[poet_id]
-    
-    prompt = SYSTEM_PROMPT.format(
-        poet_style=poet["style"],
-        poet_emoji=poet["emoji"],
-        poet_name=poet["name"],
-        name=name,
-        context=context or "Обычный участник чата, любит сидеть в интернете"
-    )
-    
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "anthropic/claude-sonnet-4",
-                    "messages": [
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": f"Напиши стихотворение-унижение про {name}. Сделай рифмы ИДЕАЛЬНЫМИ!"}
-                    ],
-                    "max_tokens": 800,
-                    "temperature": 0.9
-                }
+    def do_POST(self):
+        """Генерация стиха"""
+        try:
+            # Читаем тело запроса
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8')
+            data = json.loads(body) if body else {}
+            
+            name = data.get("name", "Аноним")
+            context = data.get("context", "Обычный участник чата, любит сидеть в интернете")
+            
+            # Выбираем случайного поэта
+            poet_id = random.choice(list(POETS.keys()))
+            poet = POETS[poet_id]
+            
+            # Формируем промпт
+            prompt = SYSTEM_PROMPT.format(
+                poet_style=poet["style"],
+                poet_emoji=poet["emoji"],
+                poet_name=poet["name"],
+                name=name,
+                context=context
             )
             
-            if response.status_code == 200:
-                data = response.json()
-                poem = data["choices"][0]["message"]["content"]
-                return {
-                    "poem": poem,
-                    "poet": poet["name"],
-                    "poet_id": poet_id
-                }
-            else:
-                return {"error": f"API error: {response.status_code}"}
-                
-    except Exception as e:
-        return {"error": str(e)}
-
-
-def handler(request):
-    """Vercel serverless handler"""
-    import asyncio
+            # API ключ
+            api_key = os.environ.get("VERCEL_AI_GATEWAY_KEY", "").strip()
+            if not api_key:
+                self._send_error(500, "API key not configured")
+                return
+            
+            # Запрос к AI
+            request_body = json.dumps({
+                "model": "anthropic/claude-sonnet-4",
+                "max_tokens": 800,
+                "temperature": 0.9,
+                "system": prompt,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f"Напиши стихотворение-унижение про {name}. Сделай рифмы ИДЕАЛЬНЫМИ!"
+                    }
+                ]
+            }).encode('utf-8')
+            
+            req = urllib.request.Request(
+                AI_GATEWAY_URL,
+                data=request_body,
+                headers={
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {api_key}',
+                    'anthropic-version': '2023-06-01'
+                },
+                method='POST'
+            )
+            
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode('utf-8'))
+            
+            # Извлекаем текст
+            poem = result.get("content", [{}])[0].get("text", "Муза молчит...")
+            
+            self._send_json(200, {
+                "poem": poem,
+                "poet": poet["name"],
+                "poet_id": poet_id
+            })
+            
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8') if e.fp else str(e)
+            self._send_error(500, f"AI error: {e.code} - {error_body}")
+            
+        except Exception as e:
+            self._send_error(500, str(e))
     
-    if request.method == "OPTIONS":
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type",
-            },
-            "body": ""
-        }
+    def do_GET(self):
+        """Health check"""
+        self._send_json(200, {"status": "ok", "service": "teta-roza-poem"})
     
-    if request.method != "POST":
-        return {
-            "statusCode": 405,
-            "body": json.dumps({"error": "Method not allowed"})
-        }
+    def do_OPTIONS(self):
+        """Handle CORS preflight"""
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
     
-    try:
-        body = json.loads(request.body)
-        name = body.get("name", "Аноним")
-        context = body.get("context", "")
-        
-        # Запускаем async функцию
-        result = asyncio.run(generate_poem(name, context))
-        
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*"
-            },
-            "body": json.dumps(result, ensure_ascii=False)
-        }
-        
-    except Exception as e:
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+    def _send_json(self, status: int, data: dict):
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+    
+    def _send_error(self, status: int, message: str):
+        self._send_json(status, {"error": message})
