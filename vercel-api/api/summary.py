@@ -61,32 +61,44 @@ SYSTEM_PROMPT = """Ты — ТЁТЯ РОЗА. Пьяная цыганка-ас�
 - Ответы друг другу = "переписываются как голубки, только голубки хотя бы красивые"
 
 ВАЖНО:
-- Пиши 400-800 слов
-- Используй РЕАЛЬНЫЕ имена из данных
+- Пиши 300-500 слов (коротко и по делу!)
+- ВСЕГДА используй @username формат когда упоминаешь людей! Например: "Вася (@vasya_cool)" или просто "@vasya_cool"
+- Если у человека нет username — используй только имя
+- Используй РЕАЛЬНЫЕ имена и @username из данных
 - Если есть темы разговоров — высмеивай их
 - Если данных мало — ещё сильнее иронизируй ("за 5 часов три калеки написали хуйню")
 - Заканчивай всегда уходом тёти Розы (шатаясь, с бутылкой)
 - НЕ ВЫДУМЫВАЙ людей которых нет в данных"""
 
 
+def format_name_with_username(first_name: str, username: str = None) -> str:
+    """Форматирует имя с @username если есть"""
+    if username:
+        return f"{first_name} (@{username})"
+    return first_name
+
+
 def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> str:
     """Форматирование статистики для промпта"""
     
-    # Топ авторов
+    # Топ авторов с @username
     top_authors_text = ""
     if stats.get("top_authors"):
         for i, author in enumerate(stats["top_authors"][:5], 1):
-            top_authors_text += f"{i}. {author['first_name']}: {author['msg_count']} сообщений\n"
+            name = format_name_with_username(author.get('first_name', 'Аноним'), author.get('username'))
+            top_authors_text += f"{i}. {name}: {author['msg_count']} сообщений\n"
     
     # Типы сообщений
     msg_types = stats.get("message_types", {})
     types_text = f"Текст: {msg_types.get('text', 0)}, Стикеры: {msg_types.get('sticker', 0)}, Фото: {msg_types.get('photo', 0)}, Голосовые: {msg_types.get('voice', 0)}"
     
-    # Кто с кем общался
+    # Кто с кем общался с @username
     reply_pairs_text = ""
     if stats.get("reply_pairs"):
         for pair in stats["reply_pairs"][:5]:
-            reply_pairs_text += f"- {pair['first_name']} -> {pair['reply_to_first_name']}: {pair['replies']} ответов\n"
+            from_name = format_name_with_username(pair.get('first_name', '?'), pair.get('username'))
+            to_name = format_name_with_username(pair.get('reply_to_first_name', '?'), pair.get('reply_to_username'))
+            reply_pairs_text += f"- {from_name} -> {to_name}: {pair['replies']} ответов\n"
     
     # Активность по часам
     hourly_text = ""
@@ -94,13 +106,14 @@ def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> st
         peak_hour = max(stats["hourly_activity"], key=stats["hourly_activity"].get)
         hourly_text = f"Пик активности: {peak_hour}:00 ({stats['hourly_activity'][peak_hour]} сообщений)"
     
-    # Выборка сообщений
+    # Выборка сообщений с @username
     messages_sample = ""
     if stats.get("recent_messages"):
         for msg in stats["recent_messages"][-20:]:
             if msg.get("message_text"):
+                name = format_name_with_username(msg.get('first_name', '?'), msg.get('username'))
                 text = msg["message_text"][:100]
-                messages_sample += f"[{msg['first_name']}]: {text}\n"
+                messages_sample += f"[{name}]: {text}\n"
     
     return f"""
 ДАННЫЕ ЧАТА "{chat_title}" ЗА ПОСЛЕДНИЕ {hours} ЧАСОВ:
@@ -146,8 +159,8 @@ class handler(BaseHTTPRequestHandler):
             
             # Вызываем Vercel AI Gateway
             request_body = json.dumps({
-                "model": "anthropic/claude-sonnet-4.5",
-                "max_tokens": 1000,
+                "model": "anthropic/claude-haiku-4.5",
+                "max_tokens": 1500,
                 "system": SYSTEM_PROMPT,
                 "messages": [
                     {

@@ -45,6 +45,7 @@ async def init_db():
                 message_type TEXT DEFAULT 'text',
                 reply_to_user_id BIGINT,
                 reply_to_first_name TEXT,
+                reply_to_username TEXT,
                 sticker_emoji TEXT,
                 created_at BIGINT NOT NULL
             )
@@ -55,6 +56,14 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_messages_time 
             ON chat_messages(chat_id, created_at)
         """)
+        
+        # Миграция: добавляем колонку reply_to_username если её нет
+        try:
+            await conn.execute("""
+                ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to_username TEXT
+            """)
+        except Exception:
+            pass  # Колонка уже существует
         
         # Таблица игроков
         await conn.execute("""
@@ -322,6 +331,7 @@ async def save_chat_message(
     message_type: str = "text",
     reply_to_user_id: int = None,
     reply_to_first_name: str = None,
+    reply_to_username: str = None,
     sticker_emoji: str = None
 ):
     """Сохранить сообщение чата для аналитики"""
@@ -329,10 +339,10 @@ async def save_chat_message(
         await conn.execute("""
             INSERT INTO chat_messages 
             (chat_id, user_id, username, first_name, message_text, message_type,
-             reply_to_user_id, reply_to_first_name, sticker_emoji, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         """, chat_id, user_id, username, first_name, message_text, message_type,
-             reply_to_user_id, reply_to_first_name, sticker_emoji, int(time.time()))
+             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, int(time.time()))
 
 
 async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]]:
@@ -379,12 +389,12 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         """, chat_id, since_time)
         message_types = {row['message_type']: row['count'] for row in msg_types_rows}
         
-        # Reply pairs
+        # Reply pairs с username
         reply_pairs = await conn.fetch("""
-            SELECT first_name, reply_to_first_name, COUNT(*) as replies
+            SELECT first_name, username, reply_to_first_name, reply_to_username, COUNT(*) as replies
             FROM chat_messages 
             WHERE chat_id = $1 AND created_at >= $2 AND reply_to_user_id IS NOT NULL
-            GROUP BY user_id, reply_to_user_id, first_name, reply_to_first_name
+            GROUP BY user_id, reply_to_user_id, first_name, username, reply_to_first_name, reply_to_username
             ORDER BY replies DESC
             LIMIT 10
         """, chat_id, since_time)
@@ -402,8 +412,8 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         
         # Последние сообщения
         recent_messages = await conn.fetch("""
-            SELECT first_name, message_text, message_type, sticker_emoji,
-                   reply_to_first_name, created_at
+            SELECT first_name, username, message_text, message_type, sticker_emoji,
+                   reply_to_first_name, reply_to_username, created_at
             FROM chat_messages 
             WHERE chat_id = $1 AND created_at >= $2 AND message_type = 'text'
             ORDER BY created_at DESC

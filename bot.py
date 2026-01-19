@@ -1070,10 +1070,12 @@ async def collect_messages_and_exp(message: Message):
     # Сохраняем сообщение для аналитики
     reply_to_user_id = None
     reply_to_first_name = None
+    reply_to_username = None
     
     if message.reply_to_message and message.reply_to_message.from_user:
         reply_to_user_id = message.reply_to_message.from_user.id
         reply_to_first_name = message.reply_to_message.from_user.first_name
+        reply_to_username = message.reply_to_message.from_user.username
     
     await save_chat_message(
         chat_id=chat_id,
@@ -1083,7 +1085,8 @@ async def collect_messages_and_exp(message: Message):
         message_text=message.text[:500] if message.text else "",  # Лимит 500 символов
         message_type="text",
         reply_to_user_id=reply_to_user_id,
-        reply_to_first_name=reply_to_first_name
+        reply_to_first_name=reply_to_first_name,
+        reply_to_username=reply_to_username
     )
     
     # Пассивный опыт для игроков
