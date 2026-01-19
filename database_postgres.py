@@ -1,6 +1,7 @@
 """
 База данных PostgreSQL (Neon/Vercel Postgres)
 Замена SQLite на PostgreSQL для продакшена
+v2.1 - reply_to_username support
 """
 import asyncpg
 import time
