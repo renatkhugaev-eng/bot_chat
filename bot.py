@@ -980,6 +980,85 @@ async def cmd_take(message: Message):
 
 # URL твоего Vercel API (замени на свой после деплоя)
 VERCEL_API_URL = os.getenv("VERCEL_API_URL", "https://your-vercel-app.vercel.app/api/generate-summary")
+VISION_API_URL = os.getenv("VISION_API_URL", "")
+
+
+# ==================== ОПИСАНИЕ ФОТО ====================
+
+@router.message(Command("describe", "photo", "wtf"))
+async def cmd_describe_photo(message: Message):
+    """Описание фото через Claude Vision — ответь на фото или кинь фото с командой"""
+    import base64
+    import io
+    
+    photo = None
+    
+    # Проверяем: это ответ на сообщение с фото?
+    if message.reply_to_message and message.reply_to_message.photo:
+        photo = message.reply_to_message.photo[-1]
+    # Или это фото с командой в caption?
+    elif message.photo:
+        photo = message.photo[-1]
+    
+    if not photo:
+        await message.answer(
+            "📸 *Как использовать:*\n\n"
+            "1️⃣ Ответь на фото командой `/describe`\n"
+            "2️⃣ Или кинь фото с подписью `/describe`\n\n"
+            "Тётя Роза расскажет что видит! 🔮",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    if not VISION_API_URL:
+        await message.answer("❌ Vision API не настроен!")
+        return
+    
+    # Показываем что работаем
+    processing_msg = await message.answer("🔮 Тётя Роза смотрит в хрустальный шар... ⏳")
+    
+    try:
+        # Скачиваем фото
+        file = await bot.get_file(photo.file_id)
+        photo_bytes = await bot.download_file(file.file_path)
+        
+        # Конвертируем в base64
+        if isinstance(photo_bytes, io.BytesIO):
+            photo_data = photo_bytes.getvalue()
+        else:
+            photo_data = photo_bytes
+        
+        image_base64 = base64.b64encode(photo_data).decode('utf-8')
+        
+        # Отправляем на анализ
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                VISION_API_URL,
+                json={
+                    "image_base64": image_base64,
+                    "media_type": "image/jpeg"
+                },
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    description = result.get("description", "Хуйня какая-то, не разобрать...")
+                    
+                    # Красиво оформляем ответ
+                    await processing_msg.edit_text(
+                        f"🔮 *Тётя Роза видит:*\n\n{description}",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    error = await response.text()
+                    logger.error(f"Vision API error: {response.status} - {error}")
+                    await processing_msg.edit_text("❌ Карты затуманились... Попробуй позже!")
+    
+    except asyncio.TimeoutError:
+        await processing_msg.edit_text("⏰ Слишком долго смотрела в шар, устала. Попробуй ещё раз!")
+    except Exception as e:
+        logger.error(f"Error in describe command: {e}")
+        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
 
 
 @router.message(Command("svodka", "summary", "digest"))
