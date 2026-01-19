@@ -147,7 +147,7 @@ class handler(BaseHTTPRequestHandler):
             # Вызываем Vercel AI Gateway
             request_body = json.dumps({
                 "model": "anthropic/claude-sonnet-4.5",
-                "max_tokens": 2000,
+                "max_tokens": 1000,
                 "system": SYSTEM_PROMPT,
                 "messages": [
                     {
