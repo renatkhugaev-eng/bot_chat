@@ -1520,6 +1520,61 @@ async def cmd_drink(message: Message):
         await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
 
 
+# ==================== ПОСОСИ ====================
+
+SUCK_API_URL = os.getenv("SUCK_API_URL", "")
+
+@router.message(Command("suck", "пососи", "соси", "сосни"))
+async def cmd_suck(message: Message):
+    """Послать человека сосать — AI генерация"""
+    if message.chat.type == "private":
+        await message.answer("❌ Сосать только публично!")
+        return
+    
+    target_name = None
+    
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_name = message.reply_to_message.from_user.first_name
+    else:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            target_name = parts[1].strip().replace("@", "")
+        else:
+            await message.answer("🍭 Кому сосать? Ответь на сообщение или укажи имя!")
+            return
+    
+    if not target_name:
+        target_name = "Эй ты"
+    
+    if not SUCK_API_URL:
+        # Fallback если API не настроен
+        await message.answer(f"🍭 {target_name}, пососи, пожалуйста. Вселенная ждёт. Соси, блять.")
+        return
+    
+    processing_msg = await message.answer("🍭 Готовлю послание...")
+    
+    try:
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            payload = {"name": target_name}
+            
+            async with session.post(SUCK_API_URL, json=payload) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    text = result.get("text", f"🍭 {target_name}, соси. Тётя Роза так сказала.")
+                    await processing_msg.edit_text(text)
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Suck API error: {response.status} - {error_text}")
+                    await processing_msg.edit_text(f"🍭 {target_name}, пососи. API сломался, но посыл остался.")
+    
+    except asyncio.TimeoutError:
+        await processing_msg.edit_text(f"🍭 {target_name}, пососи. Тётя Роза задумалась, но посыл ясен.")
+    except Exception as e:
+        logger.error(f"Error in suck command: {e}")
+        await processing_msg.edit_text(f"🍭 {target_name}, соси. Ошибка, но соси.")
+
+
 # ==================== ПОИСК КАРТИНОК (SerpAPI - Google Images) ====================
 
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")

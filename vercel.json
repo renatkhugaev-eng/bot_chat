@@ -17,6 +17,9 @@
     },
     "api/drink.py": {
       "maxDuration": 60
+    },
+    "api/suck.py": {
+      "maxDuration": 60
     }
   }
 }
