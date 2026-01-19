@@ -1126,6 +1126,7 @@ async def cmd_poem(message: Message):
     try:
         # Собираем контекст — последние 100 сообщений человека
         context_parts = []
+        messages_found = 0
         
         if target_user:
             context_parts.append(f"Ник: @{target_user.username}" if target_user.username else "Ник: нет")
@@ -1136,20 +1137,33 @@ async def cmd_poem(message: Message):
                     user_messages = await get_user_messages(chat_id, target_user_id, limit=100)
                     if user_messages:
                         # Собираем тексты сообщений
-                        texts = [msg['message_text'] for msg in user_messages if msg.get('message_text')]
+                        texts = [msg['message_text'] for msg in user_messages if msg.get('message_text') and len(msg.get('message_text', '')) > 5]
+                        messages_found = len(texts)
+                        
                         if texts:
-                            context_parts.append(f"Количество сообщений в базе: {len(texts)}")
-                            # Берём самые интересные (длинные) сообщения для контекста
-                            interesting_texts = sorted(texts, key=len, reverse=True)[:20]
-                            context_parts.append("Примеры сообщений этого человека:")
-                            for i, text in enumerate(interesting_texts[:15], 1):
-                                # Обрезаем слишком длинные
-                                truncated = text[:150] + "..." if len(text) > 150 else text
+                            context_parts.append(f"\n=== СООБЩЕНИЯ ЭТОГО ЧЕЛОВЕКА ({len(texts)} шт) ===")
+                            context_parts.append("Используй ЭТИ сообщения для персонального унижения!")
+                            
+                            # Разнообразие: берём и длинные, и случайные
+                            interesting_texts = sorted(texts, key=len, reverse=True)[:10]  # Топ длинных
+                            recent_texts = texts[:10]  # Последние
+                            
+                            # Объединяем уникальные
+                            all_texts = list(dict.fromkeys(interesting_texts + recent_texts))[:15]
+                            
+                            for i, text in enumerate(all_texts, 1):
+                                truncated = text[:200] + "..." if len(text) > 200 else text
                                 context_parts.append(f'{i}. "{truncated}"')
+                            
+                            context_parts.append("\n=== КОНЕЦ СООБЩЕНИЙ ===")
+                            context_parts.append("ОБЯЗАТЕЛЬНО используй цитаты и темы из сообщений выше!")
                 except Exception as e:
                     logger.warning(f"Could not fetch user messages: {e}")
         
-        context = "\n".join(context_parts) if context_parts else "Обычный участник чата"
+        context = "\n".join(context_parts) if context_parts else "Обычный участник чата (сообщений нет)"
+        
+        # Логируем для отладки
+        logger.info(f"Poem context for {target_name}: {messages_found} messages found, context length: {len(context)} chars")
         
         async with aiohttp.ClientSession() as session:
             async with session.post(
