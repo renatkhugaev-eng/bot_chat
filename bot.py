@@ -109,6 +109,8 @@ _Бот для тех, у кого есть чувство юмора (и нет
 ⚠️ _Бот содержит мат, чёрный юмор и правду о вас. Обидчивым — нахуй в другой бот._
 
 📎 /help — все команды
+
+_Бот сделан каналом_ [Чернила и Кровь](https://t.me/dark_bookshelf)
 """
         await message.answer(welcome_private, parse_mode=ParseMode.MARKDOWN)
         return
@@ -167,7 +169,7 @@ _Добро пожаловать в ад, {message.from_user.first_name}!_
 👇 *Жми на класс (тестируем):*
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-_Бот сделан каналом_ [Чернила и Кровь](https://t.me/chernila_i_krov)
+_Бот сделан каналом_ [Чернила и Кровь](https://t.me/dark_bookshelf)
 """
     
     await message.answer(
