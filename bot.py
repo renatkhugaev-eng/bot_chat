@@ -740,6 +740,7 @@ async def cmd_help(message: Message):
 /treasury — Воровской общак
 /pic — 🖼️ Найти картинку по запросу
 /poem — 📜 Стих-унижение в стиле классиков
+/диагноз — 🏥 Психиатрический диагноз от Тёти Розы
 
 *Аналитика:*
 /svodka — 📺 Криминальная сводка чата за 5 часов (AI)
@@ -1194,6 +1195,116 @@ async def cmd_poem(message: Message):
         await processing_msg.edit_text("⏰ Муза задумалась слишком надолго...")
     except Exception as e:
         logger.error(f"Error in poem command: {e}")
+        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+
+
+# ==================== ДИАГНОЗ ОТ ТЁТИ РОЗЫ ====================
+
+@router.message(Command("diagnosis", "diagnoz", "диагноз", "диагноз", "болезнь", "псих"))
+async def cmd_diagnosis(message: Message):
+    """Поставить диагноз человеку на основе его сообщений"""
+    if message.chat.type == "private":
+        await message.answer("❌ Диагнозы ставятся только в групповых чатах!")
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    # Определяем цель
+    target_user = None
+    target_name = None
+    target_username = None
+    target_user_id = None
+    
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        target_name = target_user.first_name
+        target_username = target_user.username
+        target_user_id = target_user.id
+    else:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            target_name = parts[1].strip().replace("@", "")
+        else:
+            await message.answer(
+                "🏥 *Как получить диагноз:*\n\n"
+                "1️⃣ Ответь на сообщение: `/диагноз`\n"
+                "2️⃣ Или укажи имя: `/диагноз Вася`\n\n"
+                "Тётя Роза поставит диагноз на основе сообщений! 💀",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+    
+    if not target_name:
+        target_name = "Аноним"
+    
+    # Проверяем API URL
+    diagnosis_api_url = VERCEL_API_URL.replace("/summary", "/diagnosis")
+    
+    # Кулдаун 30 секунд
+    can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "diagnosis", 30)
+    if not can_do:
+        await message.answer(f"⏰ Тётя Роза ещё не протрезвела! Подожди {cooldown_remaining} сек")
+        return
+    
+    processing_msg = await message.answer(f"🏥 Тётя Роза надевает очки и изучает историю болезни {target_name}... 🔬")
+    
+    try:
+        # Собираем контекст — сообщения человека
+        context_parts = []
+        messages_found = 0
+        
+        if target_user_id and USE_POSTGRES:
+            try:
+                user_messages = await get_user_messages(chat_id, target_user_id, limit=100)
+                if user_messages:
+                    texts = [msg['message_text'] for msg in user_messages if msg.get('message_text') and len(msg.get('message_text', '')) > 3]
+                    messages_found = len(texts)
+                    
+                    if texts:
+                        # Берём разнообразные сообщения
+                        interesting = sorted(texts, key=len, reverse=True)[:15]
+                        recent = texts[:15]
+                        all_texts = list(dict.fromkeys(interesting + recent))[:20]
+                        
+                        for i, text in enumerate(all_texts, 1):
+                            truncated = text[:200] + "..." if len(text) > 200 else text
+                            context_parts.append(f'{i}. "{truncated}"')
+            except Exception as e:
+                logger.warning(f"Could not fetch user messages for diagnosis: {e}")
+        
+        context = "\n".join(context_parts) if context_parts else "Сообщений нет, пациент подозрительно молчалив — это тоже симптом"
+        
+        logger.info(f"Diagnosis request: target={target_name}, messages={messages_found}")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                diagnosis_api_url,
+                json={
+                    "name": target_name,
+                    "username": target_username or "",
+                    "context": context
+                },
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    
+                    if "error" in result:
+                        await processing_msg.edit_text(f"❌ Ошибка: {result['error']}")
+                        return
+                    
+                    diagnosis = result.get("diagnosis", "Диагноз: хуй знает")
+                    await processing_msg.edit_text(diagnosis)
+                else:
+                    error = await response.text()
+                    logger.error(f"Diagnosis API error: {response.status} - {error}")
+                    await processing_msg.edit_text("❌ Тётя Роза уснула. Попробуй позже!")
+                    
+    except asyncio.TimeoutError:
+        await processing_msg.edit_text("⏰ Тётя Роза слишком долго искала очки...")
+    except Exception as e:
+        logger.error(f"Error in diagnosis command: {e}")
         await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
 
 

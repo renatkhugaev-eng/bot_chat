@@ -8,6 +8,9 @@
     },
     "api/analyze-image.py": {
       "maxDuration": 60
+    },
+    "api/diagnosis.py": {
+      "maxDuration": 60
     }
   }
 }
