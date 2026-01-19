@@ -302,7 +302,9 @@ async def save_chat_message(
     message_type: str = "text",
     reply_to_user_id: int = None,
     reply_to_first_name: str = None,
-    sticker_emoji: str = None
+    reply_to_username: str = None,
+    sticker_emoji: str = None,
+    image_description: str = None
 ):
     """Сохранить сообщение чата для аналитики"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
