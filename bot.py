@@ -1126,11 +1126,52 @@ async def collect_stickers(message: Message):
 
 @router.message(F.photo)
 async def collect_photos(message: Message):
-    """Сбор фото"""
+    """Сбор фото с анализом через Claude Vision"""
     if message.chat.type == "private":
         return
     
     caption = message.caption[:200] if message.caption else ""
+    image_description = None
+    
+    # Анализируем фото через Vision API (только если есть API URL)
+    vision_api_url = os.getenv("VISION_API_URL")
+    if vision_api_url:
+        try:
+            # Получаем файл фото (берём самое большое разрешение)
+            photo = message.photo[-1]
+            file = await bot.get_file(photo.file_id)
+            
+            # Скачиваем фото
+            photo_bytes = await bot.download_file(file.file_path)
+            
+            # Конвертируем в base64
+            import base64
+            import io
+            
+            if isinstance(photo_bytes, io.BytesIO):
+                photo_data = photo_bytes.getvalue()
+            else:
+                photo_data = photo_bytes
+            
+            image_base64 = base64.b64encode(photo_data).decode('utf-8')
+            
+            # Отправляем на анализ
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    vision_api_url,
+                    json={
+                        "image_base64": image_base64,
+                        "media_type": "image/jpeg"
+                    },
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        image_description = result.get("description", "")[:300]
+                        logger.info(f"Image analyzed: {image_description[:50]}...")
+        except Exception as e:
+            logger.error(f"Error analyzing image: {e}")
+            image_description = None
     
     await save_chat_message(
         chat_id=message.chat.id,
@@ -1138,7 +1179,8 @@ async def collect_photos(message: Message):
         username=message.from_user.username or "",
         first_name=message.from_user.first_name or "Аноним",
         message_text=caption,
-        message_type="photo"
+        message_type="photo",
+        image_description=image_description
     )
 
 

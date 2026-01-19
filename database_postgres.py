@@ -47,6 +47,7 @@ async def init_db():
                 reply_to_first_name TEXT,
                 reply_to_username TEXT,
                 sticker_emoji TEXT,
+                image_description TEXT,
                 created_at BIGINT NOT NULL
             )
         """)
@@ -61,6 +62,14 @@ async def init_db():
         try:
             await conn.execute("""
                 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to_username TEXT
+            """)
+        except Exception:
+            pass  # Колонка уже существует
+        
+        # Миграция: добавляем колонку image_description для описаний фото
+        try:
+            await conn.execute("""
+                ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS image_description TEXT
             """)
         except Exception:
             pass  # Колонка уже существует
@@ -332,17 +341,18 @@ async def save_chat_message(
     reply_to_user_id: int = None,
     reply_to_first_name: str = None,
     reply_to_username: str = None,
-    sticker_emoji: str = None
+    sticker_emoji: str = None,
+    image_description: str = None
 ):
     """Сохранить сообщение чата для аналитики"""
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO chat_messages 
             (chat_id, user_id, username, first_name, message_text, message_type,
-             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, image_description, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         """, chat_id, user_id, username, first_name, message_text, message_type,
-             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, int(time.time()))
+             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, image_description, int(time.time()))
 
 
 async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]]:
@@ -413,9 +423,9 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         # Последние сообщения
         recent_messages = await conn.fetch("""
             SELECT first_name, username, message_text, message_type, sticker_emoji,
-                   reply_to_first_name, reply_to_username, created_at
+                   reply_to_first_name, reply_to_username, image_description, created_at
             FROM chat_messages 
-            WHERE chat_id = $1 AND created_at >= $2 AND message_type = 'text'
+            WHERE chat_id = $1 AND created_at >= $2 AND message_type IN ('text', 'photo')
             ORDER BY created_at DESC
             LIMIT 50
         """, chat_id, since_time)

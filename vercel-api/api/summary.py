@@ -90,6 +90,15 @@ SYSTEM_PROMPT = """<persona>
 - Это делает сводку интерактивной — люди видят упоминания
 </username_format>
 
+<photos_commentary>
+Если в данных есть описания фото — ОБЯЗАТЕЛЬНО прокомментируй их в своём стиле!
+Примеры:
+- "А @vasya кинул фотку шаурмы. Шаурма как шаурма, что тут комментировать. Жрать хочет, видимо."
+- "@masha скинула селфи с уточкиными губами. Венера в инстаграме, не иначе."
+- "Какой-то мем про кота — ну, классика, чё."
+Фото — это контент, его тоже нужно буллить!
+</photos_commentary>
+
 <narrative_structure>
 Строй повествование так:
 1. ВСТУПЛЕНИЕ: Садишься за карты, наливаешь, закуриваешь, ворчишь
@@ -172,16 +181,23 @@ def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> st
     
     # Выборка сообщений с контекстом
     messages_sample = ""
+    photos_sample = ""
     if stats.get("recent_messages"):
         for msg in stats["recent_messages"][-30:]:  # Больше сообщений для контекста
+            name = format_name_with_username(msg.get('first_name'), msg.get('username'))
+            reply_info = ""
+            if msg.get("reply_to_first_name"):
+                reply_to = format_name_with_username(msg.get('reply_to_first_name'), msg.get('reply_to_username'))
+                reply_info = f" [ответ на {reply_to}]"
+            
+            # Обычные текстовые сообщения
             if msg.get("message_text"):
-                name = format_name_with_username(msg.get('first_name'), msg.get('username'))
-                text = msg["message_text"][:150]  # Длиннее куски
-                reply_info = ""
-                if msg.get("reply_to_first_name"):
-                    reply_to = format_name_with_username(msg.get('reply_to_first_name'), msg.get('reply_to_username'))
-                    reply_info = f" [ответ на {reply_to}]"
+                text = msg["message_text"][:150]
                 messages_sample += f"[{name}]{reply_info}: {text}\n"
+            
+            # Фото с описанием
+            if msg.get("image_description"):
+                photos_sample += f"[{name}] отправил фото: {msg['image_description']}\n"
     
     return f"""<chat_data>
 <chat_name>{chat_title}</chat_name>
@@ -207,6 +223,10 @@ def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> st
 <message_samples>
 {messages_sample if messages_sample else "Пустота и тлен"}
 </message_samples>
+
+<photos_shared>
+{photos_sample if photos_sample else "Никто фоток не кидал"}
+</photos_shared>
 </chat_data>"""
 
 
