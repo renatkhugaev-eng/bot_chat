@@ -414,6 +414,19 @@ async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]
         return [dict(row) for row in rows]
 
 
+async def get_user_messages(chat_id: int, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+    """Получить последние N сообщений конкретного пользователя"""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT message_text, message_type, sticker_emoji, created_at
+            FROM chat_messages 
+            WHERE chat_id = $1 AND user_id = $2 AND message_text IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT $3
+        """, chat_id, user_id, limit)
+        return [dict(row) for row in rows]
+
+
 async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
     """Получить статистику чата за последние N часов"""
     since_time = int(time.time()) - (hours * 3600)

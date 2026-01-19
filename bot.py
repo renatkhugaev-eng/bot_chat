@@ -30,7 +30,8 @@ if USE_POSTGRES:
         get_top_players, is_in_jail, put_in_jail, get_all_active_players,
         add_to_treasury, get_treasury, log_event, add_achievement,
         save_chat_message, get_chat_statistics, get_player_achievements, close_db,
-        save_summary, get_previous_summaries, save_memory, get_memories
+        save_summary, get_previous_summaries, save_memory, get_memories,
+        get_user_messages
     )
 else:
     from database import (
@@ -1068,7 +1069,7 @@ async def cmd_describe_photo(message: Message):
 
 # ==================== СТИХИ-УНИЖЕНИЯ ====================
 
-@router.message(Command("poem", "stih", "стих"))
+@router.message(Command("poem", "stih", "стих", "роаст", "roast", "унизь", "ода", "поэма", "verses"))
 async def cmd_poem(message: Message):
     """Сгенерировать стих-унижение про человека в стиле русских классиков"""
     if message.chat.type == "private":
@@ -1081,10 +1082,12 @@ async def cmd_poem(message: Message):
     # Определяем цель
     target_user = None
     target_name = None
+    target_user_id = None
     
     if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
         target_name = target_user.first_name
+        target_user_id = target_user.id
     else:
         # Пробуем получить имя из текста команды
         parts = message.text.split(maxsplit=1)
@@ -1092,10 +1095,11 @@ async def cmd_poem(message: Message):
             target_name = parts[1].strip().replace("@", "")
         else:
             await message.answer(
-                "📜 *Как заказать стих:*\n\n"
+                "📜 *Как заказать стих-унижение:*\n\n"
                 "1️⃣ Ответь на сообщение: `/poem`\n"
                 "2️⃣ Или укажи имя: `/poem Вася`\n\n"
-                "Тётя Роза напишет стих в стиле Пушкина, Лермонтова, Маяковского, Есенина или Бродского! 🪶",
+                "🎭 Триггеры: /poem /стих /роаст /унизь /ода\n\n"
+                "Тётя Роза напишет ЖЁСТКИЙ стих в стиле классиков! 🪶🔥",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
@@ -1117,14 +1121,35 @@ async def cmd_poem(message: Message):
         return
     
     # Показываем что работаем
-    processing_msg = await message.answer(f"🪶 Тётя Роза берёт перо и вдохновляется... ✨")
+    processing_msg = await message.answer(f"🪶 Тётя Роза изучает досье на {target_name} и берёт перо... ✨")
     
     try:
-        # Собираем контекст (последние сообщения человека)
-        context = ""
+        # Собираем контекст — последние 100 сообщений человека
+        context_parts = []
+        
         if target_user:
-            # Можно добавить логику сбора сообщений из БД
-            context = f"Активный участник чата, ник: {target_user.username or 'нет'}"
+            context_parts.append(f"Ник: @{target_user.username}" if target_user.username else "Ник: нет")
+            
+            # Получаем последние сообщения из БД
+            if target_user_id and USE_POSTGRES:
+                try:
+                    user_messages = await get_user_messages(chat_id, target_user_id, limit=100)
+                    if user_messages:
+                        # Собираем тексты сообщений
+                        texts = [msg['message_text'] for msg in user_messages if msg.get('message_text')]
+                        if texts:
+                            context_parts.append(f"Количество сообщений в базе: {len(texts)}")
+                            # Берём самые интересные (длинные) сообщения для контекста
+                            interesting_texts = sorted(texts, key=len, reverse=True)[:20]
+                            context_parts.append("Примеры сообщений этого человека:")
+                            for i, text in enumerate(interesting_texts[:15], 1):
+                                # Обрезаем слишком длинные
+                                truncated = text[:150] + "..." if len(text) > 150 else text
+                                context_parts.append(f'{i}. "{truncated}"')
+                except Exception as e:
+                    logger.warning(f"Could not fetch user messages: {e}")
+        
+        context = "\n".join(context_parts) if context_parts else "Обычный участник чата"
         
         async with aiohttp.ClientSession() as session:
             async with session.post(
