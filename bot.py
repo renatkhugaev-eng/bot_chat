@@ -1163,7 +1163,8 @@ async def cmd_poem(message: Message):
         context = "\n".join(context_parts) if context_parts else "Обычный участник чата (сообщений нет)"
         
         # Логируем для отладки
-        logger.info(f"Poem context for {target_name}: {messages_found} messages found, context length: {len(context)} chars")
+        logger.info(f"Poem request: chat_id={chat_id}, target_user_id={target_user_id}, target_name={target_name}")
+        logger.info(f"Poem context: {messages_found} messages found, context length: {len(context)} chars")
         
         async with aiohttp.ClientSession() as session:
             async with session.post(
