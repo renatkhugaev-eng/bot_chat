@@ -11,6 +11,9 @@
     },
     "api/diagnosis.py": {
       "maxDuration": 60
+    },
+    "api/burn.py": {
+      "maxDuration": 60
     }
   }
 }
