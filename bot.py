@@ -3316,9 +3316,12 @@ VK_MEME_COMMUNITIES = {
     "cat": "Коты",
 }
 
+# Чат для автоматического сбора мемов (установи через /vk_auto)
+VK_AUTO_CHAT_ID = None
 
-async def fetch_vk_memes(community: str, count: int = 50) -> List[Dict]:
-    """Получить мемы из VK паблика"""
+
+async def fetch_vk_memes(community: str, count: int = 50, min_likes: int = 100) -> List[Dict]:
+    """Получить ПОПУЛЯРНЫЕ мемы из VK паблика (фильтр по лайкам)"""
     if not VK_API_TOKEN:
         return []
     
@@ -3326,8 +3329,8 @@ async def fetch_vk_memes(community: str, count: int = 50) -> List[Dict]:
     session = await get_http_session()
     
     try:
-        # Запрашиваем больше постов, т.к. не все содержат картинки
-        fetch_count = min(count * 3, 100)
+        # Запрашиваем много постов, чтобы отфильтровать по лайкам
+        fetch_count = 100  # Максимум VK API
         
         # Получаем посты со стены
         async with session.get(
@@ -3350,10 +3353,21 @@ async def fetch_vk_memes(community: str, count: int = 50) -> List[Dict]:
             items = data.get("response", {}).get("items", [])
             logger.info(f"VK returned {len(items)} posts from {community}")
             
+            # Собираем все посты с картинками и лайками
+            candidates = []
+            
             for item in items:
-                # Пропускаем репосты — они могут содержать аватарки
+                # Пропускаем репосты
                 if item.get("copy_history"):
                     continue
+                
+                # Получаем количество лайков
+                likes = item.get("likes", {}).get("count", 0)
+                reposts = item.get("reposts", {}).get("count", 0)
+                views = item.get("views", {}).get("count", 0)
+                
+                # Рассчитываем "популярность" (лайки + репосты*3)
+                popularity = likes + (reposts * 3)
                 
                 attachments = item.get("attachments", [])
                 
@@ -3365,55 +3379,62 @@ async def fetch_vk_memes(community: str, count: int = 50) -> List[Dict]:
                         if not sizes:
                             continue
                         
-                        # Берём самое большое фото
                         best = max(sizes, key=lambda x: x.get("width", 0) * x.get("height", 0))
                         width = best.get("width", 0)
                         height = best.get("height", 0)
                         
-                        # Фильтруем: 
-                        # - минимум 400px по ширине (не аватарки)
-                        # - не слишком узкие (не баннеры)
+                        # Фильтр по размеру
                         if width < 400 or height < 300:
                             continue
-                        
-                        # Пропускаем квадратные маленькие (скорее всего аватарки)
                         if width == height and width < 500:
                             continue
                         
-                        memes.append({
+                        candidates.append({
                             "type": "photo",
                             "url": best["url"],
                             "text": item.get("text", "")[:200],
                             "width": width,
-                            "height": height
+                            "height": height,
+                            "likes": likes,
+                            "popularity": popularity
                         })
+                        break  # Одно фото с поста
                         
                     elif att["type"] == "doc":
                         doc = att["doc"]
-                        # GIF файлы
                         if doc.get("ext") == "gif":
-                            memes.append({
+                            candidates.append({
                                 "type": "animation",
                                 "url": doc["url"],
-                                "text": item.get("text", "")[:200]
+                                "text": item.get("text", "")[:200],
+                                "likes": likes,
+                                "popularity": popularity
                             })
-                
-                # Достаточно мемов
-                if len(memes) >= count:
-                    break
+                            break
+            
+            # Сортируем по популярности (больше лайков = лучше)
+            candidates.sort(key=lambda x: x["popularity"], reverse=True)
+            
+            # Фильтруем по минимальному количеству лайков
+            memes = [m for m in candidates if m["likes"] >= min_likes]
+            
+            # Если мало постов с нужным количеством лайков — берём топ по популярности
+            if len(memes) < count:
+                memes = candidates[:count * 2]
+            
+            logger.info(f"Found {len(candidates)} candidates, {len(memes)} with {min_likes}+ likes")
                     
     except Exception as e:
         logger.error(f"Error fetching VK memes: {e}")
     
-    logger.info(f"Filtered {len(memes)} valid memes from {community}")
     return memes[:count]
 
 
-async def import_vk_memes_to_chat(chat_id: int, community: str, count: int = 30) -> Dict[str, int]:
-    """Импортировать мемы из VK в коллекцию чата"""
+async def import_vk_memes_to_chat(chat_id: int, community: str, count: int = 30, min_likes: int = 100) -> Dict[str, int]:
+    """Импортировать ПОПУЛЯРНЫЕ мемы из VK в коллекцию чата"""
     stats = {"imported": 0, "errors": 0, "skipped": 0, "already_exists": 0}
     
-    memes = await fetch_vk_memes(community, count * 2)  # Берём больше, т.к. часть пропустим
+    memes = await fetch_vk_memes(community, count * 2, min_likes)  # Берём больше, т.к. часть пропустим
     if not memes:
         return stats
     
@@ -3507,6 +3528,209 @@ async def import_vk_memes_to_chat(chat_id: int, community: str, count: int = 30)
     return stats
 
 
+async def fetch_trending_vk_memes(min_likes: int = 500, count: int = 20) -> List[Dict]:
+    """Получить трендовые мемы со всего VK через поиск"""
+    if not VK_API_TOKEN:
+        return []
+    
+    memes = []
+    session = await get_http_session()
+    
+    # Поисковые запросы для мемов
+    search_queries = ["мем", "смешно", "ржака", "прикол", "угар", "юмор"]
+    
+    try:
+        for query in search_queries:
+            if len(memes) >= count:
+                break
+                
+            async with session.get(
+                "https://api.vk.com/method/newsfeed.search",
+                params={
+                    "q": query,
+                    "count": 50,
+                    "extended": 0,
+                    "access_token": VK_API_TOKEN,
+                    "v": VK_API_VERSION
+                }
+            ) as response:
+                data = await response.json()
+                
+                if "error" in data:
+                    logger.warning(f"VK search error: {data['error']}")
+                    continue
+                
+                items = data.get("response", {}).get("items", [])
+                
+                for item in items:
+                    if len(memes) >= count:
+                        break
+                    
+                    likes = item.get("likes", {}).get("count", 0)
+                    if likes < min_likes:
+                        continue
+                    
+                    attachments = item.get("attachments", [])
+                    for att in attachments:
+                        if att["type"] == "photo":
+                            photo = att["photo"]
+                            sizes = photo.get("sizes", [])
+                            if not sizes:
+                                continue
+                            
+                            best = max(sizes, key=lambda x: x.get("width", 0) * x.get("height", 0))
+                            width = best.get("width", 0)
+                            height = best.get("height", 0)
+                            
+                            if width < 400 or height < 300:
+                                continue
+                            
+                            memes.append({
+                                "type": "photo",
+                                "url": best["url"],
+                                "text": item.get("text", "")[:100],
+                                "likes": likes
+                            })
+                            break
+            
+            await asyncio.sleep(0.5)  # Задержка между запросами
+                
+    except Exception as e:
+        logger.error(f"Error fetching trending memes: {e}")
+    
+    # Сортируем по лайкам
+    memes.sort(key=lambda x: x["likes"], reverse=True)
+    return memes[:count]
+
+
+async def auto_fetch_vk_memes():
+    """Автоматический сбор популярных мемов (вызывается по расписанию)"""
+    global VK_AUTO_CHAT_ID
+    
+    if not VK_API_TOKEN or not VK_AUTO_CHAT_ID:
+        return
+    
+    logger.info(f"🤖 Автосбор мемов для чата {VK_AUTO_CHAT_ID}")
+    
+    try:
+        # Собираем из топовых пабликов
+        total_imported = 0
+        
+        for community in ["mdk", "borsch", "mudakoff", "oldlentach"]:
+            stats = await import_vk_memes_to_chat(VK_AUTO_CHAT_ID, community, 5, 500)
+            total_imported += stats.get("imported", 0)
+            await asyncio.sleep(2)
+        
+        # Собираем трендовые
+        trending = await fetch_trending_vk_memes(min_likes=1000, count=10)
+        if trending:
+            for meme in trending[:5]:
+                try:
+                    session = await get_http_session()
+                    async with session.get(meme["url"]) as response:
+                        if response.status != 200:
+                            continue
+                        file_data = await response.read()
+                    
+                    from aiogram.types import BufferedInputFile
+                    input_file = BufferedInputFile(file_data, filename="meme.jpg")
+                    sent = await bot.send_photo(VK_AUTO_CHAT_ID, input_file)
+                    file_id = sent.photo[-1].file_id
+                    file_unique_id = sent.photo[-1].file_unique_id
+                    await sent.delete()
+                    
+                    url_hash = meme["url"].split("?")[0][-50:]
+                    await save_media(
+                        chat_id=VK_AUTO_CHAT_ID,
+                        user_id=0,
+                        file_id=file_id,
+                        file_type="photo",
+                        file_unique_id=file_unique_id,
+                        description="VK: trending",
+                        caption=url_hash
+                    )
+                    total_imported += 1
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.error(f"Error importing trending meme: {e}")
+        
+        logger.info(f"✅ Автосбор завершён: {total_imported} мемов")
+        
+    except Exception as e:
+        logger.error(f"Auto-fetch error: {e}")
+
+
+@router.message(Command("vk_auto", "автомемы"))
+async def cmd_vk_auto(message: Message):
+    """Настроить автоматический сбор мемов"""
+    global VK_AUTO_CHAT_ID
+    
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Только для админов!")
+        return
+    
+    if not VK_API_TOKEN:
+        await message.answer("❌ VK API токен не настроен!")
+        return
+    
+    if message.chat.type == "private":
+        await message.answer(
+            "❌ Используй эту команду в групповом чате!\n\n"
+            "Бот будет автоматически собирать популярные мемы в этот чат."
+        )
+        return
+    
+    VK_AUTO_CHAT_ID = message.chat.id
+    
+    # Добавляем задачу в планировщик (каждые 6 часов)
+    job_id = "vk_auto_memes"
+    
+    # Удаляем старую задачу если есть
+    existing = scheduler.get_job(job_id)
+    if existing:
+        scheduler.remove_job(job_id)
+    
+    scheduler.add_job(
+        auto_fetch_vk_memes,
+        'interval',
+        hours=6,
+        id=job_id,
+        replace_existing=True
+    )
+    
+    await message.answer(
+        f"✅ *Автосбор мемов включён!*\n\n"
+        f"📍 Чат: {message.chat.title or 'этот чат'}\n"
+        f"⏰ Расписание: каждые 6 часов\n"
+        f"📥 Источники: MDK, Борщ, Мудакофф, Лентач + тренды\n"
+        f"🔥 Фильтр: 500+ лайков\n\n"
+        f"Для ручного запуска: `/vk_now`",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@router.message(Command("vk_now", "мемы_сейчас"))
+async def cmd_vk_now(message: Message):
+    """Запустить сбор мемов прямо сейчас"""
+    global VK_AUTO_CHAT_ID
+    
+    if not is_admin(message.from_user.id):
+        return
+    
+    if message.chat.type != "private":
+        VK_AUTO_CHAT_ID = message.chat.id
+    
+    if not VK_AUTO_CHAT_ID:
+        await message.answer("❌ Сначала укажи чат командой /vk_auto в групповом чате!")
+        return
+    
+    processing = await message.answer("🔄 Собираю популярные мемы со всего VK...")
+    
+    await auto_fetch_vk_memes()
+    
+    await processing.edit_text("✅ Сбор мемов завершён! Проверь /мемы")
+
+
 @router.message(Command("vk_import", "vk", "импорт_вк"))
 async def cmd_vk_import(message: Message):
     """Импортировать мемы из VK паблика"""
@@ -3528,13 +3752,15 @@ async def cmd_vk_import(message: Message):
     if len(args) < 2:
         communities_list = "\n".join([f"• `{k}` — {v}" for k, v in VK_MEME_COMMUNITIES.items()])
         await message.answer(
-            f"📥 *Импорт мемов из VK*\n\n"
-            f"Использование: `/vk_import <паблик> [кол-во]`\n\n"
+            f"📥 *Импорт ПОПУЛЯРНЫХ мемов из VK*\n\n"
+            f"Использование: `/vk_import <паблик> [кол-во] [мин_лайков]`\n\n"
             f"Примеры:\n"
-            f"• `/vk_import mdk` — 30 мемов из MDK\n"
-            f"• `/vk_import borsch 50` — 50 мемов из Борща\n\n"
+            f"• `/vk_import mdk` — топ мемов из MDK\n"
+            f"• `/vk_import borsch 30` — 30 мемов из Борща\n"
+            f"• `/vk_import mdk 20 500` — мемы с 500+ лайками\n\n"
             f"*Доступные паблики:*\n{communities_list}\n\n"
-            f"Или укажи любой домен паблика!",
+            f"Или укажи любой домен паблика!\n"
+            f"_По умолчанию: 100+ лайков, сортировка по популярности_",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -3542,6 +3768,7 @@ async def cmd_vk_import(message: Message):
     community = args[1].lower().replace("@", "").replace("https://vk.com/", "")
     count = int(args[2]) if len(args) > 2 and args[2].isdigit() else 30
     count = min(count, 100)  # Максимум 100
+    min_likes = int(args[3]) if len(args) > 3 and args[3].isdigit() else 100
     
     # Определяем chat_id куда импортировать
     if message.chat.type == "private":
@@ -3555,13 +3782,14 @@ async def cmd_vk_import(message: Message):
     community_name = VK_MEME_COMMUNITIES.get(community, community)
     
     processing = await message.answer(
-        f"🔄 Импортирую мемы из VK/{community_name}...\n"
-        f"Количество: до {count} шт.\n\n"
+        f"🔄 Импортирую ПОПУЛЯРНЫЕ мемы из VK/{community_name}...\n"
+        f"Количество: до {count} шт.\n"
+        f"Фильтр: {min_likes}+ лайков\n\n"
         f"⏳ Это может занять несколько минут..."
     )
     
     try:
-        stats = await import_vk_memes_to_chat(chat_id, community, count)
+        stats = await import_vk_memes_to_chat(chat_id, community, count, min_likes)
         
         await processing.edit_text(
             f"✅ *Импорт завершён!*\n\n"
