@@ -60,7 +60,8 @@ if USE_POSTGRES:
         save_summary, get_previous_summaries, save_memory, get_memories,
         get_user_messages, full_cleanup, get_database_stats,
         get_all_chats_stats, get_chat_details, get_top_users_global, search_user,
-        health_check, save_chat_info
+        health_check, save_chat_info,
+        save_media, get_random_media, get_media_stats, increment_media_usage
     )
 else:
     from database import (
@@ -81,6 +82,10 @@ else:
     async def search_user(query): return []
     async def health_check(): return False
     async def save_chat_info(chat_id, title=None, username=None, chat_type=None): pass
+    async def save_media(chat_id, user_id, file_id, file_type, file_unique_id=None, description=None, caption=None): return False
+    async def get_random_media(chat_id, file_type=None): return None
+    async def get_media_stats(chat_id): return {'total': 0}
+    async def increment_media_usage(media_id): pass
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
     calculate_crime_success, calculate_crime_reward, get_random_crime_message,
@@ -915,11 +920,13 @@ async def cmd_help(message: Message):
 /бухнуть — Бухнуть и слить секреты 🍻
 /пососи — Философское напутствие 🍭
 /проветрить — Открыть форточку в чате 🪟
+/мем — Рандомный мем из коллекции 🎭
+/мемы — Статистика мемов 📊
 /pic — Найти картинку 🖼
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-_Ответь на сообщение или укажи @username_
+_Бот запоминает все мемы и иногда выдаёт их сам!_
 """
     await message.answer(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -2307,9 +2314,11 @@ async def collect_messages_and_exp(message: Message):
 
 @router.message(F.sticker)
 async def collect_stickers(message: Message):
-    """Сбор стикеров"""
+    """Сбор стикеров + сохранение в коллекцию мемов"""
     if message.chat.type == "private":
         return
+    
+    sticker = message.sticker
     
     await save_chat_message(
         chat_id=message.chat.id,
@@ -2318,8 +2327,19 @@ async def collect_stickers(message: Message):
         first_name=message.from_user.first_name or "Аноним",
         message_text="",
         message_type="sticker",
-        sticker_emoji=message.sticker.emoji if message.sticker else "🎭"
+        sticker_emoji=sticker.emoji if sticker else "🎭"
     )
+    
+    # Сохраняем стикер в коллекцию (если это не анимированный/видео стикер)
+    if sticker and not sticker.is_video and not sticker.is_animated:
+        await save_media(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            file_id=sticker.file_id,
+            file_type="sticker",
+            file_unique_id=sticker.file_unique_id,
+            description=sticker.emoji
+        )
 
 
 @router.message(F.photo)
@@ -2380,6 +2400,56 @@ async def collect_photos(message: Message):
         message_type="photo",
         image_description=image_description
     )
+    
+    # Сохраняем фото в коллекцию мемов
+    photo = message.photo[-1]  # Самое большое разрешение
+    await save_media(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        file_id=photo.file_id,
+        file_type="photo",
+        file_unique_id=photo.file_unique_id,
+        description=image_description,
+        caption=caption
+    )
+    
+    # Шанс 2% что Тётя Роза пришлёт случайный мем из коллекции
+    if random.random() < 0.02:
+        await maybe_send_random_meme(message.chat.id, trigger="photo")
+
+
+@router.message(F.animation)
+async def collect_animations(message: Message):
+    """Сбор GIF/анимаций + сохранение в коллекцию"""
+    if message.chat.type == "private":
+        return
+    
+    animation = message.animation
+    caption = message.caption[:200] if message.caption else ""
+    
+    await save_chat_message(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        username=message.from_user.username or "",
+        first_name=message.from_user.first_name or "Аноним",
+        message_text=caption,
+        message_type="animation"
+    )
+    
+    # Сохраняем GIF в коллекцию
+    if animation:
+        await save_media(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            file_id=animation.file_id,
+            file_type="animation",
+            file_unique_id=animation.file_unique_id,
+            caption=caption
+        )
+    
+    # Шанс 3% что Тётя Роза пришлёт мем в ответ
+    if random.random() < 0.03:
+        await maybe_send_random_meme(message.chat.id, trigger="animation")
 
 
 @router.message(F.voice | F.video_note)
@@ -2398,6 +2468,157 @@ async def collect_voice(message: Message):
         message_text="",
         message_type=msg_type
     )
+
+
+# ==================== СИСТЕМА МЕМОВ ====================
+
+# Комментарии Тёти Розы к мемам
+MEME_COMMENTS = [
+    "О, вспомнила! Вот это было, блять... 🤔",
+    "А помните эту хуйню? Я — да.",
+    "Нашла в архивах. Классика жанра.",
+    "Это вы скидывали. Я сохранила. Теперь страдайте.",
+    "Из коллекции 'Лучшее'. Ну как лучшее... что было.",
+    "Держите, чтоб не расслаблялись.",
+    "Вот что бывает, когда форточку открываешь. Мемы залетают.",
+    "Рандом выбрал именно это. Судьба.",
+    "Тётя Роза делится культурой.",
+    "Из личной коллекции. Цените.",
+    "Это @кто-то кидал. Теперь все увидят снова.",
+    "Мем дня. Или ночи. Хуй знает который час.",
+    "Ваши мемы — моя боль. Вот.",
+    "Архив открыт. Берите что дают.",
+    "Культурная программа от Тёти Розы.",
+]
+
+
+async def maybe_send_random_meme(chat_id: int, trigger: str = "random"):
+    """Отправить случайный мем из коллекции (если есть)"""
+    if not USE_POSTGRES:
+        return
+    
+    try:
+        media = await get_random_media(chat_id)
+        if not media:
+            return
+        
+        file_id = media['file_id']
+        file_type = media['file_type']
+        media_id = media['id']
+        
+        comment = random.choice(MEME_COMMENTS)
+        
+        # Отправляем в зависимости от типа
+        if file_type == "photo":
+            await bot.send_photo(chat_id, file_id, caption=comment)
+        elif file_type == "sticker":
+            await bot.send_sticker(chat_id, file_id)
+            await bot.send_message(chat_id, comment)
+        elif file_type == "animation":
+            await bot.send_animation(chat_id, file_id, caption=comment)
+        
+        # Увеличиваем счётчик использования
+        await increment_media_usage(media_id)
+        logger.info(f"Sent random meme (type={file_type}) to chat {chat_id}, trigger={trigger}")
+        
+    except Exception as e:
+        logger.warning(f"Could not send random meme: {e}")
+
+
+@router.message(Command("meme", "мем", "мемас", "рандом"))
+async def cmd_random_meme(message: Message):
+    """Получить случайный мем из коллекции чата"""
+    if message.chat.type == "private":
+        await message.answer("❌ Мемы работают только в групповых чатах!")
+        return
+    
+    chat_id = message.chat.id
+    
+    # Кулдаун 10 секунд
+    can_do, remaining = check_cooldown(message.from_user.id, chat_id, "meme", 10)
+    if not can_do:
+        await message.answer(f"⏰ Подожди {remaining} сек, мемов не напасёшься!")
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Коллекция мемов недоступна")
+        return
+    
+    # Получаем статистику
+    stats = await get_media_stats(chat_id)
+    
+    if stats['total'] == 0:
+        await message.answer(
+            "📭 Коллекция мемов пуста!\n\n"
+            "Кидайте картинки, стикеры и гифки — Тётя Роза всё запомнит и будет выдавать рандомно."
+        )
+        return
+    
+    # Определяем тип (если указан)
+    args = message.text.split()
+    file_type = None
+    if len(args) > 1:
+        type_map = {
+            "фото": "photo", "photo": "photo", "картинка": "photo",
+            "стикер": "sticker", "sticker": "sticker",
+            "гиф": "animation", "gif": "animation", "гифка": "animation"
+        }
+        file_type = type_map.get(args[1].lower())
+    
+    media = await get_random_media(chat_id, file_type)
+    
+    if not media:
+        await message.answer("📭 Мемов такого типа нет. Кидайте больше!")
+        return
+    
+    file_id = media['file_id']
+    media_type = media['file_type']
+    media_id = media['id']
+    
+    comment = random.choice(MEME_COMMENTS)
+    
+    try:
+        if media_type == "photo":
+            await message.answer_photo(file_id, caption=comment)
+        elif media_type == "sticker":
+            await message.answer_sticker(file_id)
+            await message.answer(comment)
+        elif media_type == "animation":
+            await message.answer_animation(file_id, caption=comment)
+        
+        await increment_media_usage(media_id)
+        metrics.track_command("meme")
+        
+    except Exception as e:
+        logger.error(f"Error sending meme: {e}")
+        await message.answer("❌ Мем сломался. Попробуй ещё раз.")
+
+
+@router.message(Command("memestats", "мемы"))
+async def cmd_meme_stats(message: Message):
+    """Статистика коллекции мемов"""
+    if message.chat.type == "private":
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Коллекция мемов недоступна")
+        return
+    
+    stats = await get_media_stats(message.chat.id)
+    
+    text = f"""🎭 КОЛЛЕКЦИЯ МЕМОВ ЧАТА
+
+📊 Всего: {stats.get('total', 0)} медиа
+
+По типам:
+🖼 Фото: {stats.get('photo', 0)}
+😀 Стикеры: {stats.get('sticker', 0)}
+🎬 Гифки: {stats.get('animation', 0)}
+
+💡 Кидайте мемы — бот их запоминает и иногда выдаёт случайно!
+Команда /мем — получить рандомный мем
+"""
+    await message.answer(text)
 
 
 # ==================== ОЧИСТКА И МОНИТОРИНГ ====================

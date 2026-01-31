@@ -303,6 +303,31 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_achievements_user 
             ON achievements(user_id)
         """)
+        
+        # Таблица медиа (мемы, картинки, стикеры, гифки)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_media (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                file_id TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                file_unique_id TEXT,
+                description TEXT,
+                caption TEXT,
+                usage_count INTEGER DEFAULT 0,
+                is_approved INTEGER DEFAULT 1,
+                created_at BIGINT NOT NULL,
+                last_used_at BIGINT,
+                UNIQUE(chat_id, file_unique_id)
+            )
+        """)
+        
+        # Индекс для быстрого поиска медиа по чату
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_media_chat 
+            ON chat_media(chat_id, file_type, created_at DESC)
+        """)
     
     logger.info("✅ PostgreSQL database initialized!")
 
@@ -1034,3 +1059,89 @@ async def cleanup_old_events(days: int = 14) -> int:
         """, cutoff_time)
         
         return count
+
+
+# ==================== СИСТЕМА МЕМОВ ====================
+
+async def save_media(
+    chat_id: int,
+    user_id: int,
+    file_id: str,
+    file_type: str,
+    file_unique_id: str = None,
+    description: str = None,
+    caption: str = None
+) -> bool:
+    """Сохранить медиа (мем, стикер, гифку) в коллекцию чата"""
+    async with (await get_pool()).acquire() as conn:
+        try:
+            await conn.execute("""
+                INSERT INTO chat_media 
+                (chat_id, user_id, file_id, file_type, file_unique_id, description, caption, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (chat_id, file_unique_id) DO UPDATE SET
+                    usage_count = chat_media.usage_count  -- Не меняем если уже есть
+            """, chat_id, user_id, file_id, file_type, file_unique_id, description, caption, int(time.time()))
+            return True
+        except Exception as e:
+            logger.warning(f"Could not save media: {e}")
+            return False
+
+
+async def get_random_media(chat_id: int, file_type: str = None) -> Optional[Dict[str, Any]]:
+    """Получить случайное медиа из коллекции чата"""
+    async with (await get_pool()).acquire() as conn:
+        if file_type:
+            row = await conn.fetchrow("""
+                SELECT * FROM chat_media 
+                WHERE chat_id = $1 AND file_type = $2 AND is_approved = 1
+                ORDER BY RANDOM()
+                LIMIT 1
+            """, chat_id, file_type)
+        else:
+            row = await conn.fetchrow("""
+                SELECT * FROM chat_media 
+                WHERE chat_id = $1 AND is_approved = 1
+                ORDER BY RANDOM()
+                LIMIT 1
+            """, chat_id)
+        
+        return dict(row) if row else None
+
+
+async def get_media_stats(chat_id: int) -> Dict[str, int]:
+    """Получить статистику медиа в чате"""
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT file_type, COUNT(*) as count
+            FROM chat_media
+            WHERE chat_id = $1 AND is_approved = 1
+            GROUP BY file_type
+        """, chat_id)
+        
+        stats = {row['file_type']: row['count'] for row in rows}
+        stats['total'] = sum(stats.values())
+        return stats
+
+
+async def increment_media_usage(media_id: int):
+    """Увеличить счётчик использования медиа"""
+    async with (await get_pool()).acquire() as conn:
+        await conn.execute("""
+            UPDATE chat_media 
+            SET usage_count = usage_count + 1, last_used_at = $2
+            WHERE id = $1
+        """, media_id, int(time.time()))
+
+
+async def get_top_media(chat_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    """Получить самые используемые медиа"""
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM chat_media
+            WHERE chat_id = $1 AND is_approved = 1
+            ORDER BY usage_count DESC, created_at DESC
+            LIMIT $2
+        """, chat_id, limit)
+        
+        return [dict(row) for row in rows]
