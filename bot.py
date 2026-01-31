@@ -38,7 +38,9 @@ else:
         init_db, get_player, create_player, set_player_class, update_player_stats,
         get_top_players, is_in_jail, put_in_jail, get_all_active_players,
         add_to_treasury, get_treasury, log_event, add_achievement,
-        save_chat_message, get_chat_statistics, get_player_achievements
+        save_chat_message, get_chat_statistics, get_player_achievements,
+        save_summary, get_previous_summaries, save_memory, get_memories,
+        get_user_messages
     )
     close_db = None
 from game_utils import (
@@ -74,7 +76,20 @@ def check_cooldown(user_id: int, chat_id: int, action: str, cooldown_seconds: in
             return False, int(remaining)
     
     cooldowns[key] = current_time + cooldown_seconds
+    
+    # Очистка старых записей (раз в 100 проверок)
+    if len(cooldowns) > 1000:
+        cleanup_cooldowns()
+    
     return True, 0
+
+
+def cleanup_cooldowns():
+    """Удалить истёкшие кулдауны"""
+    current_time = time.time()
+    expired_keys = [k for k, v in cooldowns.items() if v < current_time]
+    for key in expired_keys:
+        del cooldowns[key]
 
 
 # ==================== КОМАНДЫ ====================
@@ -956,7 +971,6 @@ async def cmd_take(message: Message):
     await update_player_stats(user_id, chat_id, money=f"+{share}")
     
     # Уменьшаем общак
-    from database import add_to_treasury
     await add_to_treasury(chat_id, -share)
     
     await message.answer(
@@ -1183,7 +1197,7 @@ async def cmd_poem(message: Message):
 
 # ==================== ДИАГНОЗ ОТ ТЁТИ РОЗЫ ====================
 
-@router.message(Command("diagnosis", "diagnoz", "диагноз", "диагноз", "болезнь", "псих"))
+@router.message(Command("diagnosis", "diagnoz", "диагноз", "болезнь", "псих"))
 async def cmd_diagnosis(message: Message):
     """Поставить диагноз человеку на основе его сообщений"""
     if message.chat.type == "private":

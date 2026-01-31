@@ -59,6 +59,12 @@ async def init_db():
             ON chat_messages(chat_id, created_at)
         """)
         
+        # Индекс для поиска сообщений пользователя
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_user 
+            ON chat_messages(chat_id, user_id, created_at DESC)
+        """)
+        
         # Миграция: добавляем колонку reply_to_username если её нет
         try:
             await conn.execute("""

@@ -20,7 +20,9 @@ async def init_db():
                 message_type TEXT DEFAULT 'text',
                 reply_to_user_id INTEGER,
                 reply_to_first_name TEXT,
+                reply_to_username TEXT,
                 sticker_emoji TEXT,
+                image_description TEXT,
                 created_at INTEGER NOT NULL
             )
         """)
@@ -311,11 +313,13 @@ async def save_chat_message(
         await db.execute("""
             INSERT INTO chat_messages 
             (chat_id, user_id, username, first_name, message_text, message_type,
-             reply_to_user_id, reply_to_first_name, sticker_emoji, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, 
+             image_description, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             chat_id, user_id, username, first_name, message_text, message_type,
-            reply_to_user_id, reply_to_first_name, sticker_emoji, int(time.time())
+            reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji,
+            image_description, int(time.time())
         ))
         await db.commit()
 
@@ -423,3 +427,58 @@ async def cleanup_old_messages(days: int = 7):
             DELETE FROM chat_messages WHERE created_at < ?
         """, (cutoff_time,))
         await db.commit()
+
+
+async def get_user_messages(chat_id: int, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+    """Получить последние N сообщений конкретного пользователя"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT message_text, message_type, sticker_emoji, created_at
+            FROM chat_messages 
+            WHERE chat_id = ? AND user_id = ? AND message_text IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (chat_id, user_id, limit)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+# ==================== СИСТЕМА ПАМЯТИ (ЗАГЛУШКИ ДЛЯ SQLITE) ====================
+
+async def save_summary(
+    chat_id: int,
+    summary_text: str,
+    key_facts: str = None,
+    top_talker_username: str = None,
+    top_talker_name: str = None,
+    top_talker_count: int = None,
+    drama_pairs: str = None,
+    memorable_quotes: str = None
+):
+    """Сохранить сводку в память (заглушка для SQLite)"""
+    pass  # В SQLite версии не сохраняем
+
+
+async def get_previous_summaries(chat_id: int, limit: int = 3) -> List[Dict[str, Any]]:
+    """Получить предыдущие сводки (заглушка для SQLite)"""
+    return []  # В SQLite версии память не работает
+
+
+async def save_memory(
+    chat_id: int,
+    user_id: int,
+    username: str,
+    first_name: str,
+    memory_type: str,
+    memory_text: str,
+    relevance_score: int = 5,
+    expires_days: int = 30
+):
+    """Сохранить воспоминание (заглушка для SQLite)"""
+    pass  # В SQLite версии не сохраняем
+
+
+async def get_memories(chat_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+    """Получить воспоминания (заглушка для SQLite)"""
+    return []  # В SQLite версии память не работает
