@@ -1850,7 +1850,8 @@ async def cmd_ventilate(message: Message):
     # Получаем последние сообщения жертвы для определения пола
     try:
         if USE_POSTGRES and victim_id:
-            messages = await get_user_messages(chat_id, victim_id, limit=10)
+            # Берём больше сообщений для точного определения пола по глаголам
+            messages = await get_user_messages(chat_id, victim_id, limit=30)
             victim_messages = [m.get('text', '') for m in messages if m.get('text')]
     except Exception as e:
         logger.warning(f"Could not get victim messages: {e}")
