@@ -1662,6 +1662,115 @@ def make_user_mention(user_id: int, name: str, username: str = None) -> str:
     return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
 
 
+def decline_russian_name(name: str, gender: str = "мужской") -> dict:
+    """
+    Склонение русских имён по падежам.
+    Возвращает словарь с формами: nom, gen, dat, acc, ins, pre
+    """
+    name = name.strip()
+    if not name:
+        return {case: name for case in ['nom', 'gen', 'dat', 'acc', 'ins', 'pre']}
+    
+    # Определяем тип окончания
+    name_lower = name.lower()
+    
+    # Неизменяемые имена (иностранные)
+    unchangeable = ['алекс', 'макс', 'крис', 'ким', 'ли', 'джон', 'том', 'бен', 'сэм', 'дэн']
+    if name_lower in unchangeable or len(name) <= 2:
+        return {case: name for case in ['nom', 'gen', 'dat', 'acc', 'ins', 'pre']}
+    
+    base = name[:-1] if len(name) > 1 else name
+    last = name[-1].lower()
+    last2 = name[-2:].lower() if len(name) >= 2 else ""
+    
+    result = {'nom': name}
+    
+    # Женские имена на -а (Маша, Аня, Лена)
+    if last == 'а' and gender == "женский":
+        result['gen'] = base + 'ы' if last2 not in ['ка', 'га', 'ха', 'ша', 'ча', 'ща', 'жа'] else base + 'и'
+        result['dat'] = base + 'е'
+        result['acc'] = base + 'у'
+        result['ins'] = base + 'ой'
+        result['pre'] = base + 'е'
+        
+    # Женские имена на -я (Юля, Настя, Мария)
+    elif last == 'я' and gender == "женский":
+        if last2 == 'ия':  # Мария, София
+            base2 = name[:-2]
+            result['gen'] = base2 + 'ии'
+            result['dat'] = base2 + 'ии'
+            result['acc'] = base2 + 'ию'
+            result['ins'] = base2 + 'ией'
+            result['pre'] = base2 + 'ии'
+        else:  # Юля, Настя
+            result['gen'] = base + 'и'
+            result['dat'] = base + 'е'
+            result['acc'] = base + 'ю'
+            result['ins'] = base + 'ей'
+            result['pre'] = base + 'е'
+            
+    # Мужские имена на -а/-я (Никита, Илья, Саша)
+    elif last in ['а', 'я'] and gender == "мужской":
+        if last == 'а':
+            result['gen'] = base + 'ы' if last2 not in ['ка', 'га', 'ха', 'ша', 'ча'] else base + 'и'
+            result['dat'] = base + 'е'
+            result['acc'] = base + 'у'
+            result['ins'] = base + 'ой'
+            result['pre'] = base + 'е'
+        else:  # -я (Илья)
+            result['gen'] = base + 'и'
+            result['dat'] = base + 'е'
+            result['acc'] = base + 'ю'
+            result['ins'] = base + 'ёй'
+            result['pre'] = base + 'е'
+            
+    # Мужские имена на -й (Сергей, Алексей, Андрей, Дмитрий)
+    elif last == 'й':
+        if last2 == 'ий':  # Дмитрий, Василий
+            base2 = name[:-2]
+            result['gen'] = base2 + 'ия'
+            result['dat'] = base2 + 'ию'
+            result['acc'] = base2 + 'ия'
+            result['ins'] = base2 + 'ием'
+            result['pre'] = base2 + 'ии'
+        else:  # Сергей, Алексей
+            result['gen'] = base + 'я'
+            result['dat'] = base + 'ю'
+            result['acc'] = base + 'я'
+            result['ins'] = base + 'ем'
+            result['pre'] = base + 'е'
+            
+    # Мужские имена на -ь (Игорь)
+    elif last == 'ь' and gender == "мужской":
+        result['gen'] = base + 'я'
+        result['dat'] = base + 'ю'
+        result['acc'] = base + 'я'
+        result['ins'] = base + 'ем'
+        result['pre'] = base + 'е'
+        
+    # Женские имена на -ь (Любовь)
+    elif last == 'ь' and gender == "женский":
+        result['gen'] = base + 'и'
+        result['dat'] = base + 'и'
+        result['acc'] = name  # Любовь
+        result['ins'] = base + 'ью'
+        result['pre'] = base + 'и'
+        
+    # Мужские имена на согласную (Иван, Пётр, Олег, Максим)
+    elif last not in 'аеёиоуыэюя':
+        result['gen'] = name + 'а'
+        result['dat'] = name + 'у'
+        result['acc'] = name + 'а'
+        result['ins'] = name + 'ом'
+        result['pre'] = name + 'е'
+        
+    # Для остальных — без изменений
+    else:
+        result = {case: name for case in ['nom', 'gen', 'dat', 'acc', 'ins', 'pre']}
+    
+    return result
+
+
 @router.message(Command("ventilate", "проветрить", "форточка", "свежесть"))
 async def cmd_ventilate(message: Message):
     """Проветрить чат — абсурдное событие с рандомным участником"""
@@ -1688,6 +1797,7 @@ async def cmd_ventilate(message: Message):
     victim_name = None
     victim_username = None
     victim_id = None
+    victim_messages = []
     
     if message.reply_to_message and message.reply_to_message.from_user:
         # Если ответ на сообщение — жертва тот, кому отвечают
@@ -1717,8 +1827,44 @@ async def cmd_ventilate(message: Message):
         victim_username = message.from_user.username
         victim_id = message.from_user.id
     
-    # Создаём кликабельное упоминание
-    victim_mention = make_user_mention(victim_id, victim_name, victim_username)
+    # Получаем последние сообщения жертвы для определения пола
+    try:
+        if USE_POSTGRES and victim_id:
+            messages = await get_user_messages(chat_id, victim_id, limit=10)
+            victim_messages = [m.get('text', '') for m in messages if m.get('text')]
+    except Exception as e:
+        logger.warning(f"Could not get victim messages: {e}")
+    
+    # Определяем пол по имени (базовое определение для склонения)
+    # API определит более точно по сообщениям
+    is_female = False
+    name_lower = victim_name.lower() if victim_name else ""
+    female_endings = ['а', 'я', 'ия', 'ья']
+    male_with_a = ['никита', 'илья', 'кузьма', 'фома', 'лука', 'саша', 'женя']
+    if name_lower not in male_with_a:
+        for ending in female_endings:
+            if name_lower.endswith(ending):
+                is_female = True
+                break
+    
+    gender = "женский" if is_female else "мужской"
+    
+    # Склоняем имя
+    declined = decline_russian_name(victim_name, gender)
+    
+    # Создаём кликабельные упоминания для всех падежей
+    def mention_with_case(case_form: str) -> str:
+        safe_form = case_form.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return f'<a href="tg://user?id={victim_id}">{safe_form}</a>'
+    
+    mentions = {
+        'nom': mention_with_case(declined['nom']),
+        'gen': mention_with_case(declined['gen']),
+        'dat': mention_with_case(declined['dat']),
+        'acc': mention_with_case(declined['acc']),
+        'ins': mention_with_case(declined['ins']),
+        'pre': mention_with_case(declined['pre']),
+    }
     
     # Проверяем API
     ventilate_url = VENTILATE_API_URL or VERCEL_API_URL.replace("/summary", "/ventilate")
@@ -1734,26 +1880,51 @@ async def cmd_ventilate(message: Message):
                 json={
                     "victim_name": victim_name,
                     "victim_username": victim_username or "",
-                    "victim_id": victim_id
+                    "victim_id": victim_id,
+                    "victim_messages": victim_messages
                 }
             ) as response:
                 if response.status == 200:
                     result = await response.json()
                     text = result.get("text", "🪟 Форточка не открылась. Заклинило.")
-                    # Заменяем плейсхолдер {VICTIM} на кликабельное упоминание
-                    text = text.replace("{VICTIM}", victim_mention)
+                    
+                    # API может вернуть пол — используем для пересклонения
+                    api_gender = result.get("gender", gender)
+                    if api_gender != gender:
+                        declined = decline_russian_name(victim_name, api_gender)
+                        mentions = {
+                            'nom': mention_with_case(declined['nom']),
+                            'gen': mention_with_case(declined['gen']),
+                            'dat': mention_with_case(declined['dat']),
+                            'acc': mention_with_case(declined['acc']),
+                            'ins': mention_with_case(declined['ins']),
+                            'pre': mention_with_case(declined['pre']),
+                        }
+                    
+                    # Заменяем плейсхолдеры на кликабельные склонённые упоминания
+                    text = text.replace("{VICTIM_NOM}", mentions['nom'])
+                    text = text.replace("{VICTIM_GEN}", mentions['gen'])
+                    text = text.replace("{VICTIM_DAT}", mentions['dat'])
+                    text = text.replace("{VICTIM_ACC}", mentions['acc'])
+                    text = text.replace("{VICTIM_INS}", mentions['ins'])
+                    text = text.replace("{VICTIM_PRE}", mentions['pre'])
+                    
+                    # Fallback для старого формата
+                    text = text.replace("{VICTIM}", mentions['nom'])
+                    
                     # Также заменяем @username если AI его вставил
                     if victim_username:
-                        text = text.replace(f"@{victim_username}", victim_mention)
+                        text = text.replace(f"@{victim_username}", mentions['nom'])
+                    
                     await processing_msg.edit_text(text, parse_mode=ParseMode.HTML)
                 else:
                     error_text = await response.text()
                     logger.error(f"Ventilate API error: {response.status} - {error_text}")
-                    # Fallback с кликабельным упоминанием
+                    # Fallback с кликабельным упоминанием и склонением
                     fallback_events = [
-                        f"🪟 Тётя Роза открыла форточку в чате.\n\nЗалетел голубь. Насрал на {victim_mention}. Улетел.\n\nПроветрено.",
-                        f"🪟 Тётя Роза открыла форточку в чате.\n\nСквозняком сдуло {victim_mention} куда-то в угол чата. Сидит там теперь.\n\nСвежо.",
-                        f"🪟 Тётя Роза открыла форточку в чате.\n\nВорвался холод. {victim_mention} замёрз нахуй.\n\nЗакрываю."
+                        f"🪟 Тётя Роза открыла форточку в чате.\n\nЗалетел голубь. Насрал на {mentions['acc']}. Улетел.\n\nПроветрено.",
+                        f"🪟 Тётя Роза открыла форточку в чате.\n\nСквозняком сдуло {mentions['acc']} куда-то в угол чата. {mentions['nom']} там теперь сидит.\n\nСвежо.",
+                        f"🪟 Тётя Роза открыла форточку в чате.\n\nВорвался холод. {mentions['nom']} {'замёрзла' if api_gender == 'женский' else 'замёрз'} нахуй.\n\nЗакрываю."
                     ]
                     await processing_msg.edit_text(random.choice(fallback_events), parse_mode=ParseMode.HTML)
     
