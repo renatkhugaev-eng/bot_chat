@@ -782,7 +782,7 @@ async def get_database_stats() -> Dict[str, Any]:
         stats = {}
         
         # Количество записей в таблицах
-        tables = ['chat_messages', 'chat_summaries', 'chat_memories', 'players', 'achievements']
+        tables = ['chat_messages', 'chat_summaries', 'chat_memories', 'players', 'achievements', 'event_log']
         for table in tables:
             try:
                 row = await conn.fetchrow(f"SELECT COUNT(*) as count FROM {table}")
@@ -812,7 +812,148 @@ async def get_database_stats() -> Dict[str, Any]:
         """, day_ago)
         stats['active_chats_24h'] = row['count'] if row else 0
         
+        # ВСЕГО уникальных чатов
+        row = await conn.fetchrow("""
+            SELECT COUNT(DISTINCT chat_id) as count FROM chat_messages
+        """)
+        stats['total_chats'] = row['count'] if row else 0
+        
+        # Всего уникальных пользователей
+        row = await conn.fetchrow("""
+            SELECT COUNT(DISTINCT user_id) as count FROM chat_messages
+        """)
+        stats['total_users'] = row['count'] if row else 0
+        
+        # Общак всех чатов
+        row = await conn.fetchrow("""
+            SELECT COALESCE(SUM(money), 0) as total FROM chat_treasury
+        """)
+        stats['total_treasury'] = row['total'] if row else 0
+        
         return stats
+
+
+async def get_all_chats_stats() -> List[Dict[str, Any]]:
+    """Получить статистику по всем чатам"""
+    async with (await get_pool()).acquire() as conn:
+        day_ago = int(time.time()) - 86400
+        week_ago = int(time.time()) - (7 * 86400)
+        
+        rows = await conn.fetch("""
+            SELECT 
+                chat_id,
+                COUNT(*) as total_messages,
+                COUNT(DISTINCT user_id) as unique_users,
+                COUNT(*) FILTER (WHERE created_at >= $1) as messages_24h,
+                COUNT(*) FILTER (WHERE created_at >= $2) as messages_7d,
+                MAX(created_at) as last_activity
+            FROM chat_messages
+            GROUP BY chat_id
+            ORDER BY messages_24h DESC, total_messages DESC
+            LIMIT 50
+        """, day_ago, week_ago)
+        
+        return [dict(row) for row in rows]
+
+
+async def get_chat_details(chat_id: int) -> Dict[str, Any]:
+    """Получить детальную статистику по конкретному чату"""
+    async with (await get_pool()).acquire() as conn:
+        day_ago = int(time.time()) - 86400
+        
+        # Основная статистика
+        row = await conn.fetchrow("""
+            SELECT 
+                COUNT(*) as total_messages,
+                COUNT(DISTINCT user_id) as unique_users,
+                COUNT(*) FILTER (WHERE created_at >= $2) as messages_24h,
+                MIN(created_at) as first_message,
+                MAX(created_at) as last_message
+            FROM chat_messages
+            WHERE chat_id = $1
+        """, chat_id, day_ago)
+        
+        stats = dict(row) if row else {}
+        
+        # Топ пользователей
+        top_users = await conn.fetch("""
+            SELECT 
+                user_id, 
+                first_name, 
+                username,
+                COUNT(*) as msg_count
+            FROM chat_messages
+            WHERE chat_id = $1
+            GROUP BY user_id, first_name, username
+            ORDER BY msg_count DESC
+            LIMIT 10
+        """, chat_id)
+        stats['top_users'] = [dict(u) for u in top_users]
+        
+        # Количество сводок
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) as count FROM chat_summaries WHERE chat_id = $1
+        """, chat_id)
+        stats['summaries_count'] = row['count'] if row else 0
+        
+        # Количество воспоминаний
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) as count FROM chat_memories WHERE chat_id = $1
+        """, chat_id)
+        stats['memories_count'] = row['count'] if row else 0
+        
+        # Игроки в чате
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) as count FROM players WHERE chat_id = $1 AND player_class IS NOT NULL
+        """, chat_id)
+        stats['players_count'] = row['count'] if row else 0
+        
+        # Общак чата
+        row = await conn.fetchrow("""
+            SELECT money FROM chat_treasury WHERE chat_id = $1
+        """, chat_id)
+        stats['treasury'] = row['money'] if row else 0
+        
+        return stats
+
+
+async def get_top_users_global(limit: int = 20) -> List[Dict[str, Any]]:
+    """Получить топ самых активных пользователей по всем чатам"""
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT 
+                user_id,
+                first_name,
+                username,
+                COUNT(*) as total_messages,
+                COUNT(DISTINCT chat_id) as chats_count
+            FROM chat_messages
+            GROUP BY user_id, first_name, username
+            ORDER BY total_messages DESC
+            LIMIT $1
+        """, limit)
+        
+        return [dict(row) for row in rows]
+
+
+async def search_user(query: str) -> List[Dict[str, Any]]:
+    """Поиск пользователя по имени или username"""
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT DISTINCT
+                user_id,
+                first_name,
+                username,
+                COUNT(*) as messages
+            FROM chat_messages
+            WHERE LOWER(first_name) LIKE LOWER($1) 
+               OR LOWER(username) LIKE LOWER($1)
+            GROUP BY user_id, first_name, username
+            ORDER BY messages DESC
+            LIMIT 20
+        """, f"%{query}%")
+        
+        return [dict(row) for row in rows]
 
 
 async def full_cleanup() -> Dict[str, int]:

@@ -31,7 +31,9 @@ if USE_POSTGRES:
         add_to_treasury, get_treasury, log_event, add_achievement,
         save_chat_message, get_chat_statistics, get_player_achievements, close_db,
         save_summary, get_previous_summaries, save_memory, get_memories,
-        get_user_messages, full_cleanup, get_database_stats
+        get_user_messages, full_cleanup, get_database_stats,
+        get_all_chats_stats, get_chat_details, get_top_users_global, search_user,
+        health_check
     )
 else:
     from database import (
@@ -46,6 +48,11 @@ else:
     # Заглушки для SQLite
     async def full_cleanup(): return {}
     async def get_database_stats(): return {}
+    async def get_all_chats_stats(): return []
+    async def get_chat_details(chat_id): return {}
+    async def get_top_users_global(limit=20): return []
+    async def search_user(query): return []
+    async def health_check(): return False
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
     calculate_crime_success, calculate_crime_reward, get_random_crime_message,
@@ -2037,11 +2044,59 @@ async def log_database_stats():
         logger.error(f"❌ Ошибка статистики БД: {e}")
 
 
+# ==================== АДМИНКА ====================
+
+# ID администраторов (добавь свой Telegram ID)
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+
+
+def is_admin(user_id: int) -> bool:
+    """Проверить, является ли пользователь админом"""
+    # Если ADMIN_IDS не настроен — разрешаем всем в приватке
+    if not ADMIN_IDS:
+        return True
+    return user_id in ADMIN_IDS
+
+
+@router.message(Command("admin", "админ", "panel"))
+async def cmd_admin(message: Message):
+    """Главное меню админки"""
+    if message.chat.type != "private":
+        await message.answer("❌ Админка работает только в личке!")
+        return
+    
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У тебя нет прав админа!")
+        return
+    
+    text = """🔐 *АДМИН-ПАНЕЛЬ ТЁТИ РОЗЫ*
+
+📊 *Статистика:*
+/dbstats — общая статистика БД
+/chats — список всех чатов
+/topusers — топ пользователей
+
+🔍 *Поиск:*
+/chat `<id>` — инфо о чате
+/finduser `<имя>` — поиск пользователя
+
+🛠 *Управление:*
+/cleanup — очистка старых данных
+/health — проверка состояния системы
+
+💡 _Твой ID:_ `{}`
+""".format(message.from_user.id)
+    
+    await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+
+
 @router.message(Command("dbstats", "stats_db"))
 async def cmd_dbstats(message: Message):
-    """Статистика базы данных (только для админов)"""
-    # Проверка админа (можно добавить список admin_ids)
+    """Расширенная статистика базы данных"""
     if message.chat.type != "private":
+        return
+    
+    if not is_admin(message.from_user.id):
         return
     
     if not USE_POSTGRES:
@@ -2049,35 +2104,295 @@ async def cmd_dbstats(message: Message):
         return
     
     try:
+        processing = await message.answer("📊 Собираю статистику...")
         stats = await get_database_stats()
         
-        text = f"""📊 *СТАТИСТИКА БАЗЫ ДАННЫХ*
+        text = f"""📊 *ПОЛНАЯ СТАТИСТИКА БОТА*
+
+🌐 *Охват:*
+• Всего чатов: *{stats.get('total_chats', 0):,}*
+• Активных чатов (24ч): *{stats.get('active_chats_24h', 0)}*
+• Всего пользователей: *{stats.get('total_users', 0):,}*
 
 📝 *Сообщения:*
-• Всего: {stats.get('chat_messages_count', 0):,}
+• Всего в БД: {stats.get('chat_messages_count', 0):,}
 • За 24 часа: {stats.get('messages_24h', 0):,}
-• Возраст старейшего: {stats.get('oldest_message_days', 0)} дней
-
-💬 *Активность:*
-• Активных чатов (24ч): {stats.get('active_chats_24h', 0)}
+• Хранятся: {stats.get('oldest_message_days', 0)} дней
 
 🧠 *Память:*
-• Сводок: {stats.get('chat_summaries_count', 0)}
-• Воспоминаний: {stats.get('chat_memories_count', 0)}
+• Сводок: {stats.get('chat_summaries_count', 0):,}
+• Воспоминаний: {stats.get('chat_memories_count', 0):,}
 
-👥 *Игроки:*
-• Всего: {stats.get('players_count', 0)}
-• Достижений: {stats.get('achievements_count', 0)}
+🎮 *RPG система:*
+• Игроков: {stats.get('players_count', 0):,}
+• Достижений: {stats.get('achievements_count', 0):,}
+• Событий в логе: {stats.get('event_log_count', 0):,}
+
+💰 *Экономика:*
+• Общак всех чатов: {stats.get('total_treasury', 0):,} 💎
 """
-        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+        await processing.edit_text(text, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
 
+@router.message(Command("chats", "чаты"))
+async def cmd_chats(message: Message):
+    """Список всех чатов с статистикой"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Доступно только с PostgreSQL")
+        return
+    
+    try:
+        processing = await message.answer("📋 Загружаю список чатов...")
+        chats = await get_all_chats_stats()
+        
+        if not chats:
+            await processing.edit_text("📭 Нет данных о чатах")
+            return
+        
+        from datetime import datetime
+        
+        lines = ["📋 *СПИСОК ЧАТОВ*\n"]
+        for i, chat in enumerate(chats[:20], 1):
+            chat_id = chat['chat_id']
+            total = chat['total_messages']
+            users = chat['unique_users']
+            today = chat['messages_24h']
+            last = chat['last_activity']
+            
+            # Форматируем время последней активности
+            if last:
+                last_dt = datetime.fromtimestamp(last)
+                last_str = last_dt.strftime("%d.%m %H:%M")
+            else:
+                last_str = "—"
+            
+            # Определяем активность
+            if today > 100:
+                status = "🔥"
+            elif today > 20:
+                status = "✅"
+            elif today > 0:
+                status = "💤"
+            else:
+                status = "💀"
+            
+            lines.append(
+                f"{status} `{chat_id}`\n"
+                f"   📝 {total:,} сообщ. | 👥 {users} | 🕐 {last_str}"
+            )
+        
+        if len(chats) > 20:
+            lines.append(f"\n_...и ещё {len(chats) - 20} чатов_")
+        
+        lines.append(f"\n💡 Детали: `/chat <id>`")
+        
+        await processing.edit_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@router.message(Command("chat"))
+async def cmd_chat_details(message: Message):
+    """Детальная информация о чате"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Доступно только с PostgreSQL")
+        return
+    
+    # Парсим chat_id из команды
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("❌ Укажи ID чата: `/chat -1001234567890`", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    try:
+        chat_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ Неверный ID чата!")
+        return
+    
+    try:
+        processing = await message.answer(f"🔍 Загружаю данные чата {chat_id}...")
+        stats = await get_chat_details(chat_id)
+        
+        if not stats or not stats.get('total_messages'):
+            await processing.edit_text(f"📭 Чат `{chat_id}` не найден", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        from datetime import datetime
+        
+        first = stats.get('first_message')
+        last = stats.get('last_message')
+        first_str = datetime.fromtimestamp(first).strftime("%d.%m.%Y") if first else "—"
+        last_str = datetime.fromtimestamp(last).strftime("%d.%m.%Y %H:%M") if last else "—"
+        
+        text = f"""📊 *ЧАТ:* `{chat_id}`
+
+📝 *Сообщения:*
+• Всего: {stats.get('total_messages', 0):,}
+• За 24ч: {stats.get('messages_24h', 0):,}
+
+👥 *Пользователи:*
+• Уникальных: {stats.get('unique_users', 0)}
+• Игроков RPG: {stats.get('players_count', 0)}
+
+🧠 *Память:*
+• Сводок: {stats.get('summaries_count', 0)}
+• Воспоминаний: {stats.get('memories_count', 0)}
+
+💰 *Общак:* {stats.get('treasury', 0):,} 💎
+
+📅 *Период:*
+• Первое сообщение: {first_str}
+• Последнее: {last_str}
+"""
+        
+        # Топ пользователей
+        top_users = stats.get('top_users', [])
+        if top_users:
+            text += "\n🏆 *Топ пользователей:*\n"
+            for i, u in enumerate(top_users[:5], 1):
+                name = u.get('first_name', '?')
+                username = u.get('username')
+                count = u.get('msg_count', 0)
+                user_str = f"@{username}" if username else name
+                text += f"{i}. {user_str} — {count:,}\n"
+        
+        await processing.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@router.message(Command("topusers", "топюзеры"))
+async def cmd_top_users(message: Message):
+    """Топ пользователей по всем чатам"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Доступно только с PostgreSQL")
+        return
+    
+    try:
+        processing = await message.answer("🏆 Загружаю топ пользователей...")
+        users = await get_top_users_global(20)
+        
+        if not users:
+            await processing.edit_text("📭 Нет данных")
+            return
+        
+        lines = ["🏆 *ТОП ПОЛЬЗОВАТЕЛЕЙ (все чаты)*\n"]
+        for i, u in enumerate(users, 1):
+            name = u.get('first_name', '?')
+            username = u.get('username')
+            total = u.get('total_messages', 0)
+            chats = u.get('chats_count', 0)
+            
+            user_str = f"@{username}" if username else name
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            
+            lines.append(f"{medal} {user_str}\n   📝 {total:,} сообщ. в {chats} чатах")
+        
+        await processing.edit_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@router.message(Command("finduser", "найти"))
+async def cmd_find_user(message: Message):
+    """Поиск пользователя по имени"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Доступно только с PostgreSQL")
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("❌ Укажи имя: `/finduser Вася`", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    query = parts[1].strip()
+    
+    try:
+        users = await search_user(query)
+        
+        if not users:
+            await message.answer(f"📭 Пользователи по запросу '{query}' не найдены")
+            return
+        
+        lines = [f"🔍 *Результаты поиска:* _{query}_\n"]
+        for u in users[:15]:
+            user_id = u.get('user_id')
+            name = u.get('first_name', '?')
+            username = u.get('username')
+            msgs = u.get('messages', 0)
+            
+            user_str = f"@{username}" if username else name
+            lines.append(f"• {user_str} (`{user_id}`)\n  📝 {msgs:,} сообщений")
+        
+        await message.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@router.message(Command("health", "здоровье"))
+async def cmd_health(message: Message):
+    """Проверка состояния системы"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    processing = await message.answer("🔍 Проверяю системы...")
+    
+    checks = []
+    
+    # Проверка БД
+    if USE_POSTGRES:
+        try:
+            db_ok = await health_check()
+            checks.append(f"{'✅' if db_ok else '❌'} PostgreSQL: {'OK' if db_ok else 'FAIL'}")
+        except Exception as e:
+            checks.append(f"❌ PostgreSQL: {str(e)[:50]}")
+    else:
+        checks.append("⚠️ PostgreSQL: не используется (SQLite)")
+    
+    # Проверка бота
+    try:
+        me = await bot.get_me()
+        checks.append(f"✅ Бот: @{me.username} (ID: {me.id})")
+    except Exception as e:
+        checks.append(f"❌ Бот: {str(e)[:50]}")
+    
+    # Проверка планировщика
+    if scheduler.running:
+        jobs = len(scheduler.get_jobs())
+        checks.append(f"✅ Планировщик: {jobs} задач")
+    else:
+        checks.append("⚠️ Планировщик: не запущен")
+    
+    # Память cooldowns
+    checks.append(f"📊 Кулдауны в памяти: {len(cooldowns)}")
+    
+    # Время работы (uptime)
+    import platform
+    checks.append(f"🖥 Платформа: {platform.system()} {platform.release()}")
+    
+    text = "🏥 *СОСТОЯНИЕ СИСТЕМЫ*\n\n" + "\n".join(checks)
+    await processing.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
 @router.message(Command("cleanup", "clean_db"))
 async def cmd_cleanup(message: Message):
-    """Ручная очистка БД (только для админов в приватке)"""
-    if message.chat.type != "private":
+    """Ручная очистка БД"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
         return
     
     if not USE_POSTGRES:
@@ -2090,9 +2405,10 @@ async def cmd_cleanup(message: Message):
         
         await processing.edit_text(
             f"✅ *Очистка завершена!*\n\n"
-            f"🗑 Удалено сообщений: {results.get('messages_deleted', 0)}\n"
-            f"📜 Удалено сводок: {results.get('summaries_deleted', 0)}\n"
-            f"🧠 Удалено воспоминаний: {results.get('memories_deleted', 0)}",
+            f"🗑 Сообщений: {results.get('messages_deleted', 0):,}\n"
+            f"📜 Сводок: {results.get('summaries_deleted', 0)}\n"
+            f"🧠 Воспоминаний: {results.get('memories_deleted', 0)}\n"
+            f"📋 Событий: {results.get('events_deleted', 0)}",
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception as e:
