@@ -2168,12 +2168,24 @@ async def cmd_chats(message: Message):
         lines = ["📋 СПИСОК ЧАТОВ\n"]
         for i, chat in enumerate(chats[:20], 1):
             chat_id = chat['chat_id']
-            title = chat.get('chat_title') or "Без названия"
+            title = chat.get('chat_title')
             username = chat.get('chat_username')
             total = chat['total_messages']
             users = chat['unique_users']
             today = chat['messages_24h']
             last = chat['last_activity']
+            
+            # Если нет инфо — получаем из Telegram API
+            if not title and not username:
+                try:
+                    tg_chat = await bot.get_chat(chat_id)
+                    title = tg_chat.title
+                    username = tg_chat.username
+                    # Сохраняем в БД на будущее
+                    await save_chat_info(chat_id, title, username, tg_chat.type)
+                except Exception:
+                    title = None
+                    username = None
             
             # Форматируем время последней активности
             if last:
@@ -2195,14 +2207,14 @@ async def cmd_chats(message: Message):
             # Формируем название чата
             if username:
                 chat_name = f"@{username}"
+            elif title:
+                chat_name = title[:30].replace('_', ' ').replace('*', '')
             else:
-                # Убираем спецсимволы из названия
-                chat_name = title[:25].replace('_', ' ').replace('*', '')
+                chat_name = f"Чат {chat_id}"
             
             lines.append(
                 f"{status} {chat_name}\n"
-                f"   📝 {total:,} | 👥 {users} | 🕐 {last_str}\n"
-                f"   ID: {chat_id}"
+                f"   📝 {total:,} | 👥 {users} | 🕐 {last_str}"
             )
         
         if len(chats) > 20:
@@ -2212,6 +2224,7 @@ async def cmd_chats(message: Message):
         
         await processing.edit_text("\n".join(lines))
     except Exception as e:
+        logger.error(f"Error in chats: {e}")
         await message.answer(f"❌ Ошибка: {e}")
 
 
@@ -2247,10 +2260,20 @@ async def cmd_chat_details(message: Message):
         
         from datetime import datetime
         
-        # Название чата
-        chat_title = stats.get('chat_title') or "Без названия"
+        # Название чата — получаем из БД или Telegram API
+        chat_title = stats.get('chat_title')
         chat_username = stats.get('chat_username')
-        chat_name = f"@{chat_username}" if chat_username else chat_title.replace('_', ' ')
+        
+        if not chat_title and not chat_username:
+            try:
+                tg_chat = await bot.get_chat(chat_id)
+                chat_title = tg_chat.title
+                chat_username = tg_chat.username
+                await save_chat_info(chat_id, chat_title, chat_username, tg_chat.type)
+            except Exception:
+                pass
+        
+        chat_name = f"@{chat_username}" if chat_username else (chat_title or f"Чат {chat_id}").replace('_', ' ')
         
         first = stats.get('first_message')
         last = stats.get('last_message')
