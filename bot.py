@@ -3411,16 +3411,42 @@ async def fetch_vk_memes(community: str, count: int = 50) -> List[Dict]:
 
 async def import_vk_memes_to_chat(chat_id: int, community: str, count: int = 30) -> Dict[str, int]:
     """Импортировать мемы из VK в коллекцию чата"""
-    stats = {"imported": 0, "errors": 0, "skipped": 0}
+    stats = {"imported": 0, "errors": 0, "skipped": 0, "already_exists": 0}
     
-    memes = await fetch_vk_memes(community, count)
+    memes = await fetch_vk_memes(community, count * 2)  # Берём больше, т.к. часть пропустим
     if not memes:
         return stats
     
     session = await get_http_session()
     
-    for meme in memes[:count]:
+    # Получаем существующие URL хеши из описаний (для дедупликации)
+    existing_hashes = set()
+    if USE_POSTGRES:
+        from database_postgres import get_pool
+        async with (await get_pool()).acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT caption FROM chat_media 
+                WHERE chat_id = $1 AND description LIKE 'VK:%'
+            """, chat_id)
+            for row in rows:
+                if row['caption']:
+                    # Храним хеш URL в caption
+                    existing_hashes.add(row['caption'][:50])
+    
+    imported_count = 0
+    
+    for meme in memes:
+        if imported_count >= count:
+            break
+            
         try:
+            # Создаём хеш URL для проверки дубликатов
+            url_hash = meme["url"].split("?")[0][-50:]  # Последние 50 символов URL без параметров
+            
+            if url_hash in existing_hashes:
+                stats["already_exists"] += 1
+                continue
+            
             # Скачиваем файл
             async with session.get(meme["url"]) as response:
                 if response.status != 200:
@@ -3428,6 +3454,11 @@ async def import_vk_memes_to_chat(chat_id: int, community: str, count: int = 30)
                     continue
                 
                 file_data = await response.read()
+                
+                # Проверяем размер — слишком маленькие пропускаем
+                if len(file_data) < 10000:  # < 10KB
+                    stats["skipped"] += 1
+                    continue
             
             # Отправляем в чат (чтобы получить file_id)
             if meme["type"] == "photo":
@@ -3448,7 +3479,7 @@ async def import_vk_memes_to_chat(chat_id: int, community: str, count: int = 30)
             else:
                 continue
             
-            # Сохраняем в коллекцию
+            # Сохраняем в коллекцию (caption = url_hash для дедупликации)
             saved = await save_media(
                 chat_id=chat_id,
                 user_id=0,  # VK import
@@ -3456,16 +3487,18 @@ async def import_vk_memes_to_chat(chat_id: int, community: str, count: int = 30)
                 file_type=meme["type"],
                 file_unique_id=file_unique_id,
                 description=f"VK: {community}",
-                caption=meme.get("text", "")
+                caption=url_hash  # Храним хеш для проверки дубликатов
             )
             
             if saved:
                 stats["imported"] += 1
+                imported_count += 1
+                existing_hashes.add(url_hash)
             else:
                 stats["skipped"] += 1
             
             # Небольшая задержка чтобы не спамить
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
             
         except Exception as e:
             logger.error(f"Error importing meme: {e}")
@@ -3533,6 +3566,7 @@ async def cmd_vk_import(message: Message):
         await processing.edit_text(
             f"✅ *Импорт завершён!*\n\n"
             f"📥 Импортировано: {stats['imported']}\n"
+            f"🔄 Уже были: {stats.get('already_exists', 0)}\n"
             f"⏭ Пропущено: {stats['skipped']}\n"
             f"❌ Ошибок: {stats['errors']}\n\n"
             f"Источник: VK/{community_name}",
