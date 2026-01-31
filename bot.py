@@ -1901,51 +1901,61 @@ async def cmd_ventilate(message: Message):
                     "victim_name": victim_name,
                     "victim_username": victim_username or "",
                     "victim_id": victim_id,
-                    "victim_messages": victim_messages
+                    "victim_messages": victim_messages,
+                    "initial_gender": gender  # Передаём начальное определение пола
                 }
             ) as response:
                 if response.status == 200:
                     result = await response.json()
                     text = result.get("text", "🪟 Форточка не открылась. Заклинило.")
                     
-                    # API может вернуть пол — используем для пересклонения
+                    # API возвращает пол — ИСПОЛЬЗУЕМ ЕГО (он точнее, т.к. анализирует сообщения)
                     api_gender = result.get("gender", gender)
-                    if api_gender != gender:
-                        declined = decline_russian_name(victim_name, api_gender)
-                        mentions = {
-                            'nom': mention_with_case(declined['nom']),
-                            'gen': mention_with_case(declined['gen']),
-                            'dat': mention_with_case(declined['dat']),
-                            'acc': mention_with_case(declined['acc']),
-                            'ins': mention_with_case(declined['ins']),
-                            'pre': mention_with_case(declined['pre']),
-                        }
                     
-                    # Заменяем плейсхолдеры на кликабельные склонённые упоминания
+                    # Пересклоняем имя с правильным полом
+                    declined = decline_russian_name(victim_name, api_gender)
+                    mentions = {
+                        'nom': mention_with_case(declined['nom']),
+                        'gen': mention_with_case(declined['gen']),
+                        'dat': mention_with_case(declined['dat']),
+                        'acc': mention_with_case(declined['acc']),
+                        'ins': mention_with_case(declined['ins']),
+                        'pre': mention_with_case(declined['pre']),
+                    }
+                    
+                    # 1. Заменяем плейсхолдеры на кликабельные склонённые упоминания
                     text = text.replace("{VICTIM_NOM}", mentions['nom'])
                     text = text.replace("{VICTIM_GEN}", mentions['gen'])
                     text = text.replace("{VICTIM_DAT}", mentions['dat'])
                     text = text.replace("{VICTIM_ACC}", mentions['acc'])
                     text = text.replace("{VICTIM_INS}", mentions['ins'])
                     text = text.replace("{VICTIM_PRE}", mentions['pre'])
-                    
-                    # Fallback для старого формата
                     text = text.replace("{VICTIM}", mentions['nom'])
                     
-                    # Также заменяем @username если AI его вставил
+                    # 2. Заменяем @username на кликабельную ссылку
                     if victim_username:
                         text = text.replace(f"@{victim_username}", mentions['nom'])
                     
-                    # Заменяем все формы имени на кликабельные (если AI написал напрямую)
-                    # Сортируем по длине (сначала длинные формы, чтобы не испортить короткие)
-                    sorted_forms = sorted(declined.items(), key=lambda x: len(x[1]), reverse=True)
-                    for case_key, case_form in sorted_forms:
+                    # 3. Заменяем все формы имени на кликабельные (если AI написал напрямую)
+                    # Собираем все уникальные формы имени
+                    unique_forms = list(set(declined.values()))
+                    # Сортируем по длине (сначала длинные, чтобы "Александра" заменилась раньше "Александр")
+                    unique_forms.sort(key=len, reverse=True)
+                    
+                    for case_form in unique_forms:
                         if case_form and len(case_form) > 1:
-                            # Ищем имя с границами слова (не внутри других слов и не в HTML тегах)
-                            # Пропускаем если уже внутри ссылки
-                            if f'>{case_form}<' not in text and case_form not in text.split('href=')[0] if 'href=' in text else True:
-                                pattern = r'(?<![а-яА-Яa-zA-Z>])' + re.escape(case_form) + r'(?![а-яА-Яa-zA-Z<])'
-                                text = re.sub(pattern, mentions[case_key], text, count=3)
+                            # Находим какой падеж это
+                            case_key = next((k for k, v in declined.items() if v == case_form), 'nom')
+                            mention = mentions[case_key]
+                            
+                            # Пропускаем если форма уже в тексте как часть ссылки
+                            if f'>{case_form}<' in text:
+                                continue
+                            
+                            # Заменяем только если не внутри HTML тега
+                            # Паттерн: имя окружено не-буквами и не > или <
+                            pattern = r'(?<![а-яА-Яa-zA-Z>])' + re.escape(case_form) + r'(?![а-яА-Яa-zA-Z<])'
+                            text = re.sub(pattern, mention, text, count=5)
                     
                     await processing_msg.edit_text(text, parse_mode=ParseMode.HTML)
                 else:
