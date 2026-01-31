@@ -3,7 +3,7 @@ import logging
 import random
 import re
 import time
-from typing import Optional
+from typing import Optional, List, Dict
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
@@ -61,7 +61,8 @@ if USE_POSTGRES:
         get_user_messages, full_cleanup, get_database_stats,
         get_all_chats_stats, get_chat_details, get_top_users_global, search_user,
         health_check, save_chat_info,
-        save_media, get_random_media, get_media_stats, increment_media_usage
+        save_media, get_random_media, get_media_stats, increment_media_usage,
+        migrate_media_from_messages
     )
 else:
     from database import (
@@ -86,6 +87,7 @@ else:
     async def get_random_media(chat_id, file_type=None): return None
     async def get_media_stats(chat_id): return {'total': 0}
     async def increment_media_usage(media_id): pass
+    async def migrate_media_from_messages(): return {'migrated': 0, 'skipped': 0, 'errors': 0}
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
     calculate_crime_success, calculate_crime_reward, get_random_crime_message,
@@ -2338,7 +2340,9 @@ async def collect_stickers(message: Message):
         first_name=message.from_user.first_name or "Аноним",
         message_text="",
         message_type="sticker",
-        sticker_emoji=sticker.emoji if sticker else "🎭"
+        sticker_emoji=sticker.emoji if sticker else "🎭",
+        file_id=sticker.file_id if sticker else None,
+        file_unique_id=sticker.file_unique_id if sticker else None
     )
     
     # Сохраняем стикер в коллекцию (если это не анимированный/видео стикер)
@@ -2402,6 +2406,8 @@ async def collect_photos(message: Message):
             logger.error(f"Error analyzing image: {e}")
             image_description = None
     
+    photo = message.photo[-1]  # Самое большое разрешение
+    
     await save_chat_message(
         chat_id=message.chat.id,
         user_id=message.from_user.id,
@@ -2409,11 +2415,12 @@ async def collect_photos(message: Message):
         first_name=message.from_user.first_name or "Аноним",
         message_text=caption,
         message_type="photo",
-        image_description=image_description
+        image_description=image_description,
+        file_id=photo.file_id,
+        file_unique_id=photo.file_unique_id
     )
     
     # Сохраняем фото в коллекцию мемов
-    photo = message.photo[-1]  # Самое большое разрешение
     await save_media(
         chat_id=message.chat.id,
         user_id=message.from_user.id,
@@ -2426,7 +2433,10 @@ async def collect_photos(message: Message):
     
     # Шанс 15% для теста (потом вернуть на 2-3%)
     if random.random() < 0.15:
-        await maybe_send_random_meme(message.chat.id, trigger="photo")
+        try:
+            await maybe_send_random_meme(message.chat.id, trigger="photo")
+        except Exception as e:
+            logger.warning(f"Failed to send random meme after photo: {e}")
 
 
 @router.message(F.animation)
@@ -2444,7 +2454,9 @@ async def collect_animations(message: Message):
         username=message.from_user.username or "",
         first_name=message.from_user.first_name or "Аноним",
         message_text=caption,
-        message_type="animation"
+        message_type="animation",
+        file_id=animation.file_id if animation else None,
+        file_unique_id=animation.file_unique_id if animation else None
     )
     
     # Сохраняем GIF в коллекцию
@@ -2460,7 +2472,10 @@ async def collect_animations(message: Message):
     
     # Шанс 15% для теста (потом вернуть на 2-3%)
     if random.random() < 0.15:
-        await maybe_send_random_meme(message.chat.id, trigger="animation")
+        try:
+            await maybe_send_random_meme(message.chat.id, trigger="animation")
+        except Exception as e:
+            logger.warning(f"Failed to send random meme after animation: {e}")
 
 
 @router.message(F.voice | F.video_note)
@@ -2470,6 +2485,7 @@ async def collect_voice(message: Message):
         return
     
     msg_type = "voice" if message.voice else "video_note"
+    media_obj = message.voice or message.video_note
     
     await save_chat_message(
         chat_id=message.chat.id,
@@ -2477,7 +2493,9 @@ async def collect_voice(message: Message):
         username=message.from_user.username or "",
         first_name=message.from_user.first_name or "Аноним",
         message_text="",
-        message_type=msg_type
+        message_type=msg_type,
+        file_id=media_obj.file_id if media_obj else None,
+        file_unique_id=media_obj.file_unique_id if media_obj else None
     )
     
     # Сохраняем голосовое/кружочек в коллекцию
@@ -2492,9 +2510,12 @@ async def collect_voice(message: Message):
             file_unique_id=voice.file_unique_id,
             description=f"Голосовое от {sender_name} ({voice.duration} сек)"
         )
-        # Шанс 15% для теста
+        # Шанс 15% для теста (потом вернуть на 3%)
         if random.random() < 0.15:
-            await maybe_send_random_meme(message.chat.id, trigger="voice")
+            try:
+                await maybe_send_random_meme(message.chat.id, trigger="voice")
+            except Exception as e:
+                logger.warning(f"Failed to send random meme after voice: {e}")
     
     elif message.video_note:
         video_note = message.video_note
@@ -2507,9 +2528,12 @@ async def collect_voice(message: Message):
             file_unique_id=video_note.file_unique_id,
             description=f"Кружочек от {sender_name} ({video_note.duration} сек)"
         )
-        # Шанс 15% для теста
+        # Шанс 15% для теста (потом вернуть на 3%)
         if random.random() < 0.15:
-            await maybe_send_random_meme(message.chat.id, trigger="video_note")
+            try:
+                await maybe_send_random_meme(message.chat.id, trigger="video_note")
+            except Exception as e:
+                logger.warning(f"Failed to send random meme after video_note: {e}")
 
 
 # ==================== СИСТЕМА МЕМОВ ====================
@@ -2638,7 +2662,8 @@ async def cmd_random_meme(message: Message):
     if stats['total'] == 0:
         await message.answer(
             "📭 Коллекция мемов пуста!\n\n"
-            "Кидайте картинки, стикеры и гифки — Тётя Роза всё запомнит и будет выдавать рандомно."
+            "Кидайте картинки, стикеры, гифки, голосовые и кружочки — "
+            "Тётя Роза всё запомнит и будет выдавать рандомно."
         )
         return
     
@@ -2665,14 +2690,14 @@ async def cmd_random_meme(message: Message):
     media_type = media['file_type']
     media_id = media['id']
     
-    comment = random.choice(MEME_COMMENTS)
-    
     try:
-        # Выбираем комментарий по типу
+        # Выбираем комментарий по типу медиа
         if media_type == "voice":
             comment = random.choice(VOICE_COMMENTS)
         elif media_type == "video_note":
             comment = random.choice(VIDEO_NOTE_COMMENTS)
+        else:
+            comment = random.choice(MEME_COMMENTS)
         
         if media_type == "photo":
             await message.answer_photo(file_id, caption=comment)
@@ -2844,6 +2869,8 @@ async def cmd_admin(message: Message):
 🛠 *Управление:*
 /cleanup — очистка старых данных
 /health — проверка состояния системы
+/migrate\_media — миграция медиа в коллекцию
+/vk\_import — импорт мемов из VK
 
 💡 _Твой ID:_ `{}`
 """.format(message.from_user.id)
@@ -3244,6 +3271,236 @@ async def cmd_cleanup(message: Message):
         )
     except Exception as e:
         await message.answer(f"❌ Ошибка очистки: {e}")
+
+
+@router.message(Command("migrate_media", "миграция_медиа"))
+async def cmd_migrate_media(message: Message):
+    """Миграция медиа из chat_messages в chat_media"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Миграция доступна только с PostgreSQL")
+        return
+    
+    try:
+        processing = await message.answer("🔄 Запускаю миграцию медиа...\n\nЭто может занять некоторое время.")
+        results = await migrate_media_from_messages()
+        
+        await processing.edit_text(
+            f"✅ *Миграция завершена!*\n\n"
+            f"📥 Мигрировано: {results.get('migrated', 0):,}\n"
+            f"⏭ Пропущено (уже есть): {results.get('skipped', 0):,}\n"
+            f"❌ Ошибок: {results.get('errors', 0)}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка миграции: {e}")
+
+
+# ==================== VK ИНТЕГРАЦИЯ ====================
+
+VK_API_TOKEN = os.getenv("VK_API_TOKEN", "")
+VK_API_VERSION = "5.199"
+
+# Популярные паблики с мемами
+VK_MEME_COMMUNITIES = {
+    "mdk": "MDK",
+    "borsch": "Борщ",
+    "mudakoff": "Мудакофф", 
+    "leprum": "Лепра",
+    "memes": "Мемы",
+    "igm": "IGM",
+    "tproger_official": "Типичный программист",
+    "oldlentach": "Лентач",
+    "cat": "Коты",
+}
+
+
+async def fetch_vk_memes(community: str, count: int = 50) -> List[Dict]:
+    """Получить мемы из VK паблика"""
+    if not VK_API_TOKEN:
+        return []
+    
+    memes = []
+    session = await get_http_session()
+    
+    try:
+        # Получаем посты со стены
+        async with session.get(
+            "https://api.vk.com/method/wall.get",
+            params={
+                "domain": community,
+                "count": min(count, 100),
+                "filter": "owner",
+                "access_token": VK_API_TOKEN,
+                "v": VK_API_VERSION
+            }
+        ) as response:
+            data = await response.json()
+            
+            if "error" in data:
+                logger.error(f"VK API error: {data['error']}")
+                return []
+            
+            items = data.get("response", {}).get("items", [])
+            
+            for item in items:
+                attachments = item.get("attachments", [])
+                for att in attachments:
+                    if att["type"] == "photo":
+                        # Берём самое большое фото
+                        sizes = att["photo"].get("sizes", [])
+                        if sizes:
+                            best = max(sizes, key=lambda x: x.get("width", 0) * x.get("height", 0))
+                            memes.append({
+                                "type": "photo",
+                                "url": best["url"],
+                                "text": item.get("text", "")[:200]
+                            })
+                    elif att["type"] == "doc" and att["doc"].get("ext") == "gif":
+                        memes.append({
+                            "type": "animation",
+                            "url": att["doc"]["url"],
+                            "text": item.get("text", "")[:200]
+                        })
+    except Exception as e:
+        logger.error(f"Error fetching VK memes: {e}")
+    
+    return memes
+
+
+async def import_vk_memes_to_chat(chat_id: int, community: str, count: int = 30) -> Dict[str, int]:
+    """Импортировать мемы из VK в коллекцию чата"""
+    stats = {"imported": 0, "errors": 0, "skipped": 0}
+    
+    memes = await fetch_vk_memes(community, count)
+    if not memes:
+        return stats
+    
+    session = await get_http_session()
+    
+    for meme in memes[:count]:
+        try:
+            # Скачиваем файл
+            async with session.get(meme["url"]) as response:
+                if response.status != 200:
+                    stats["errors"] += 1
+                    continue
+                
+                file_data = await response.read()
+            
+            # Отправляем в чат (чтобы получить file_id)
+            if meme["type"] == "photo":
+                from aiogram.types import BufferedInputFile
+                input_file = BufferedInputFile(file_data, filename="meme.jpg")
+                sent = await bot.send_photo(chat_id, input_file)
+                file_id = sent.photo[-1].file_id
+                file_unique_id = sent.photo[-1].file_unique_id
+                # Удаляем отправленное сообщение
+                await sent.delete()
+            elif meme["type"] == "animation":
+                from aiogram.types import BufferedInputFile
+                input_file = BufferedInputFile(file_data, filename="meme.gif")
+                sent = await bot.send_animation(chat_id, input_file)
+                file_id = sent.animation.file_id
+                file_unique_id = sent.animation.file_unique_id
+                await sent.delete()
+            else:
+                continue
+            
+            # Сохраняем в коллекцию
+            saved = await save_media(
+                chat_id=chat_id,
+                user_id=0,  # VK import
+                file_id=file_id,
+                file_type=meme["type"],
+                file_unique_id=file_unique_id,
+                description=f"VK: {community}",
+                caption=meme.get("text", "")
+            )
+            
+            if saved:
+                stats["imported"] += 1
+            else:
+                stats["skipped"] += 1
+            
+            # Небольшая задержка чтобы не спамить
+            await asyncio.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"Error importing meme: {e}")
+            stats["errors"] += 1
+    
+    return stats
+
+
+@router.message(Command("vk_import", "vk", "импорт_вк"))
+async def cmd_vk_import(message: Message):
+    """Импортировать мемы из VK паблика"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Только для админов!")
+        return
+    
+    if not VK_API_TOKEN:
+        await message.answer(
+            "❌ VK API токен не настроен!\n\n"
+            "Добавь `VK_API_TOKEN` в переменные окружения.\n"
+            "Получить: https://vk.com/dev → Создать приложение → Сервисный ключ"
+        )
+        return
+    
+    # Парсим аргументы: /vk_import mdk 30
+    args = message.text.split()
+    
+    if len(args) < 2:
+        communities_list = "\n".join([f"• `{k}` — {v}" for k, v in VK_MEME_COMMUNITIES.items()])
+        await message.answer(
+            f"📥 *Импорт мемов из VK*\n\n"
+            f"Использование: `/vk_import <паблик> [кол-во]`\n\n"
+            f"Примеры:\n"
+            f"• `/vk_import mdk` — 30 мемов из MDK\n"
+            f"• `/vk_import borsch 50` — 50 мемов из Борща\n\n"
+            f"*Доступные паблики:*\n{communities_list}\n\n"
+            f"Или укажи любой домен паблика!",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    community = args[1].lower().replace("@", "").replace("https://vk.com/", "")
+    count = int(args[2]) if len(args) > 2 and args[2].isdigit() else 30
+    count = min(count, 100)  # Максимум 100
+    
+    # Определяем chat_id куда импортировать
+    if message.chat.type == "private":
+        await message.answer(
+            "❓ В какой чат импортировать?\n\n"
+            "Используй эту команду в групповом чате, куда хочешь загрузить мемы."
+        )
+        return
+    
+    chat_id = message.chat.id
+    community_name = VK_MEME_COMMUNITIES.get(community, community)
+    
+    processing = await message.answer(
+        f"🔄 Импортирую мемы из VK/{community_name}...\n"
+        f"Количество: до {count} шт.\n\n"
+        f"⏳ Это может занять несколько минут..."
+    )
+    
+    try:
+        stats = await import_vk_memes_to_chat(chat_id, community, count)
+        
+        await processing.edit_text(
+            f"✅ *Импорт завершён!*\n\n"
+            f"📥 Импортировано: {stats['imported']}\n"
+            f"⏭ Пропущено: {stats['skipped']}\n"
+            f"❌ Ошибок: {stats['errors']}\n\n"
+            f"Источник: VK/{community_name}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        await processing.edit_text(f"❌ Ошибка импорта: {e}")
 
 
 # ==================== ЗАПУСК ====================

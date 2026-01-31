@@ -99,6 +99,8 @@ async def init_db():
                 reply_to_username TEXT,
                 sticker_emoji TEXT,
                 image_description TEXT,
+                file_id TEXT,
+                file_unique_id TEXT,
                 created_at BIGINT NOT NULL
             )
         """)
@@ -127,6 +129,21 @@ async def init_db():
         try:
             await conn.execute("""
                 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS image_description TEXT
+            """)
+        except Exception:
+            pass
+        
+        # Добавляем file_id для хранения медиа
+        try:
+            await conn.execute("""
+                ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS file_id TEXT
+            """)
+        except Exception:
+            pass
+        
+        try:
+            await conn.execute("""
+                ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS file_unique_id TEXT
             """)
         except Exception:
             pass  # Колонка уже существует
@@ -552,17 +569,21 @@ async def save_chat_message(
     reply_to_first_name: str = None,
     reply_to_username: str = None,
     sticker_emoji: str = None,
-    image_description: str = None
+    image_description: str = None,
+    file_id: str = None,
+    file_unique_id: str = None
 ):
     """Сохранить сообщение чата для аналитики"""
     async with (await get_pool()).acquire() as conn:
         await conn.execute("""
             INSERT INTO chat_messages 
             (chat_id, user_id, username, first_name, message_text, message_type,
-             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, image_description, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, 
+             image_description, file_id, file_unique_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         """, chat_id, user_id, username, first_name, message_text, message_type,
-             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, image_description, int(time.time()))
+             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, 
+             image_description, file_id, file_unique_id, int(time.time()))
 
 
 async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]]:
@@ -1072,16 +1093,28 @@ async def save_media(
     description: str = None,
     caption: str = None
 ) -> bool:
-    """Сохранить медиа (мем, стикер, гифку) в коллекцию чата"""
+    """Сохранить медиа (мем, стикер, гифку, голосовое) в коллекцию чата"""
     async with (await get_pool()).acquire() as conn:
         try:
+            # Если нет file_unique_id — используем file_id как уникальный ключ
+            unique_key = file_unique_id or file_id
+            
+            # Проверяем, есть ли уже такой медиа
+            existing = await conn.fetchrow("""
+                SELECT id FROM chat_media 
+                WHERE chat_id = $1 AND (file_unique_id = $2 OR file_id = $3)
+            """, chat_id, unique_key, file_id)
+            
+            if existing:
+                # Уже есть — не дублируем
+                return False
+            
             await conn.execute("""
                 INSERT INTO chat_media 
                 (chat_id, user_id, file_id, file_type, file_unique_id, description, caption, created_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (chat_id, file_unique_id) DO UPDATE SET
-                    usage_count = chat_media.usage_count  -- Не меняем если уже есть
-            """, chat_id, user_id, file_id, file_type, file_unique_id, description, caption, int(time.time()))
+            """, chat_id, user_id, file_id, file_type, unique_key, description, caption, int(time.time()))
+            logger.info(f"Saved media: type={file_type}, chat={chat_id}")
             return True
         except Exception as e:
             logger.warning(f"Could not save media: {e}")
@@ -1145,3 +1178,50 @@ async def get_top_media(chat_id: int, limit: int = 10) -> List[Dict[str, Any]]:
         """, chat_id, limit)
         
         return [dict(row) for row in rows]
+
+
+async def migrate_media_from_messages() -> Dict[str, int]:
+    """Мигрировать медиа из chat_messages в chat_media (только те, у которых есть file_id)"""
+    async with (await get_pool()).acquire() as conn:
+        stats = {'migrated': 0, 'skipped': 0, 'errors': 0}
+        
+        # Получаем все сообщения с file_id
+        rows = await conn.fetch("""
+            SELECT chat_id, user_id, message_type, file_id, file_unique_id, 
+                   image_description, sticker_emoji, created_at, first_name
+            FROM chat_messages 
+            WHERE file_id IS NOT NULL 
+              AND message_type IN ('photo', 'sticker', 'animation', 'voice', 'video_note')
+        """)
+        
+        for row in rows:
+            try:
+                # Проверяем, есть ли уже в chat_media
+                existing = await conn.fetchrow("""
+                    SELECT id FROM chat_media 
+                    WHERE chat_id = $1 AND file_unique_id = $2
+                """, row['chat_id'], row['file_unique_id'] or row['file_id'])
+                
+                if existing:
+                    stats['skipped'] += 1
+                    continue
+                
+                # Формируем описание
+                description = row.get('image_description') or row.get('sticker_emoji') or ''
+                if row['message_type'] in ('voice', 'video_note'):
+                    description = f"{row['message_type']} от {row.get('first_name', 'Аноним')}"
+                
+                # Добавляем в chat_media
+                await conn.execute("""
+                    INSERT INTO chat_media 
+                    (chat_id, user_id, file_id, file_type, file_unique_id, description, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """, row['chat_id'], row['user_id'], row['file_id'], row['message_type'],
+                     row['file_unique_id'] or row['file_id'], description, row['created_at'])
+                
+                stats['migrated'] += 1
+            except Exception as e:
+                logger.warning(f"Migration error for message: {e}")
+                stats['errors'] += 1
+        
+        return stats
