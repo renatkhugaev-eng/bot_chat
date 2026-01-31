@@ -1867,9 +1867,9 @@ async def cmd_svodka(message: Message):
 
 # ==================== СБОР СООБЩЕНИЙ ====================
 
-@router.message(F.text)
+@router.message(F.text, ~F.text.startswith("/"))
 async def collect_messages_and_exp(message: Message):
-    """Сбор всех сообщений + пассивный опыт"""
+    """Сбор всех сообщений + пассивный опыт (кроме команд)"""
     if message.chat.type == "private":
         return
     
