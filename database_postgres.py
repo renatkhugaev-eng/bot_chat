@@ -1,21 +1,64 @@
 """
 База данных PostgreSQL (Neon/Vercel Postgres)
 Замена SQLite на PostgreSQL для продакшена
-v3.0 - Full audit fixes, improved indexes, correct cleanup counts
+v3.1 - Production-ready: SSL, retry logic, connection health checks
 """
 import asyncpg
+import asyncio
 import time
 import os
+import logging
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # URL базы данных из переменных окружения
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
 
 # Пул соединений
 pool: Optional[asyncpg.Pool] = None
+
+
+def _ensure_ssl_in_url(url: str) -> str:
+    """Добавить SSL параметры для Neon если их нет"""
+    if not url:
+        return url
+    if "sslmode=" not in url:
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}sslmode=require"
+    return url
+
+
+async def _execute_with_retry(coro_func, *args, max_retries: int = 3, **kwargs):
+    """Выполнить запрос с повторными попытками при сбое соединения"""
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            return await coro_func(*args, **kwargs)
+        except (asyncpg.ConnectionDoesNotExistError, 
+                asyncpg.InterfaceError,
+                asyncpg.ConnectionFailureError) as e:
+            last_exception = e
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 0.5  # 0.5, 1.0, 1.5 сек
+                logger.warning(f"DB connection error, retry {attempt + 1}/{max_retries} in {wait_time}s: {e}")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"DB connection failed after {max_retries} retries: {e}")
+    
+    raise last_exception
+
+
+async def get_pool():
+    """Получить пул соединений с проверкой инициализации"""
+    global pool
+    if pool is None:
+        raise RuntimeError("Database pool not initialized! Call init_db() first.")
+    return pool
 
 
 async def init_db():
@@ -25,15 +68,22 @@ async def init_db():
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL не установлен! Добавь его в .env")
     
-    # Создаём пул соединений
+    # Добавляем SSL для Neon
+    db_url = _ensure_ssl_in_url(DATABASE_URL)
+    
+    # Создаём пул соединений с оптимальными настройками для Neon serverless
     pool = await asyncpg.create_pool(
-        DATABASE_URL,
-        min_size=2,
-        max_size=10,
-        command_timeout=60
+        db_url,
+        min_size=1,           # Минимум соединений (Neon serverless режим)
+        max_size=10,          # Максимум соединений
+        max_inactive_connection_lifetime=60,  # Закрывать неактивные через 60 сек
+        command_timeout=60,   # Таймаут команды
+        statement_cache_size=100  # Кэш подготовленных запросов
     )
     
-    async with pool.acquire() as conn:
+    logger.info("🗄 Подключение к PostgreSQL установлено")
+    
+    async with (await get_pool()).acquire() as conn:
         # Таблица сообщений чата (для сводок)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
@@ -155,11 +205,12 @@ async def init_db():
             )
         """)
         
-        # Таблица инвентаря
+        # Таблица инвентаря (с chat_id для разделения по чатам)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS inventory (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
+                chat_id BIGINT NOT NULL DEFAULT 0,
                 item_name TEXT NOT NULL,
                 item_type TEXT NOT NULL,
                 bonus_attack INTEGER DEFAULT 0,
@@ -168,6 +219,14 @@ async def init_db():
                 acquired_at BIGINT DEFAULT 0
             )
         """)
+        
+        # Миграция: добавляем chat_id в inventory если его нет
+        try:
+            await conn.execute("""
+                ALTER TABLE inventory ADD COLUMN IF NOT EXISTS chat_id BIGINT DEFAULT 0
+            """)
+        except Exception:
+            pass
         
         # Таблица достижений
         await conn.execute("""
@@ -209,13 +268,25 @@ async def init_db():
             ON event_log(chat_id, created_at DESC)
         """)
         
-        # Индекс для инвентаря по пользователю
+        # Индекс для инвентаря по пользователю и чату
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_inventory_user 
-            ON inventory(user_id)
+            ON inventory(user_id, chat_id)
+        """)
+        
+        # Индекс для быстрой очистки истёкших воспоминаний
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_expires 
+            ON chat_memories(expires_at) WHERE expires_at IS NOT NULL
+        """)
+        
+        # Индекс для очистки старых сообщений
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_cleanup 
+            ON chat_messages(created_at) WHERE created_at < EXTRACT(EPOCH FROM NOW())::BIGINT
         """)
     
-    print("[OK] PostgreSQL database initialized!")
+    logger.info("✅ PostgreSQL database initialized!")
 
 
 async def close_db():
@@ -223,11 +294,26 @@ async def close_db():
     global pool
     if pool:
         await pool.close()
+        pool = None
+        logger.info("🗄 PostgreSQL connection pool closed")
+
+
+async def health_check() -> bool:
+    """Проверить соединение с БД"""
+    try:
+        p = await get_pool()
+        async with p.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        return True
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        return False
 
 
 async def get_player(user_id: int, chat_id: int) -> Optional[Dict[str, Any]]:
     """Получить данные игрока"""
-    async with pool.acquire() as conn:
+    p = await get_pool()
+    async with p.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT * FROM players WHERE user_id = $1 AND chat_id = $2",
             user_id, chat_id
@@ -239,7 +325,8 @@ async def get_player(user_id: int, chat_id: int) -> Optional[Dict[str, Any]]:
 
 async def create_player(user_id: int, chat_id: int, username: str, first_name: str) -> Dict[str, Any]:
     """Создать нового игрока"""
-    async with pool.acquire() as conn:
+    p = await get_pool()
+    async with p.acquire() as conn:
         await conn.execute("""
             INSERT INTO players (user_id, chat_id, username, first_name, created_at)
             VALUES ($1, $2, $3, $4, $5)
@@ -250,7 +337,8 @@ async def create_player(user_id: int, chat_id: int, username: str, first_name: s
 
 async def set_player_class(user_id: int, chat_id: int, player_class: str, bonuses: dict):
     """Установить класс игрока"""
-    async with pool.acquire() as conn:
+    p = await get_pool()
+    async with p.acquire() as conn:
         await conn.execute("""
             UPDATE players 
             SET player_class = $1,
@@ -303,7 +391,8 @@ async def update_player_stats(user_id: int, chat_id: int, **kwargs):
         WHERE user_id = ${param_num} AND chat_id = ${param_num + 1}
     """
     
-    async with pool.acquire() as conn:
+    p = await get_pool()
+    async with p.acquire() as conn:
         await conn.execute(query, *values)
 
 
@@ -314,7 +403,7 @@ async def get_top_players(chat_id: int, limit: int = 10, sort_by: str = "experie
     if sort_by not in allowed_fields:
         sort_by = "experience"
     
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         rows = await conn.fetch(f"""
             SELECT * FROM players 
             WHERE chat_id = $1 AND is_active = 1 AND player_class IS NOT NULL
@@ -326,7 +415,7 @@ async def get_top_players(chat_id: int, limit: int = 10, sort_by: str = "experie
 
 async def get_all_active_players(chat_id: int) -> List[Dict[str, Any]]:
     """Получить всех активных игроков чата"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         rows = await conn.fetch("""
             SELECT * FROM players 
             WHERE chat_id = $1 AND is_active = 1 AND player_class IS NOT NULL
@@ -356,7 +445,7 @@ async def is_in_jail(user_id: int, chat_id: int) -> tuple:
 
 async def add_to_treasury(chat_id: int, amount: int):
     """Добавить деньги в общак чата"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         await conn.execute("""
             INSERT INTO chat_treasury (chat_id, money)
             VALUES ($1, $2)
@@ -366,7 +455,7 @@ async def add_to_treasury(chat_id: int, amount: int):
 
 async def get_treasury(chat_id: int) -> int:
     """Получить общак чата"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         row = await conn.fetchrow(
             "SELECT money FROM chat_treasury WHERE chat_id = $1",
             chat_id
@@ -377,7 +466,7 @@ async def get_treasury(chat_id: int) -> int:
 async def log_event(chat_id: int, event_type: str, user_id: int = None, 
                     target_id: int = None, amount: int = 0, details: str = None):
     """Записать событие в лог"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         await conn.execute("""
             INSERT INTO event_log (chat_id, event_type, user_id, target_id, amount, details, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -386,7 +475,7 @@ async def log_event(chat_id: int, event_type: str, user_id: int = None,
 
 async def add_achievement(user_id: int, achievement_name: str) -> bool:
     """Добавить достижение игроку"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         try:
             await conn.execute("""
                 INSERT INTO achievements (user_id, achievement_name, achieved_at)
@@ -399,7 +488,7 @@ async def add_achievement(user_id: int, achievement_name: str) -> bool:
 
 async def get_player_achievements(user_id: int) -> List[str]:
     """Получить все достижения игрока"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         rows = await conn.fetch(
             "SELECT achievement_name FROM achievements WHERE user_id = $1",
             user_id
@@ -423,7 +512,7 @@ async def save_chat_message(
     image_description: str = None
 ):
     """Сохранить сообщение чата для аналитики"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         await conn.execute("""
             INSERT INTO chat_messages 
             (chat_id, user_id, username, first_name, message_text, message_type,
@@ -437,7 +526,7 @@ async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]
     """Получить сообщения чата за последние N часов"""
     since_time = int(time.time()) - (hours * 3600)
     
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         rows = await conn.fetch("""
             SELECT * FROM chat_messages 
             WHERE chat_id = $1 AND created_at >= $2
@@ -448,7 +537,7 @@ async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]
 
 async def get_user_messages(chat_id: int, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
     """Получить последние N сообщений конкретного пользователя"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         rows = await conn.fetch("""
             SELECT message_text, message_type, sticker_emoji, created_at
             FROM chat_messages 
@@ -463,7 +552,7 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
     """Получить статистику чата за последние N часов"""
     since_time = int(time.time()) - (hours * 3600)
     
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         # Общее количество сообщений
         row = await conn.fetchrow("""
             SELECT COUNT(*) as total FROM chat_messages 
@@ -536,7 +625,7 @@ async def cleanup_old_messages(days: int = 7) -> int:
     """Удалить старые сообщения, возвращает количество удалённых"""
     cutoff_time = int(time.time()) - (days * 24 * 3600)
     
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         # Сначала считаем сколько удалим
         row = await conn.fetchrow("""
             SELECT COUNT(*) as count FROM chat_messages WHERE created_at < $1
@@ -564,7 +653,7 @@ async def save_summary(
     memorable_quotes: str = None
 ):
     """Сохранить сводку в память"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         await conn.execute("""
             INSERT INTO chat_summaries 
             (chat_id, summary_text, key_facts, top_talker_username, top_talker_name, 
@@ -576,7 +665,7 @@ async def save_summary(
 
 async def get_previous_summaries(chat_id: int, limit: int = 3) -> List[Dict[str, Any]]:
     """Получить предыдущие сводки для контекста"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         rows = await conn.fetch("""
             SELECT summary_text, key_facts, top_talker_username, top_talker_name,
                    top_talker_count, drama_pairs, memorable_quotes, created_at
@@ -601,7 +690,7 @@ async def save_memory(
     """Сохранить воспоминание о участнике"""
     expires_at = int(time.time()) + (expires_days * 24 * 3600) if expires_days else None
     
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         # Upsert - обновляем если такое воспоминание уже есть
         await conn.execute("""
             INSERT INTO chat_memories 
@@ -619,7 +708,7 @@ async def get_memories(chat_id: int, limit: int = 20) -> List[Dict[str, Any]]:
     """Получить воспоминания о чате"""
     current_time = int(time.time())
     
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         rows = await conn.fetch("""
             SELECT user_id, username, first_name, memory_type, memory_text, 
                    relevance_score, created_at
@@ -636,7 +725,7 @@ async def get_user_memories(chat_id: int, user_id: int) -> List[Dict[str, Any]]:
     """Получить воспоминания о конкретном участнике"""
     current_time = int(time.time())
     
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         rows = await conn.fetch("""
             SELECT memory_type, memory_text, relevance_score, created_at
             FROM chat_memories 
@@ -652,7 +741,7 @@ async def cleanup_expired_memories() -> int:
     """Удалить истёкшие воспоминания, возвращает количество удалённых"""
     current_time = int(time.time())
     
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         # Сначала считаем
         row = await conn.fetchrow("""
             SELECT COUNT(*) as count FROM chat_memories 
@@ -672,7 +761,7 @@ async def cleanup_old_summaries(days: int = 30) -> int:
     """Удалить сводки старше N дней, возвращает количество удалённых"""
     cutoff_time = int(time.time()) - (days * 24 * 3600)
     
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         # Сначала считаем
         row = await conn.fetchrow("""
             SELECT COUNT(*) as count FROM chat_summaries WHERE created_at < $1
@@ -689,7 +778,7 @@ async def cleanup_old_summaries(days: int = 30) -> int:
 
 async def get_database_stats() -> Dict[str, Any]:
     """Получить статистику базы данных для мониторинга"""
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         stats = {}
         
         # Количество записей в таблицах
@@ -749,7 +838,7 @@ async def cleanup_old_events(days: int = 14) -> int:
     """Удалить старые события из лога"""
     cutoff_time = int(time.time()) - (days * 24 * 3600)
     
-    async with pool.acquire() as conn:
+    async with (await get_pool()).acquire() as conn:
         # Считаем
         row = await conn.fetchrow("""
             SELECT COUNT(*) as count FROM event_log WHERE created_at < $1
