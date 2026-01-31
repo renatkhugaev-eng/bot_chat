@@ -279,12 +279,6 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_memories_expires 
             ON chat_memories(expires_at) WHERE expires_at IS NOT NULL
         """)
-        
-        # Индекс для очистки старых сообщений
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_messages_cleanup 
-            ON chat_messages(created_at) WHERE created_at < EXTRACT(EPOCH FROM NOW())::BIGINT
-        """)
     
     logger.info("✅ PostgreSQL database initialized!")
 
