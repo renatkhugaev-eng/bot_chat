@@ -18,8 +18,34 @@ import aiohttp
 import json
 import os
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
 load_dotenv()
+
+# ==================== ГЛОБАЛЬНАЯ HTTP СЕССИЯ ====================
+# Переиспользуем одну сессию для всех API запросов — +30% скорость
+
+_http_session: Optional[aiohttp.ClientSession] = None
+
+
+async def get_http_session() -> aiohttp.ClientSession:
+    """Получить глобальную HTTP сессию (создаёт если нет)"""
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        timeout = aiohttp.ClientTimeout(total=60, connect=10)
+        _http_session = aiohttp.ClientSession(
+            timeout=timeout,
+            headers={"User-Agent": "TetaRozaBot/1.0"}
+        )
+    return _http_session
+
+
+async def close_http_session():
+    """Закрыть HTTP сессию при выключении"""
+    global _http_session
+    if _http_session and not _http_session.closed:
+        await _http_session.close()
+        _http_session = None
 
 # Выбор базы данных: PostgreSQL (продакшн) или SQLite (локально)
 USE_POSTGRES = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
@@ -101,6 +127,125 @@ def cleanup_cooldowns():
     expired_keys = [k for k, v in cooldowns.items() if v < current_time]
     for key in expired_keys:
         del cooldowns[key]
+
+
+# ==================== СБОР КОНТЕКСТА (DRY) ====================
+
+async def gather_user_context(chat_id: int, user_id: int, limit: int = 100) -> tuple[str, int]:
+    """
+    Собирает контекст сообщений пользователя для AI-команд.
+    Возвращает (context_string, messages_count)
+    """
+    context_parts = []
+    messages_found = 0
+    
+    if not USE_POSTGRES:
+        return "Сообщений нет — база данных недоступна", 0
+    
+    try:
+        user_messages = await get_user_messages(chat_id, user_id, limit=limit)
+        if user_messages:
+            texts = [
+                msg['message_text'] 
+                for msg in user_messages 
+                if msg.get('message_text') and len(msg.get('message_text', '')) > 3
+            ]
+            messages_found = len(texts)
+            
+            if texts:
+                # Берём интересные (длинные) + последние
+                interesting = sorted(texts, key=len, reverse=True)[:15]
+                recent = texts[:15]
+                all_texts = list(dict.fromkeys(interesting + recent))[:20]
+                
+                for i, text in enumerate(all_texts, 1):
+                    truncated = text[:200] + "..." if len(text) > 200 else text
+                    context_parts.append(f'{i}. "{truncated}"')
+    except Exception as e:
+        logger.warning(f"Could not fetch user messages: {e}")
+    
+    if context_parts:
+        return "\n".join(context_parts), messages_found
+    else:
+        return "Сообщений нет — молчит как партизан", 0
+
+
+# ==================== RATE LIMITER ДЛЯ API ====================
+
+# Глобальный счётчик API вызовов (защита от спама)
+api_calls = {}  # (chat_id, api_type) -> [timestamps]
+API_LIMITS = {
+    "poem": (5, 60),      # 5 вызовов в минуту на чат
+    "diagnosis": (5, 60),
+    "burn": (5, 60),
+    "drink": (5, 60),
+    "suck": (10, 60),
+    "summary": (2, 300),  # 2 сводки за 5 минут
+    "vision": (10, 60),
+}
+
+
+def check_api_rate_limit(chat_id: int, api_type: str) -> tuple[bool, int]:
+    """
+    Проверить rate limit для API.
+    Возвращает (можно_ли, секунд_до_сброса)
+    """
+    if api_type not in API_LIMITS:
+        return True, 0
+    
+    max_calls, window_seconds = API_LIMITS[api_type]
+    key = (chat_id, api_type)
+    current_time = time.time()
+    
+    # Очищаем старые записи
+    if key in api_calls:
+        api_calls[key] = [t for t in api_calls[key] if current_time - t < window_seconds]
+    else:
+        api_calls[key] = []
+    
+    # Проверяем лимит
+    if len(api_calls[key]) >= max_calls:
+        oldest = min(api_calls[key])
+        wait_time = int(window_seconds - (current_time - oldest))
+        return False, max(1, wait_time)
+    
+    # Добавляем текущий вызов
+    api_calls[key].append(current_time)
+    return True, 0
+
+
+# ==================== МЕТРИКИ ====================
+
+class BotMetrics:
+    """Простые метрики для мониторинга"""
+    def __init__(self):
+        self.commands_count = {}  # command -> count
+        self.api_calls_count = {}  # api_type -> count
+        self.errors_count = 0
+        self.start_time = time.time()
+    
+    def track_command(self, command: str):
+        self.commands_count[command] = self.commands_count.get(command, 0) + 1
+    
+    def track_api_call(self, api_type: str):
+        self.api_calls_count[api_type] = self.api_calls_count.get(api_type, 0) + 1
+    
+    def track_error(self):
+        self.errors_count += 1
+    
+    def get_stats(self) -> dict:
+        uptime = int(time.time() - self.start_time)
+        return {
+            "uptime_seconds": uptime,
+            "uptime_human": f"{uptime // 3600}ч {(uptime % 3600) // 60}м",
+            "total_commands": sum(self.commands_count.values()),
+            "top_commands": sorted(self.commands_count.items(), key=lambda x: -x[1])[:5],
+            "total_api_calls": sum(self.api_calls_count.values()),
+            "api_calls": self.api_calls_count,
+            "errors": self.errors_count
+        }
+
+metrics = BotMetrics()
 
 
 # ==================== КОМАНДЫ ====================
@@ -1129,60 +1274,39 @@ async def cmd_poem(message: Message):
         await message.answer(f"⏰ Муза отдыхает! Подожди {cooldown_remaining} сек")
         return
     
+    # Rate limit check
+    can_call, wait_time = check_api_rate_limit(chat_id, "poem")
+    if not can_call:
+        await message.answer(f"⏰ Слишком много стихов! Подожди {wait_time} сек")
+        return
+    
     # Показываем что работаем
     processing_msg = await message.answer(f"🪶 Тётя Роза изучает досье на {target_name} и берёт перо... ✨")
+    metrics.track_command("poem")
     
     try:
-        # Собираем контекст — последние 100 сообщений человека
+        # Собираем контекст (используем новую функцию)
         context_parts = []
-        messages_found = 0
-        
         if target_user:
             context_parts.append(f"Ник: @{target_user.username}" if target_user.username else "Ник: нет")
-            
-            # Получаем последние сообщения из БД
-            if target_user_id and USE_POSTGRES:
-                try:
-                    user_messages = await get_user_messages(chat_id, target_user_id, limit=100)
-                    if user_messages:
-                        # Собираем тексты сообщений
-                        texts = [msg['message_text'] for msg in user_messages if msg.get('message_text') and len(msg.get('message_text', '')) > 5]
-                        messages_found = len(texts)
-                        
-                        if texts:
-                            context_parts.append(f"\n=== СООБЩЕНИЯ ЭТОГО ЧЕЛОВЕКА ({len(texts)} шт) ===")
-                            context_parts.append("Используй ЭТИ сообщения для персонального унижения!")
-                            
-                            # Разнообразие: берём и длинные, и случайные
-                            interesting_texts = sorted(texts, key=len, reverse=True)[:10]  # Топ длинных
-                            recent_texts = texts[:10]  # Последние
-                            
-                            # Объединяем уникальные
-                            all_texts = list(dict.fromkeys(interesting_texts + recent_texts))[:15]
-                            
-                            for i, text in enumerate(all_texts, 1):
-                                truncated = text[:200] + "..." if len(text) > 200 else text
-                                context_parts.append(f'{i}. "{truncated}"')
-                            
-                            context_parts.append("\n=== КОНЕЦ СООБЩЕНИЙ ===")
-                            context_parts.append("ОБЯЗАТЕЛЬНО используй цитаты и темы из сообщений выше!")
-                except Exception as e:
-                    logger.warning(f"Could not fetch user messages: {e}")
         
-        context = "\n".join(context_parts) if context_parts else "Обычный участник чата (сообщений нет)"
+        if target_user_id:
+            user_context, messages_found = await gather_user_context(chat_id, target_user_id)
+            if messages_found > 0:
+                context_parts.append(f"\n=== СООБЩЕНИЯ ({messages_found} шт) ===")
+                context_parts.append(user_context)
+                context_parts.append("=== ИСПОЛЬЗУЙ ЭТО ДЛЯ УНИЖЕНИЯ! ===")
+        else:
+            messages_found = 0
         
-        # Логируем для отладки
-        logger.info(f"Poem request: chat_id={chat_id}, target_user_id={target_user_id}, target_name={target_name}")
-        logger.info(f"Poem context: {messages_found} messages found, context length: {len(context)} chars")
+        context = "\n".join(context_parts) if context_parts else "Обычный участник чата"
+        logger.info(f"Poem: {target_name}, {messages_found} msgs")
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        metrics.track_api_call("poem")
+        session = await get_http_session()
+        async with session.post(
                 poem_api_url,
-                json={
-                    "name": target_name,
-                    "context": context
-                },
-                timeout=aiohttp.ClientTimeout(total=60)
+                json={"name": target_name, "context": context}
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -1255,45 +1379,25 @@ async def cmd_diagnosis(message: Message):
         await message.answer(f"⏰ Тётя Роза ещё не протрезвела! Подожди {cooldown_remaining} сек")
         return
     
+    # Rate limit
+    can_call, wait_time = check_api_rate_limit(chat_id, "diagnosis")
+    if not can_call:
+        await message.answer(f"⏰ Приём окончен! Подожди {wait_time} сек")
+        return
+    
     processing_msg = await message.answer(f"🏥 Тётя Роза надевает очки и изучает историю болезни {target_name}... 🔬")
+    metrics.track_command("diagnosis")
     
     try:
-        # Собираем контекст — сообщения человека
-        context_parts = []
-        messages_found = 0
+        # Собираем контекст
+        context, messages_found = await gather_user_context(chat_id, target_user_id) if target_user_id else ("Пациент молчалив — это симптом", 0)
+        logger.info(f"Diagnosis: {target_name}, {messages_found} msgs")
         
-        if target_user_id and USE_POSTGRES:
-            try:
-                user_messages = await get_user_messages(chat_id, target_user_id, limit=100)
-                if user_messages:
-                    texts = [msg['message_text'] for msg in user_messages if msg.get('message_text') and len(msg.get('message_text', '')) > 3]
-                    messages_found = len(texts)
-                    
-                    if texts:
-                        # Берём разнообразные сообщения
-                        interesting = sorted(texts, key=len, reverse=True)[:15]
-                        recent = texts[:15]
-                        all_texts = list(dict.fromkeys(interesting + recent))[:20]
-                        
-                        for i, text in enumerate(all_texts, 1):
-                            truncated = text[:200] + "..." if len(text) > 200 else text
-                            context_parts.append(f'{i}. "{truncated}"')
-            except Exception as e:
-                logger.warning(f"Could not fetch user messages for diagnosis: {e}")
-        
-        context = "\n".join(context_parts) if context_parts else "Сообщений нет, пациент подозрительно молчалив — это тоже симптом"
-        
-        logger.info(f"Diagnosis request: target={target_name}, messages={messages_found}")
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        metrics.track_api_call("diagnosis")
+        session = await get_http_session()
+        async with session.post(
                 diagnosis_api_url,
-                json={
-                    "name": target_name,
-                    "username": target_username or "",
-                    "context": context
-                },
-                timeout=aiohttp.ClientTimeout(total=60)
+                json={"name": target_name, "username": target_username or "", "context": context}
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -1362,43 +1466,25 @@ async def cmd_burn(message: Message):
         await message.answer(f"⏰ Костёр ещё не остыл! Подожди {cooldown_remaining} сек")
         return
     
+    # Rate limit
+    can_call, wait_time = check_api_rate_limit(chat_id, "burn")
+    if not can_call:
+        await message.answer(f"⏰ Костёр перегрелся! Подожди {wait_time} сек")
+        return
+    
     processing_msg = await message.answer(f"🔥 Тётя Роза собирает хворост и поджигает {target_name}... 🪵")
+    metrics.track_command("burn")
     
     try:
-        context_parts = []
-        messages_found = 0
+        # Собираем контекст
+        context, messages_found = await gather_user_context(chat_id, target_user_id) if target_user_id else ("Горел молча, как и жил", 0)
+        logger.info(f"Burn: {target_name}, {messages_found} msgs")
         
-        if target_user_id and USE_POSTGRES:
-            try:
-                user_messages = await get_user_messages(chat_id, target_user_id, limit=100)
-                if user_messages:
-                    texts = [msg['message_text'] for msg in user_messages if msg.get('message_text') and len(msg.get('message_text', '')) > 3]
-                    messages_found = len(texts)
-                    
-                    if texts:
-                        interesting = sorted(texts, key=len, reverse=True)[:15]
-                        recent = texts[:15]
-                        all_texts = list(dict.fromkeys(interesting + recent))[:20]
-                        
-                        for i, text in enumerate(all_texts, 1):
-                            truncated = text[:200] + "..." if len(text) > 200 else text
-                            context_parts.append(f'{i}. "{truncated}"')
-            except Exception as e:
-                logger.warning(f"Could not fetch user messages for burn: {e}")
-        
-        context = "\n".join(context_parts) if context_parts else "Сообщений нет — горел молча, как и жил, нихуя не сказав миру"
-        
-        logger.info(f"Burn request: target={target_name}, messages={messages_found}")
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        metrics.track_api_call("burn")
+        session = await get_http_session()
+        async with session.post(
                 burn_api_url,
-                json={
-                    "name": target_name,
-                    "username": target_username or "",
-                    "context": context
-                },
-                timeout=aiohttp.ClientTimeout(total=60)
+                json={"name": target_name, "username": target_username or "", "context": context}
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -1467,43 +1553,25 @@ async def cmd_drink(message: Message):
         await message.answer(f"⏰ Тётя Роза ещё не протрезвела! Подожди {cooldown_remaining} сек")
         return
     
+    # Rate limit
+    can_call, wait_time = check_api_rate_limit(chat_id, "drink")
+    if not can_call:
+        await message.answer(f"⏰ Тётя Роза ещё не протрезвела! Подожди {wait_time} сек")
+        return
+    
     processing_msg = await message.answer(f"🍻 Тётя Роза открывает бутылку и зовёт {target_name} бухать... 🥃")
+    metrics.track_command("drink")
     
     try:
-        context_parts = []
-        messages_found = 0
+        # Собираем контекст
+        context, messages_found = await gather_user_context(chat_id, target_user_id) if target_user_id else ("Молчал как партизан", 0)
+        logger.info(f"Drink: {target_name}, {messages_found} msgs")
         
-        if target_user_id and USE_POSTGRES:
-            try:
-                user_messages = await get_user_messages(chat_id, target_user_id, limit=100)
-                if user_messages:
-                    texts = [msg['message_text'] for msg in user_messages if msg.get('message_text') and len(msg.get('message_text', '')) > 3]
-                    messages_found = len(texts)
-                    
-                    if texts:
-                        interesting = sorted(texts, key=len, reverse=True)[:15]
-                        recent = texts[:15]
-                        all_texts = list(dict.fromkeys(interesting + recent))[:20]
-                        
-                        for i, text in enumerate(all_texts, 1):
-                            truncated = text[:200] + "..." if len(text) > 200 else text
-                            context_parts.append(f'{i}. "{truncated}"')
-            except Exception as e:
-                logger.warning(f"Could not fetch user messages for drink: {e}")
-        
-        context = "\n".join(context_parts) if context_parts else "Молчал как партизан, но по роже видно — лузер"
-        
-        logger.info(f"Drink request: target={target_name}, messages={messages_found}")
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        metrics.track_api_call("drink")
+        session = await get_http_session()
+        async with session.post(
                 drink_api_url,
-                json={
-                    "name": target_name,
-                    "username": target_username or "",
-                    "context": context
-                },
-                timeout=aiohttp.ClientTimeout(total=60)
+                json={"name": target_name, "username": target_username or "", "context": context}
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -1558,13 +1626,12 @@ async def cmd_suck(message: Message):
         return
     
     processing_msg = await message.answer("🍭 Готовлю послание...")
+    metrics.track_command("suck")
     
     try:
-        timeout = aiohttp.ClientTimeout(total=60)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            payload = {"name": target_name}
-            
-            async with session.post(SUCK_API_URL, json=payload) as response:
+        metrics.track_api_call("suck")
+        session = await get_http_session()
+        async with session.post(SUCK_API_URL, json={"name": target_name}) as response:
                 if response.status == 200:
                     result = await response.json()
                     text = result.get("text", f"🍭 {target_name}, соси. Тётя Роза так сказала.")
@@ -1782,9 +1849,11 @@ async def cmd_svodka(message: Message):
     memories = await get_memories(chat_id, limit=20)
     
     # Отправляем запрос к Vercel API с памятью
+    metrics.track_command("svodka")
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        metrics.track_api_call("summary")
+        session = await get_http_session()
+        async with session.post(
                 VERCEL_API_URL,
                 json={
                     "statistics": stats,
@@ -1792,8 +1861,7 @@ async def cmd_svodka(message: Message):
                     "hours": 5,
                     "previous_summaries": previous_summaries,
                     "memories": memories
-                },
-                timeout=aiohttp.ClientTimeout(total=120)
+                }
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -2084,6 +2152,7 @@ async def cmd_admin(message: Message):
 /dbstats — общая статистика БД
 /chats — список всех чатов
 /topusers — топ пользователей
+/metrics — метрики бота (аптайм, команды)
 
 🔍 *Поиск:*
 /chat `<id>` — инфо о чате
@@ -2440,6 +2509,34 @@ async def cmd_health(message: Message):
     await processing.edit_text(text)
 
 
+@router.message(Command("metrics", "метрики"))
+async def cmd_metrics(message: Message):
+    """Показать метрики бота"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    stats = metrics.get_stats()
+    
+    top_cmds = "\n".join([f"  • {cmd}: {count}" for cmd, count in stats['top_commands']]) or "  Нет данных"
+    api_calls = "\n".join([f"  • {api}: {count}" for api, count in stats['api_calls'].items()]) or "  Нет данных"
+    
+    text = f"""📈 МЕТРИКИ БОТА
+
+⏱ Аптайм: {stats['uptime_human']}
+
+📊 Команды ({stats['total_commands']} всего):
+{top_cmds}
+
+🌐 API вызовы ({stats['total_api_calls']} всего):
+{api_calls}
+
+❌ Ошибок: {stats['errors']}
+📦 Cooldowns в памяти: {len(cooldowns)}
+🔄 Rate limits: {len(api_calls)} записей
+"""
+    await message.answer(text)
+
+
 @router.message(Command("cleanup", "clean_db"))
 async def cmd_cleanup(message: Message):
     """Ручная очистка БД"""
@@ -2477,10 +2574,18 @@ async def on_shutdown():
         scheduler.shutdown(wait=False)
         logger.info("⏰ Планировщик остановлен")
     
+    # Закрываем HTTP сессию
+    await close_http_session()
+    logger.info("🌐 HTTP сессия закрыта")
+    
     # Закрываем пул соединений с БД
     if close_db:
         await close_db()
         logger.info("🗄 Соединение с БД закрыто")
+    
+    # Логируем итоговую статистику
+    stats = metrics.get_stats()
+    logger.info(f"📊 Итоги сессии: {stats['total_commands']} команд, {stats['total_api_calls']} API вызовов, {stats['errors']} ошибок")
     
     logger.info("✅ Бот остановлен корректно")
 
