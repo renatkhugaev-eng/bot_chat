@@ -3326,13 +3326,17 @@ async def fetch_vk_memes(community: str, count: int = 50) -> List[Dict]:
     session = await get_http_session()
     
     try:
+        # Запрашиваем больше постов, т.к. не все содержат картинки
+        fetch_count = min(count * 3, 100)
+        
         # Получаем посты со стены
         async with session.get(
             "https://api.vk.com/method/wall.get",
             params={
                 "domain": community,
-                "count": min(count, 100),
+                "count": fetch_count,
                 "filter": "owner",
+                "extended": 0,
                 "access_token": VK_API_TOKEN,
                 "v": VK_API_VERSION
             }
@@ -3344,30 +3348,65 @@ async def fetch_vk_memes(community: str, count: int = 50) -> List[Dict]:
                 return []
             
             items = data.get("response", {}).get("items", [])
+            logger.info(f"VK returned {len(items)} posts from {community}")
             
             for item in items:
+                # Пропускаем репосты — они могут содержать аватарки
+                if item.get("copy_history"):
+                    continue
+                
                 attachments = item.get("attachments", [])
+                
                 for att in attachments:
                     if att["type"] == "photo":
+                        photo = att["photo"]
+                        sizes = photo.get("sizes", [])
+                        
+                        if not sizes:
+                            continue
+                        
                         # Берём самое большое фото
-                        sizes = att["photo"].get("sizes", [])
-                        if sizes:
-                            best = max(sizes, key=lambda x: x.get("width", 0) * x.get("height", 0))
+                        best = max(sizes, key=lambda x: x.get("width", 0) * x.get("height", 0))
+                        width = best.get("width", 0)
+                        height = best.get("height", 0)
+                        
+                        # Фильтруем: 
+                        # - минимум 400px по ширине (не аватарки)
+                        # - не слишком узкие (не баннеры)
+                        if width < 400 or height < 300:
+                            continue
+                        
+                        # Пропускаем квадратные маленькие (скорее всего аватарки)
+                        if width == height and width < 500:
+                            continue
+                        
+                        memes.append({
+                            "type": "photo",
+                            "url": best["url"],
+                            "text": item.get("text", "")[:200],
+                            "width": width,
+                            "height": height
+                        })
+                        
+                    elif att["type"] == "doc":
+                        doc = att["doc"]
+                        # GIF файлы
+                        if doc.get("ext") == "gif":
                             memes.append({
-                                "type": "photo",
-                                "url": best["url"],
+                                "type": "animation",
+                                "url": doc["url"],
                                 "text": item.get("text", "")[:200]
                             })
-                    elif att["type"] == "doc" and att["doc"].get("ext") == "gif":
-                        memes.append({
-                            "type": "animation",
-                            "url": att["doc"]["url"],
-                            "text": item.get("text", "")[:200]
-                        })
+                
+                # Достаточно мемов
+                if len(memes) >= count:
+                    break
+                    
     except Exception as e:
         logger.error(f"Error fetching VK memes: {e}")
     
-    return memes
+    logger.info(f"Filtered {len(memes)} valid memes from {community}")
+    return memes[:count]
 
 
 async def import_vk_memes_to_chat(chat_id: int, community: str, count: int = 30) -> Dict[str, int]:
