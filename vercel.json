@@ -20,6 +20,9 @@
     },
     "api/suck.py": {
       "maxDuration": 60
+    },
+    "api/ventilate.py": {
+      "maxDuration": 60
     }
   }
 }

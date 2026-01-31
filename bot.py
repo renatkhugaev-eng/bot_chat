@@ -182,6 +182,7 @@ API_LIMITS = {
     "suck": (10, 60),
     "summary": (2, 300),  # 2 сводки за 5 минут
     "vision": (10, 60),
+    "ventilate": (10, 60),  # 10 проветриваний в минуту
 }
 
 
@@ -900,6 +901,7 @@ async def cmd_help(message: Message):
 /сжечь — Сжечь на костре 🔥
 /бухнуть — Бухнуть и слить секреты 🍻
 /пососи — Философское напутствие 🍭
+/проветрить — Открыть форточку в чате 🪟
 /pic — Найти картинку 🖼
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1646,6 +1648,101 @@ async def cmd_suck(message: Message):
     except Exception as e:
         logger.error(f"Error in suck command: {e}")
         await processing_msg.edit_text(f"🍭 {target_name}, соси. Ошибка, но соси.")
+
+
+# ==================== ПРОВЕТРИТЬ ЧАТ ====================
+
+VENTILATE_API_URL = os.getenv("VENTILATE_API_URL", "")
+
+
+@router.message(Command("ventilate", "проветрить", "форточка", "свежесть"))
+async def cmd_ventilate(message: Message):
+    """Проветрить чат — абсурдное событие с рандомным участником"""
+    if message.chat.type == "private":
+        await message.answer("❌ Проветривать можно только групповые чаты!")
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    # Кулдаун 30 секунд
+    can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "ventilate", 30)
+    if not can_do:
+        await message.answer(f"⏰ Форточка ещё не закрылась! Подожди {cooldown_remaining} сек")
+        return
+    
+    # Rate limit
+    can_call, wait_time = check_api_rate_limit(chat_id, "ventilate")
+    if not can_call:
+        await message.answer(f"⏰ Слишком часто проветриваете! Подожди {wait_time} сек")
+        return
+    
+    # Определяем жертву: либо реплай, либо рандом из активных
+    victim_name = None
+    victim_username = None
+    
+    if message.reply_to_message and message.reply_to_message.from_user:
+        # Если ответ на сообщение — жертва тот, кому отвечают
+        victim = message.reply_to_message.from_user
+        victim_name = victim.first_name
+        victim_username = victim.username
+    else:
+        # Иначе берём случайного из последних активных
+        try:
+            if USE_POSTGRES:
+                stats = await get_chat_statistics(chat_id, hours=24)
+                if stats.get('top_authors'):
+                    # Берём рандомного из топ-10 активных
+                    active_users = stats['top_authors'][:10]
+                    if active_users:
+                        victim_data = random.choice(active_users)
+                        victim_name = victim_data.get('first_name', 'Кто-то')
+                        victim_username = victim_data.get('username', '')
+        except Exception as e:
+            logger.warning(f"Could not get active users for ventilate: {e}")
+    
+    # Если не нашли жертву — берём того, кто вызвал команду
+    if not victim_name:
+        victim_name = message.from_user.first_name
+        victim_username = message.from_user.username
+    
+    # Проверяем API
+    ventilate_url = VENTILATE_API_URL or VERCEL_API_URL.replace("/summary", "/ventilate")
+    
+    processing_msg = await message.answer("🪟 Открываю форточку...")
+    metrics.track_command("ventilate")
+    
+    try:
+        metrics.track_api_call("ventilate")
+        session = await get_http_session()
+        async with session.post(
+                ventilate_url,
+                json={
+                    "victim_name": victim_name,
+                    "victim_username": victim_username or ""
+                }
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    text = result.get("text", "🪟 Форточка не открылась. Заклинило.")
+                    await processing_msg.edit_text(text)
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Ventilate API error: {response.status} - {error_text}")
+                    # Fallback
+                    fallback_events = [
+                        f"🪟 Тётя Роза открыла форточку в чате.\n\nЗалетел голубь. Насрал на @{victim_username or victim_name}. Улетел.\n\nПроветрено.",
+                        f"🪟 Тётя Роза открыла форточку в чате.\n\nСквозняком сдуло @{victim_username or victim_name} куда-то в угол чата. Сидит там теперь.\n\nСвежо.",
+                        f"🪟 Тётя Роза открыла форточку в чате.\n\nВорвался холод. @{victim_username or victim_name} замёрз нахуй.\n\nЗакрываю."
+                    ]
+                    await processing_msg.edit_text(random.choice(fallback_events))
+    
+    except asyncio.TimeoutError:
+        await processing_msg.edit_text("🪟 Форточка заклинила. Попробуй позже.")
+    except Exception as e:
+        logger.error(f"Error in ventilate command: {e}")
+        metrics.track_error()
+        await processing_msg.edit_text(f"🪟 Форточка сломалась: {str(e)[:50]}")
 
 
 # ==================== ПОИСК КАРТИНОК (SerpAPI - Google Images) ====================
