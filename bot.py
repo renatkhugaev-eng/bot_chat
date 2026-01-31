@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import re
 import time
 from typing import Optional
 
@@ -1927,6 +1928,17 @@ async def cmd_ventilate(message: Message):
                     # Также заменяем @username если AI его вставил
                     if victim_username:
                         text = text.replace(f"@{victim_username}", mentions['nom'])
+                    
+                    # Заменяем все формы имени на кликабельные (если AI написал напрямую)
+                    # Сортируем по длине (сначала длинные формы, чтобы не испортить короткие)
+                    sorted_forms = sorted(declined.items(), key=lambda x: len(x[1]), reverse=True)
+                    for case_key, case_form in sorted_forms:
+                        if case_form and len(case_form) > 1:
+                            # Ищем имя с границами слова (не внутри других слов и не в HTML тегах)
+                            # Пропускаем если уже внутри ссылки
+                            if f'>{case_form}<' not in text and case_form not in text.split('href=')[0] if 'href=' in text else True:
+                                pattern = r'(?<![а-яА-Яa-zA-Z>])' + re.escape(case_form) + r'(?![а-яА-Яa-zA-Z<])'
+                                text = re.sub(pattern, mentions[case_key], text, count=3)
                     
                     await processing_msg.edit_text(text, parse_mode=ParseMode.HTML)
                 else:
