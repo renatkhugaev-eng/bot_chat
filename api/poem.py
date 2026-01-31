@@ -195,7 +195,7 @@ class handler(BaseHTTPRequestHandler):
             
             # Запрос к AI
             request_body = json.dumps({
-                "model": "anthropic/claude-sonnet-4",
+                "model": "anthropic/claude-sonnet-4-20250514",
                 "max_tokens": 800,
                 "temperature": 0.9,
                 "system": prompt,

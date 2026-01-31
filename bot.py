@@ -31,7 +31,7 @@ if USE_POSTGRES:
         add_to_treasury, get_treasury, log_event, add_achievement,
         save_chat_message, get_chat_statistics, get_player_achievements, close_db,
         save_summary, get_previous_summaries, save_memory, get_memories,
-        get_user_messages
+        get_user_messages, full_cleanup, get_database_stats
     )
 else:
     from database import (
@@ -43,6 +43,9 @@ else:
         get_user_messages
     )
     close_db = None
+    # Заглушки для SQLite
+    async def full_cleanup(): return {}
+    async def get_database_stats(): return {}
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
     calculate_crime_success, calculate_crime_reward, get_random_crime_message,
@@ -2001,14 +2004,102 @@ async def collect_voice(message: Message):
     )
 
 
+# ==================== ОЧИСТКА И МОНИТОРИНГ ====================
+
+async def scheduled_cleanup():
+    """Периодическая очистка старых данных (запускается каждые 6 часов)"""
+    if not USE_POSTGRES:
+        return
+    
+    try:
+        results = await full_cleanup()
+        logger.info(f"🧹 Автоочистка БД: {results}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка очистки БД: {e}")
+
+
+async def log_database_stats():
+    """Логирование статистики БД (запускается каждый час)"""
+    if not USE_POSTGRES:
+        return
+    
+    try:
+        stats = await get_database_stats()
+        logger.info(
+            f"📊 Статистика БД: "
+            f"сообщений={stats.get('chat_messages_count', 0)}, "
+            f"за 24ч={stats.get('messages_24h', 0)}, "
+            f"чатов={stats.get('active_chats_24h', 0)}, "
+            f"сводок={stats.get('chat_summaries_count', 0)}, "
+            f"памяти={stats.get('chat_memories_count', 0)}"
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка статистики БД: {e}")
+
+
+@router.message(Command("dbstats", "stats_db"))
+async def cmd_dbstats(message: Message):
+    """Статистика базы данных (только для админов)"""
+    # Проверка админа (можно добавить список admin_ids)
+    if message.chat.type != "private":
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Статистика доступна только с PostgreSQL")
+        return
+    
+    try:
+        stats = await get_database_stats()
+        
+        text = f"""📊 *СТАТИСТИКА БАЗЫ ДАННЫХ*
+
+📝 *Сообщения:*
+• Всего: {stats.get('chat_messages_count', 0):,}
+• За 24 часа: {stats.get('messages_24h', 0):,}
+• Возраст старейшего: {stats.get('oldest_message_days', 0)} дней
+
+💬 *Активность:*
+• Активных чатов (24ч): {stats.get('active_chats_24h', 0)}
+
+🧠 *Память:*
+• Сводок: {stats.get('chat_summaries_count', 0)}
+• Воспоминаний: {stats.get('chat_memories_count', 0)}
+
+👥 *Игроки:*
+• Всего: {stats.get('players_count', 0)}
+• Достижений: {stats.get('achievements_count', 0)}
+"""
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@router.message(Command("cleanup", "clean_db"))
+async def cmd_cleanup(message: Message):
+    """Ручная очистка БД (только для админов в приватке)"""
+    if message.chat.type != "private":
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Очистка доступна только с PostgreSQL")
+        return
+    
+    try:
+        processing = await message.answer("🧹 Запускаю очистку...")
+        results = await full_cleanup()
+        
+        await processing.edit_text(
+            f"✅ *Очистка завершена!*\n\n"
+            f"🗑 Удалено сообщений: {results.get('messages_deleted', 0)}\n"
+            f"📜 Удалено сводок: {results.get('summaries_deleted', 0)}\n"
+            f"🧠 Удалено воспоминаний: {results.get('memories_deleted', 0)}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка очистки: {e}")
+
+
 # ==================== ЗАПУСК ====================
-
-async def scheduled_events():
-    """Запланированные события"""
-    # Получаем все чаты с активными игроками
-    # Это упрощённая версия — в реальности нужен список активных чатов
-    pass
-
 
 async def main():
     """Главная функция запуска бота"""
@@ -2018,11 +2109,18 @@ async def main():
     # Подключаем роутер
     dp.include_router(router)
     
-    # Запуск планировщика для случайных событий
-    # scheduler.add_job(scheduled_events, 'interval', minutes=30)
-    # scheduler.start()
+    # Запуск планировщика для очистки и мониторинга
+    if USE_POSTGRES:
+        scheduler.add_job(scheduled_cleanup, 'interval', hours=6, id='cleanup')
+        scheduler.add_job(log_database_stats, 'interval', hours=1, id='stats')
+        scheduler.start()
+        logger.info("⏰ Планировщик очистки запущен (каждые 6 часов)")
     
     logger.info("🔫 Гильдия Беспредела запущена!")
+    
+    # Первичное логирование статистики
+    if USE_POSTGRES:
+        await log_database_stats()
     
     # Запуск бота
     await dp.start_polling(bot)
