@@ -1655,6 +1655,13 @@ async def cmd_suck(message: Message):
 VENTILATE_API_URL = os.getenv("VENTILATE_API_URL", "")
 
 
+def make_user_mention(user_id: int, name: str, username: str = None) -> str:
+    """Создаёт кликабельное упоминание пользователя (HTML формат)"""
+    # Экранируем HTML символы в имени
+    safe_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
+
+
 @router.message(Command("ventilate", "проветрить", "форточка", "свежесть"))
 async def cmd_ventilate(message: Message):
     """Проветрить чат — абсурдное событие с рандомным участником"""
@@ -1680,12 +1687,14 @@ async def cmd_ventilate(message: Message):
     # Определяем жертву: либо реплай, либо рандом из активных
     victim_name = None
     victim_username = None
+    victim_id = None
     
     if message.reply_to_message and message.reply_to_message.from_user:
         # Если ответ на сообщение — жертва тот, кому отвечают
         victim = message.reply_to_message.from_user
         victim_name = victim.first_name
         victim_username = victim.username
+        victim_id = victim.id
     else:
         # Иначе берём случайного из последних активных
         try:
@@ -1698,6 +1707,7 @@ async def cmd_ventilate(message: Message):
                         victim_data = random.choice(active_users)
                         victim_name = victim_data.get('first_name', 'Кто-то')
                         victim_username = victim_data.get('username', '')
+                        victim_id = victim_data.get('user_id')
         except Exception as e:
             logger.warning(f"Could not get active users for ventilate: {e}")
     
@@ -1705,6 +1715,10 @@ async def cmd_ventilate(message: Message):
     if not victim_name:
         victim_name = message.from_user.first_name
         victim_username = message.from_user.username
+        victim_id = message.from_user.id
+    
+    # Создаём кликабельное упоминание
+    victim_mention = make_user_mention(victim_id, victim_name, victim_username)
     
     # Проверяем API
     ventilate_url = VENTILATE_API_URL or VERCEL_API_URL.replace("/summary", "/ventilate")
@@ -1719,23 +1733,29 @@ async def cmd_ventilate(message: Message):
                 ventilate_url,
                 json={
                     "victim_name": victim_name,
-                    "victim_username": victim_username or ""
+                    "victim_username": victim_username or "",
+                    "victim_id": victim_id
                 }
             ) as response:
                 if response.status == 200:
                     result = await response.json()
                     text = result.get("text", "🪟 Форточка не открылась. Заклинило.")
-                    await processing_msg.edit_text(text)
+                    # Заменяем плейсхолдер {VICTIM} на кликабельное упоминание
+                    text = text.replace("{VICTIM}", victim_mention)
+                    # Также заменяем @username если AI его вставил
+                    if victim_username:
+                        text = text.replace(f"@{victim_username}", victim_mention)
+                    await processing_msg.edit_text(text, parse_mode=ParseMode.HTML)
                 else:
                     error_text = await response.text()
                     logger.error(f"Ventilate API error: {response.status} - {error_text}")
-                    # Fallback
+                    # Fallback с кликабельным упоминанием
                     fallback_events = [
-                        f"🪟 Тётя Роза открыла форточку в чате.\n\nЗалетел голубь. Насрал на @{victim_username or victim_name}. Улетел.\n\nПроветрено.",
-                        f"🪟 Тётя Роза открыла форточку в чате.\n\nСквозняком сдуло @{victim_username or victim_name} куда-то в угол чата. Сидит там теперь.\n\nСвежо.",
-                        f"🪟 Тётя Роза открыла форточку в чате.\n\nВорвался холод. @{victim_username or victim_name} замёрз нахуй.\n\nЗакрываю."
+                        f"🪟 Тётя Роза открыла форточку в чате.\n\nЗалетел голубь. Насрал на {victim_mention}. Улетел.\n\nПроветрено.",
+                        f"🪟 Тётя Роза открыла форточку в чате.\n\nСквозняком сдуло {victim_mention} куда-то в угол чата. Сидит там теперь.\n\nСвежо.",
+                        f"🪟 Тётя Роза открыла форточку в чате.\n\nВорвался холод. {victim_mention} замёрз нахуй.\n\nЗакрываю."
                     ]
-                    await processing_msg.edit_text(random.choice(fallback_events))
+                    await processing_msg.edit_text(random.choice(fallback_events), parse_mode=ParseMode.HTML)
     
     except asyncio.TimeoutError:
         await processing_msg.edit_text("🪟 Форточка заклинила. Попробуй позже.")
