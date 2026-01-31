@@ -618,6 +618,76 @@ async def cleanup_expired_memories():
     current_time = int(time.time())
     
     async with pool.acquire() as conn:
-        await conn.execute("""
+        result = await conn.execute("""
             DELETE FROM chat_memories WHERE expires_at IS NOT NULL AND expires_at < $1
         """, current_time)
+        return result
+
+
+async def cleanup_old_summaries(days: int = 30):
+    """Удалить сводки старше N дней"""
+    cutoff_time = int(time.time()) - (days * 24 * 3600)
+    
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            DELETE FROM chat_summaries WHERE created_at < $1
+        """, cutoff_time)
+        return result
+
+
+async def get_database_stats() -> Dict[str, Any]:
+    """Получить статистику базы данных для мониторинга"""
+    async with pool.acquire() as conn:
+        stats = {}
+        
+        # Количество записей в таблицах
+        tables = ['chat_messages', 'chat_summaries', 'chat_memories', 'players', 'achievements']
+        for table in tables:
+            try:
+                row = await conn.fetchrow(f"SELECT COUNT(*) as count FROM {table}")
+                stats[f'{table}_count'] = row['count'] if row else 0
+            except Exception:
+                stats[f'{table}_count'] = -1
+        
+        # Размер сообщений за последние сутки
+        day_ago = int(time.time()) - 86400
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) as count FROM chat_messages WHERE created_at >= $1
+        """, day_ago)
+        stats['messages_24h'] = row['count'] if row else 0
+        
+        # Старейшее сообщение
+        row = await conn.fetchrow("""
+            SELECT MIN(created_at) as oldest FROM chat_messages
+        """)
+        if row and row['oldest']:
+            stats['oldest_message_days'] = (int(time.time()) - row['oldest']) // 86400
+        else:
+            stats['oldest_message_days'] = 0
+        
+        # Активные чаты за сутки
+        row = await conn.fetchrow("""
+            SELECT COUNT(DISTINCT chat_id) as count FROM chat_messages WHERE created_at >= $1
+        """, day_ago)
+        stats['active_chats_24h'] = row['count'] if row else 0
+        
+        return stats
+
+
+async def full_cleanup() -> Dict[str, int]:
+    """Полная очистка устаревших данных"""
+    results = {}
+    
+    # Очистка сообщений старше 7 дней
+    deleted_messages = await cleanup_old_messages(days=7)
+    results['messages_deleted'] = deleted_messages if isinstance(deleted_messages, int) else 0
+    
+    # Очистка сводок старше 30 дней
+    deleted_summaries = await cleanup_old_summaries(days=30)
+    results['summaries_deleted'] = deleted_summaries if isinstance(deleted_summaries, int) else 0
+    
+    # Очистка истёкших воспоминаний
+    deleted_memories = await cleanup_expired_memories()
+    results['memories_deleted'] = deleted_memories if isinstance(deleted_memories, int) else 0
+    
+    return results
