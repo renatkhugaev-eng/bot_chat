@@ -262,6 +262,18 @@ async def init_db():
             )
         """)
         
+        # Таблица информации о чатах
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chats (
+                chat_id BIGINT PRIMARY KEY,
+                title TEXT,
+                username TEXT,
+                chat_type TEXT,
+                first_seen BIGINT,
+                last_activity BIGINT
+            )
+        """)
+        
         # Индекс для логов событий (новый!)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_event_log_chat 
@@ -827,22 +839,48 @@ async def get_database_stats() -> Dict[str, Any]:
         return stats
 
 
+async def save_chat_info(chat_id: int, title: str = None, username: str = None, chat_type: str = None):
+    """Сохранить или обновить информацию о чате"""
+    async with (await get_pool()).acquire() as conn:
+        await conn.execute("""
+            INSERT INTO chats (chat_id, title, username, chat_type, first_seen, last_activity)
+            VALUES ($1, $2, $3, $4, $5, $5)
+            ON CONFLICT (chat_id) DO UPDATE SET 
+                title = COALESCE($2, chats.title),
+                username = COALESCE($3, chats.username),
+                chat_type = COALESCE($4, chats.chat_type),
+                last_activity = $5
+        """, chat_id, title, username, chat_type, int(time.time()))
+
+
+async def get_chat_info(chat_id: int) -> Optional[Dict[str, Any]]:
+    """Получить информацию о чате"""
+    async with (await get_pool()).acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT * FROM chats WHERE chat_id = $1
+        """, chat_id)
+        return dict(row) if row else None
+
+
 async def get_all_chats_stats() -> List[Dict[str, Any]]:
-    """Получить статистику по всем чатам"""
+    """Получить статистику по всем чатам с названиями"""
     async with (await get_pool()).acquire() as conn:
         day_ago = int(time.time()) - 86400
         week_ago = int(time.time()) - (7 * 86400)
         
         rows = await conn.fetch("""
             SELECT 
-                chat_id,
+                m.chat_id,
+                c.title as chat_title,
+                c.username as chat_username,
                 COUNT(*) as total_messages,
-                COUNT(DISTINCT user_id) as unique_users,
-                COUNT(*) FILTER (WHERE created_at >= $1) as messages_24h,
-                COUNT(*) FILTER (WHERE created_at >= $2) as messages_7d,
-                MAX(created_at) as last_activity
-            FROM chat_messages
-            GROUP BY chat_id
+                COUNT(DISTINCT m.user_id) as unique_users,
+                COUNT(*) FILTER (WHERE m.created_at >= $1) as messages_24h,
+                COUNT(*) FILTER (WHERE m.created_at >= $2) as messages_7d,
+                MAX(m.created_at) as last_activity
+            FROM chat_messages m
+            LEFT JOIN chats c ON m.chat_id = c.chat_id
+            GROUP BY m.chat_id, c.title, c.username
             ORDER BY messages_24h DESC, total_messages DESC
             LIMIT 50
         """, day_ago, week_ago)
@@ -854,6 +892,11 @@ async def get_chat_details(chat_id: int) -> Dict[str, Any]:
     """Получить детальную статистику по конкретному чату"""
     async with (await get_pool()).acquire() as conn:
         day_ago = int(time.time()) - 86400
+        
+        # Информация о чате
+        chat_info = await conn.fetchrow("""
+            SELECT title, username, chat_type FROM chats WHERE chat_id = $1
+        """, chat_id)
         
         # Основная статистика
         row = await conn.fetchrow("""
@@ -868,6 +911,12 @@ async def get_chat_details(chat_id: int) -> Dict[str, Any]:
         """, chat_id, day_ago)
         
         stats = dict(row) if row else {}
+        
+        # Добавляем инфо о чате
+        if chat_info:
+            stats['chat_title'] = chat_info['title']
+            stats['chat_username'] = chat_info['username']
+            stats['chat_type'] = chat_info['chat_type']
         
         # Топ пользователей
         top_users = await conn.fetch("""

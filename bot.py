@@ -33,7 +33,7 @@ if USE_POSTGRES:
         save_summary, get_previous_summaries, save_memory, get_memories,
         get_user_messages, full_cleanup, get_database_stats,
         get_all_chats_stats, get_chat_details, get_top_users_global, search_user,
-        health_check
+        health_check, save_chat_info
     )
 else:
     from database import (
@@ -53,6 +53,7 @@ else:
     async def get_top_users_global(limit=20): return []
     async def search_user(query): return []
     async def health_check(): return False
+    async def save_chat_info(chat_id, title=None, username=None, chat_type=None): pass
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
     calculate_crime_success, calculate_crime_reward, get_random_crime_message,
@@ -1876,6 +1877,14 @@ async def collect_messages_and_exp(message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     
+    # Сохраняем информацию о чате
+    await save_chat_info(
+        chat_id=chat_id,
+        title=message.chat.title,
+        username=message.chat.username,
+        chat_type=message.chat.type
+    )
+    
     # Сохраняем сообщение для аналитики
     reply_to_user_id = None
     reply_to_first_name = None
@@ -2156,9 +2165,11 @@ async def cmd_chats(message: Message):
         
         from datetime import datetime
         
-        lines = ["📋 *СПИСОК ЧАТОВ*\n"]
+        lines = ["📋 СПИСОК ЧАТОВ\n"]
         for i, chat in enumerate(chats[:20], 1):
             chat_id = chat['chat_id']
+            title = chat.get('chat_title') or "Без названия"
+            username = chat.get('chat_username')
             total = chat['total_messages']
             users = chat['unique_users']
             today = chat['messages_24h']
@@ -2181,17 +2192,25 @@ async def cmd_chats(message: Message):
             else:
                 status = "💀"
             
+            # Формируем название чата
+            if username:
+                chat_name = f"@{username}"
+            else:
+                # Убираем спецсимволы из названия
+                chat_name = title[:25].replace('_', ' ').replace('*', '')
+            
             lines.append(
-                f"{status} `{chat_id}`\n"
-                f"   📝 {total:,} сообщ. | 👥 {users} | 🕐 {last_str}"
+                f"{status} {chat_name}\n"
+                f"   📝 {total:,} | 👥 {users} | 🕐 {last_str}\n"
+                f"   ID: {chat_id}"
             )
         
         if len(chats) > 20:
-            lines.append(f"\n_...и ещё {len(chats) - 20} чатов_")
+            lines.append(f"\n...и ещё {len(chats) - 20} чатов")
         
-        lines.append(f"\n💡 Детали: `/chat <id>`")
+        lines.append(f"\n💡 Детали: /chat <id>")
         
-        await processing.edit_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        await processing.edit_text("\n".join(lines))
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
@@ -2223,33 +2242,39 @@ async def cmd_chat_details(message: Message):
         stats = await get_chat_details(chat_id)
         
         if not stats or not stats.get('total_messages'):
-            await processing.edit_text(f"📭 Чат `{chat_id}` не найден", parse_mode=ParseMode.MARKDOWN)
+            await processing.edit_text(f"📭 Чат {chat_id} не найден")
             return
         
         from datetime import datetime
+        
+        # Название чата
+        chat_title = stats.get('chat_title') or "Без названия"
+        chat_username = stats.get('chat_username')
+        chat_name = f"@{chat_username}" if chat_username else chat_title.replace('_', ' ')
         
         first = stats.get('first_message')
         last = stats.get('last_message')
         first_str = datetime.fromtimestamp(first).strftime("%d.%m.%Y") if first else "—"
         last_str = datetime.fromtimestamp(last).strftime("%d.%m.%Y %H:%M") if last else "—"
         
-        text = f"""📊 *ЧАТ:* `{chat_id}`
+        text = f"""📊 ЧАТ: {chat_name}
+ID: {chat_id}
 
-📝 *Сообщения:*
+📝 Сообщения:
 • Всего: {stats.get('total_messages', 0):,}
 • За 24ч: {stats.get('messages_24h', 0):,}
 
-👥 *Пользователи:*
+👥 Пользователи:
 • Уникальных: {stats.get('unique_users', 0)}
 • Игроков RPG: {stats.get('players_count', 0)}
 
-🧠 *Память:*
+🧠 Память:
 • Сводок: {stats.get('summaries_count', 0)}
 • Воспоминаний: {stats.get('memories_count', 0)}
 
-💰 *Общак:* {stats.get('treasury', 0):,} 💎
+💰 Общак: {stats.get('treasury', 0):,} 💎
 
-📅 *Период:*
+📅 Период:
 • Первое сообщение: {first_str}
 • Последнее: {last_str}
 """
@@ -2257,15 +2282,15 @@ async def cmd_chat_details(message: Message):
         # Топ пользователей
         top_users = stats.get('top_users', [])
         if top_users:
-            text += "\n🏆 *Топ пользователей:*\n"
+            text += "\n🏆 Топ пользователей:\n"
             for i, u in enumerate(top_users[:5], 1):
-                name = u.get('first_name', '?')
+                name = u.get('first_name', '?').replace('_', ' ')
                 username = u.get('username')
                 count = u.get('msg_count', 0)
                 user_str = f"@{username}" if username else name
                 text += f"{i}. {user_str} — {count:,}\n"
         
-        await processing.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+        await processing.edit_text(text)
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
@@ -2360,7 +2385,8 @@ async def cmd_health(message: Message):
             db_ok = await health_check()
             checks.append(f"{'✅' if db_ok else '❌'} PostgreSQL: {'OK' if db_ok else 'FAIL'}")
         except Exception as e:
-            checks.append(f"❌ PostgreSQL: {str(e)[:50]}")
+            err_msg = str(e)[:50].replace('_', ' ')
+            checks.append(f"❌ PostgreSQL: {err_msg}")
     else:
         checks.append("⚠️ PostgreSQL: не используется (SQLite)")
     
@@ -2369,7 +2395,8 @@ async def cmd_health(message: Message):
         me = await bot.get_me()
         checks.append(f"✅ Бот: @{me.username} (ID: {me.id})")
     except Exception as e:
-        checks.append(f"❌ Бот: {str(e)[:50]}")
+        err_msg = str(e)[:50].replace('_', ' ')
+        checks.append(f"❌ Бот: {err_msg}")
     
     # Проверка планировщика
     if scheduler.running:
@@ -2381,12 +2408,13 @@ async def cmd_health(message: Message):
     # Память cooldowns
     checks.append(f"📊 Кулдауны в памяти: {len(cooldowns)}")
     
-    # Время работы (uptime)
+    # Платформа
     import platform
-    checks.append(f"🖥 Платформа: {platform.system()} {platform.release()}")
+    plat_info = f"{platform.system()} {platform.release()}".replace('_', '-')
+    checks.append(f"🖥 Платформа: {plat_info}")
     
-    text = "🏥 *СОСТОЯНИЕ СИСТЕМЫ*\n\n" + "\n".join(checks)
-    await processing.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+    text = "🏥 СОСТОЯНИЕ СИСТЕМЫ\n\n" + "\n".join(checks)
+    await processing.edit_text(text)
 
 
 @router.message(Command("cleanup", "clean_db"))
