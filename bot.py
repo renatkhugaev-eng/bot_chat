@@ -2101,6 +2101,23 @@ async def cmd_cleanup(message: Message):
 
 # ==================== ЗАПУСК ====================
 
+async def on_shutdown():
+    """Graceful shutdown — закрытие соединений"""
+    logger.info("🛑 Останавливаю бота...")
+    
+    # Останавливаем планировщик
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+        logger.info("⏰ Планировщик остановлен")
+    
+    # Закрываем пул соединений с БД
+    if close_db:
+        await close_db()
+        logger.info("🗄 Соединение с БД закрыто")
+    
+    logger.info("✅ Бот остановлен корректно")
+
+
 async def main():
     """Главная функция запуска бота"""
     # Инициализация БД
@@ -2108,6 +2125,9 @@ async def main():
     
     # Подключаем роутер
     dp.include_router(router)
+    
+    # Регистрируем shutdown handler
+    dp.shutdown.register(on_shutdown)
     
     # Запуск планировщика для очистки и мониторинга
     if USE_POSTGRES:
@@ -2123,7 +2143,10 @@ async def main():
         await log_database_stats()
     
     # Запуск бота
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await on_shutdown()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """
 База данных PostgreSQL (Neon/Vercel Postgres)
 Замена SQLite на PostgreSQL для продакшена
-v2.1 - reply_to_username support
+v3.0 - Full audit fixes, improved indexes, correct cleanup counts
 """
 import asyncpg
 import time
@@ -202,6 +202,18 @@ async def init_db():
                 last_raid_time BIGINT DEFAULT 0
             )
         """)
+        
+        # Индекс для логов событий (новый!)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_event_log_chat 
+            ON event_log(chat_id, created_at DESC)
+        """)
+        
+        # Индекс для инвентаря по пользователю
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_inventory_user 
+            ON inventory(user_id)
+        """)
     
     print("[OK] PostgreSQL database initialized!")
 
@@ -249,15 +261,26 @@ async def set_player_class(user_id: int, chat_id: int, player_class: str, bonuse
 
 
 async def update_player_stats(user_id: int, chat_id: int, **kwargs):
-    """Обновить статистику игрока"""
+    """Обновить статистику игрока с защитой от SQL injection"""
     if not kwargs:
         return
+    
+    # Защита от SQL injection — только разрешённые поля
+    allowed_fields = {
+        'experience', 'money', 'health', 'attack', 'luck',
+        'crimes_success', 'crimes_fail', 'pvp_wins', 'pvp_losses',
+        'jail_until', 'last_crime_time', 'last_attack_time', 'last_work_time',
+        'total_stolen', 'total_lost', 'is_active', 'username', 'first_name'
+    }
     
     set_clauses = []
     values = []
     param_num = 1
     
     for key, value in kwargs.items():
+        if key not in allowed_fields:
+            continue  # Пропускаем неразрешённые поля
+            
         if isinstance(value, str) and value.startswith('+'):
             set_clauses.append(f"{key} = {key} + ${param_num}")
             values.append(int(value[1:]))
@@ -268,6 +291,9 @@ async def update_player_stats(user_id: int, chat_id: int, **kwargs):
             set_clauses.append(f"{key} = ${param_num}")
             values.append(value)
         param_num += 1
+    
+    if not set_clauses:
+        return
     
     values.extend([user_id, chat_id])
     
@@ -506,14 +532,23 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         }
 
 
-async def cleanup_old_messages(days: int = 7):
-    """Удалить старые сообщения"""
+async def cleanup_old_messages(days: int = 7) -> int:
+    """Удалить старые сообщения, возвращает количество удалённых"""
     cutoff_time = int(time.time()) - (days * 24 * 3600)
     
     async with pool.acquire() as conn:
+        # Сначала считаем сколько удалим
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) as count FROM chat_messages WHERE created_at < $1
+        """, cutoff_time)
+        count = row['count'] if row else 0
+        
+        # Удаляем
         await conn.execute("""
             DELETE FROM chat_messages WHERE created_at < $1
         """, cutoff_time)
+        
+        return count
 
 
 # ==================== СИСТЕМА ПАМЯТИ ====================
@@ -613,26 +648,43 @@ async def get_user_memories(chat_id: int, user_id: int) -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
-async def cleanup_expired_memories():
-    """Удалить истёкшие воспоминания"""
+async def cleanup_expired_memories() -> int:
+    """Удалить истёкшие воспоминания, возвращает количество удалённых"""
     current_time = int(time.time())
     
     async with pool.acquire() as conn:
-        result = await conn.execute("""
+        # Сначала считаем
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) as count FROM chat_memories 
+            WHERE expires_at IS NOT NULL AND expires_at < $1
+        """, current_time)
+        count = row['count'] if row else 0
+        
+        # Удаляем
+        await conn.execute("""
             DELETE FROM chat_memories WHERE expires_at IS NOT NULL AND expires_at < $1
         """, current_time)
-        return result
+        
+        return count
 
 
-async def cleanup_old_summaries(days: int = 30):
-    """Удалить сводки старше N дней"""
+async def cleanup_old_summaries(days: int = 30) -> int:
+    """Удалить сводки старше N дней, возвращает количество удалённых"""
     cutoff_time = int(time.time()) - (days * 24 * 3600)
     
     async with pool.acquire() as conn:
-        result = await conn.execute("""
+        # Сначала считаем
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) as count FROM chat_summaries WHERE created_at < $1
+        """, cutoff_time)
+        count = row['count'] if row else 0
+        
+        # Удаляем
+        await conn.execute("""
             DELETE FROM chat_summaries WHERE created_at < $1
         """, cutoff_time)
-        return result
+        
+        return count
 
 
 async def get_database_stats() -> Dict[str, Any]:
@@ -679,15 +731,34 @@ async def full_cleanup() -> Dict[str, int]:
     results = {}
     
     # Очистка сообщений старше 7 дней
-    deleted_messages = await cleanup_old_messages(days=7)
-    results['messages_deleted'] = deleted_messages if isinstance(deleted_messages, int) else 0
+    results['messages_deleted'] = await cleanup_old_messages(days=7)
     
     # Очистка сводок старше 30 дней
-    deleted_summaries = await cleanup_old_summaries(days=30)
-    results['summaries_deleted'] = deleted_summaries if isinstance(deleted_summaries, int) else 0
+    results['summaries_deleted'] = await cleanup_old_summaries(days=30)
     
     # Очистка истёкших воспоминаний
-    deleted_memories = await cleanup_expired_memories()
-    results['memories_deleted'] = deleted_memories if isinstance(deleted_memories, int) else 0
+    results['memories_deleted'] = await cleanup_expired_memories()
+    
+    # Очистка старых событий логов (старше 14 дней)
+    results['events_deleted'] = await cleanup_old_events(days=14)
     
     return results
+
+
+async def cleanup_old_events(days: int = 14) -> int:
+    """Удалить старые события из лога"""
+    cutoff_time = int(time.time()) - (days * 24 * 3600)
+    
+    async with pool.acquire() as conn:
+        # Считаем
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) as count FROM event_log WHERE created_at < $1
+        """, cutoff_time)
+        count = row['count'] if row else 0
+        
+        # Удаляем
+        await conn.execute("""
+            DELETE FROM event_log WHERE created_at < $1
+        """, cutoff_time)
+        
+        return count

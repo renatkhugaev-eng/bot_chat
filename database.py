@@ -1,3 +1,7 @@
+"""
+SQLite база данных (для локальной разработки)
+v3.0 - Full feature parity with PostgreSQL
+"""
 import aiosqlite
 import time
 from typing import Optional, Dict, Any, List
@@ -6,7 +10,7 @@ DATABASE_PATH = "guild_of_crime.db"
 
 
 async def init_db():
-    """Инициализация базы данных"""
+    """Инициализация базы данных с полной схемой"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         # Таблица сообщений чата (для сводок)
         await db.execute("""
@@ -33,10 +37,61 @@ async def init_db():
             ON chat_messages(chat_id, created_at)
         """)
         
-        # Таблица игроков
+        # Индекс для поиска сообщений пользователя
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_user 
+            ON chat_messages(chat_id, user_id, created_at DESC)
+        """)
+        
+        # Таблица сводок (память между сессиями)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS chat_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                summary_text TEXT NOT NULL,
+                key_facts TEXT,
+                top_talker_username TEXT,
+                top_talker_name TEXT,
+                top_talker_count INTEGER,
+                drama_pairs TEXT,
+                memorable_quotes TEXT,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        
+        # Индекс для быстрого поиска сводок по чату
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_summaries_chat 
+            ON chat_summaries(chat_id, created_at DESC)
+        """)
+        
+        # Таблица воспоминаний о участниках (долгосрочная память)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS chat_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                memory_type TEXT NOT NULL,
+                memory_text TEXT NOT NULL,
+                relevance_score INTEGER DEFAULT 5,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER,
+                UNIQUE(chat_id, user_id, memory_type, memory_text)
+            )
+        """)
+        
+        # Индекс для поиска воспоминаний
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_chat_user 
+            ON chat_memories(chat_id, user_id)
+        """)
+        
+        # Таблица игроков — ВАЖНО: composite PRIMARY KEY!
         await db.execute("""
             CREATE TABLE IF NOT EXISTS players (
-                user_id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
                 chat_id INTEGER NOT NULL,
                 username TEXT,
                 first_name TEXT,
@@ -57,7 +112,8 @@ async def init_db():
                 total_stolen INTEGER DEFAULT 0,
                 total_lost INTEGER DEFAULT 0,
                 created_at INTEGER DEFAULT 0,
-                is_active INTEGER DEFAULT 1
+                is_active INTEGER DEFAULT 1,
+                PRIMARY KEY (user_id, chat_id)
             )
         """)
         
@@ -66,14 +122,20 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS inventory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
                 item_name TEXT NOT NULL,
                 item_type TEXT NOT NULL,
                 bonus_attack INTEGER DEFAULT 0,
                 bonus_luck INTEGER DEFAULT 0,
                 bonus_steal INTEGER DEFAULT 0,
-                acquired_at INTEGER DEFAULT 0,
-                FOREIGN KEY (user_id) REFERENCES players(user_id)
+                acquired_at INTEGER DEFAULT 0
             )
+        """)
+        
+        # Индекс для инвентаря
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_inventory_user 
+            ON inventory(user_id, chat_id)
         """)
         
         # Таблица достижений
@@ -81,14 +143,14 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS achievements (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
                 achievement_name TEXT NOT NULL,
                 achieved_at INTEGER DEFAULT 0,
-                FOREIGN KEY (user_id) REFERENCES players(user_id),
-                UNIQUE(user_id, achievement_name)
+                UNIQUE(user_id, chat_id, achievement_name)
             )
         """)
         
-        # Таблица логов событий (для статистики и приколов)
+        # Таблица логов событий
         await db.execute("""
             CREATE TABLE IF NOT EXISTS event_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,6 +164,12 @@ async def init_db():
             )
         """)
         
+        # Индекс для логов событий
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_event_log_chat 
+            ON event_log(chat_id, created_at DESC)
+        """)
+        
         # Общак чата
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chat_treasury (
@@ -112,6 +180,13 @@ async def init_db():
         """)
         
         await db.commit()
+        
+    print("[OK] SQLite database initialized!")
+
+
+async def close_db():
+    """Закрыть соединение (для совместимости с PostgreSQL)"""
+    pass  # SQLite не требует закрытия пула
 
 
 async def get_player(user_id: int, chat_id: int) -> Optional[Dict[str, Any]]:
@@ -168,6 +243,16 @@ async def update_player_stats(user_id: int, chat_id: int, **kwargs):
     values = []
     
     for key, value in kwargs.items():
+        # Защита от SQL injection — только разрешённые поля
+        allowed_fields = {
+            'experience', 'money', 'health', 'attack', 'luck',
+            'crimes_success', 'crimes_fail', 'pvp_wins', 'pvp_losses',
+            'jail_until', 'last_crime_time', 'last_attack_time', 'last_work_time',
+            'total_stolen', 'total_lost', 'is_active', 'username', 'first_name'
+        }
+        if key not in allowed_fields:
+            continue
+            
         if isinstance(value, str) and value.startswith('+'):
             set_clauses.append(f"{key} = {key} + ?")
             values.append(int(value[1:]))
@@ -177,6 +262,9 @@ async def update_player_stats(user_id: int, chat_id: int, **kwargs):
         else:
             set_clauses.append(f"{key} = ?")
             values.append(value)
+    
+    if not set_clauses:
+        return
     
     values.extend([user_id, chat_id])
     
@@ -191,6 +279,11 @@ async def update_player_stats(user_id: int, chat_id: int, **kwargs):
 
 async def get_top_players(chat_id: int, limit: int = 10, sort_by: str = "experience") -> List[Dict[str, Any]]:
     """Получить топ игроков чата"""
+    # Защита от SQL injection — только разрешённые поля
+    allowed_fields = ["experience", "money", "crimes_success", "pvp_wins"]
+    if sort_by not in allowed_fields:
+        sort_by = "experience"
+    
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(f"""
@@ -221,7 +314,7 @@ async def put_in_jail(user_id: int, chat_id: int, seconds: int):
     await update_player_stats(user_id, chat_id, jail_until=jail_until)
 
 
-async def is_in_jail(user_id: int, chat_id: int) -> tuple[bool, int]:
+async def is_in_jail(user_id: int, chat_id: int) -> tuple:
     """Проверить, в тюрьме ли игрок. Возвращает (в_тюрьме, оставшееся_время)"""
     player = await get_player(user_id, chat_id)
     if not player:
@@ -268,21 +361,21 @@ async def log_event(chat_id: int, event_type: str, user_id: int = None,
         await db.commit()
 
 
-async def add_achievement(user_id: int, achievement_name: str) -> bool:
+async def add_achievement(user_id: int, achievement_name: str, chat_id: int = 0) -> bool:
     """Добавить достижение игроку. Возвращает True если это новое достижение"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         try:
             await db.execute("""
-                INSERT INTO achievements (user_id, achievement_name, achieved_at)
-                VALUES (?, ?, ?)
-            """, (user_id, achievement_name, int(time.time())))
+                INSERT INTO achievements (user_id, chat_id, achievement_name, achieved_at)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, chat_id, achievement_name, int(time.time())))
             await db.commit()
             return True
         except aiosqlite.IntegrityError:
             return False
 
 
-async def get_player_achievements(user_id: int) -> List[str]:
+async def get_player_achievements(user_id: int, chat_id: int = 0) -> List[str]:
     """Получить все достижения игрока"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         async with db.execute(
@@ -339,8 +432,23 @@ async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]
             return [dict(row) for row in rows]
 
 
+async def get_user_messages(chat_id: int, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+    """Получить последние N сообщений конкретного пользователя"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT message_text, message_type, sticker_emoji, created_at
+            FROM chat_messages 
+            WHERE chat_id = ? AND user_id = ? AND message_text IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (chat_id, user_id, limit)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
 async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
-    """Получить статистику чата за последние N часов"""
+    """Получить статистику чата за последние N часов (синхронизировано с PostgreSQL)"""
     since_time = int(time.time()) - (hours * 3600)
     
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -354,12 +462,12 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
             row = await cursor.fetchone()
             total_messages = row['total'] if row else 0
         
-        # Топ авторов по количеству сообщений
+        # Топ авторов по количеству сообщений (с username!)
         async with db.execute("""
             SELECT user_id, first_name, username, COUNT(*) as msg_count
             FROM chat_messages 
             WHERE chat_id = ? AND created_at >= ?
-            GROUP BY user_id
+            GROUP BY user_id, first_name, username
             ORDER BY msg_count DESC
             LIMIT 10
         """, (chat_id, since_time)) as cursor:
@@ -374,12 +482,12 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         """, (chat_id, since_time)) as cursor:
             message_types = {row['message_type']: row['count'] for row in await cursor.fetchall()}
         
-        # Кто с кем больше общался (reply connections)
+        # Кто с кем больше общался (reply connections — с username!)
         async with db.execute("""
-            SELECT first_name, reply_to_first_name, COUNT(*) as replies
+            SELECT first_name, username, reply_to_first_name, reply_to_username, COUNT(*) as replies
             FROM chat_messages 
             WHERE chat_id = ? AND created_at >= ? AND reply_to_user_id IS NOT NULL
-            GROUP BY user_id, reply_to_user_id
+            GROUP BY user_id, reply_to_user_id, first_name, username, reply_to_first_name, reply_to_username
             ORDER BY replies DESC
             LIMIT 10
         """, (chat_id, since_time)) as cursor:
@@ -396,12 +504,12 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         """, (chat_id, since_time)) as cursor:
             hourly_activity = {row['hour']: row['count'] for row in await cursor.fetchall()}
         
-        # Выборка последних сообщений для контекста (до 50)
+        # Выборка последних сообщений (с image_description для фото!)
         async with db.execute("""
-            SELECT first_name, message_text, message_type, sticker_emoji,
-                   reply_to_first_name, created_at
+            SELECT first_name, username, message_text, message_type, sticker_emoji,
+                   reply_to_first_name, reply_to_username, image_description, created_at
             FROM chat_messages 
-            WHERE chat_id = ? AND created_at >= ? AND message_type = 'text'
+            WHERE chat_id = ? AND created_at >= ? AND message_type IN ('text', 'photo')
             ORDER BY created_at DESC
             LIMIT 50
         """, (chat_id, since_time)) as cursor:
@@ -418,33 +526,20 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         }
 
 
-async def cleanup_old_messages(days: int = 7):
+async def cleanup_old_messages(days: int = 7) -> int:
     """Удалить старые сообщения (для экономии места)"""
     cutoff_time = int(time.time()) - (days * 24 * 3600)
     
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute("""
+        cursor = await db.execute("""
             DELETE FROM chat_messages WHERE created_at < ?
         """, (cutoff_time,))
+        deleted = cursor.rowcount
         await db.commit()
+        return deleted
 
 
-async def get_user_messages(chat_id: int, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-    """Получить последние N сообщений конкретного пользователя"""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT message_text, message_type, sticker_emoji, created_at
-            FROM chat_messages 
-            WHERE chat_id = ? AND user_id = ? AND message_text IS NOT NULL
-            ORDER BY created_at DESC
-            LIMIT ?
-        """, (chat_id, user_id, limit)) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-
-# ==================== СИСТЕМА ПАМЯТИ (ЗАГЛУШКИ ДЛЯ SQLITE) ====================
+# ==================== СИСТЕМА ПАМЯТИ ====================
 
 async def save_summary(
     chat_id: int,
@@ -456,13 +551,32 @@ async def save_summary(
     drama_pairs: str = None,
     memorable_quotes: str = None
 ):
-    """Сохранить сводку в память (заглушка для SQLite)"""
-    pass  # В SQLite версии не сохраняем
+    """Сохранить сводку в память"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO chat_summaries 
+            (chat_id, summary_text, key_facts, top_talker_username, top_talker_name, 
+             top_talker_count, drama_pairs, memorable_quotes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (chat_id, summary_text, key_facts, top_talker_username, top_talker_name,
+              top_talker_count, drama_pairs, memorable_quotes, int(time.time())))
+        await db.commit()
 
 
 async def get_previous_summaries(chat_id: int, limit: int = 3) -> List[Dict[str, Any]]:
-    """Получить предыдущие сводки (заглушка для SQLite)"""
-    return []  # В SQLite версии память не работает
+    """Получить предыдущие сводки для контекста"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT summary_text, key_facts, top_talker_username, top_talker_name,
+                   top_talker_count, drama_pairs, memorable_quotes, created_at
+            FROM chat_summaries 
+            WHERE chat_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (chat_id, limit)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
 
 async def save_memory(
@@ -475,10 +589,141 @@ async def save_memory(
     relevance_score: int = 5,
     expires_days: int = 30
 ):
-    """Сохранить воспоминание (заглушка для SQLite)"""
-    pass  # В SQLite версии не сохраняем
+    """Сохранить воспоминание о участнике"""
+    expires_at = int(time.time()) + (expires_days * 24 * 3600) if expires_days else None
+    
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        # Upsert — обновляем если такое воспоминание уже есть
+        await db.execute("""
+            INSERT INTO chat_memories 
+            (chat_id, user_id, username, first_name, memory_type, memory_text, 
+             relevance_score, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (chat_id, user_id, memory_type, memory_text) 
+            DO UPDATE SET relevance_score = relevance_score + 1,
+                          created_at = ?
+        """, (chat_id, user_id, username, first_name, memory_type, memory_text,
+              relevance_score, int(time.time()), expires_at, int(time.time())))
+        await db.commit()
 
 
 async def get_memories(chat_id: int, limit: int = 20) -> List[Dict[str, Any]]:
-    """Получить воспоминания (заглушка для SQLite)"""
-    return []  # В SQLite версии память не работает
+    """Получить воспоминания о чате"""
+    current_time = int(time.time())
+    
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT user_id, username, first_name, memory_type, memory_text, 
+                   relevance_score, created_at
+            FROM chat_memories 
+            WHERE chat_id = ? 
+              AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY relevance_score DESC, created_at DESC
+            LIMIT ?
+        """, (chat_id, current_time, limit)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def get_user_memories(chat_id: int, user_id: int) -> List[Dict[str, Any]]:
+    """Получить воспоминания о конкретном участнике"""
+    current_time = int(time.time())
+    
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT memory_type, memory_text, relevance_score, created_at
+            FROM chat_memories 
+            WHERE chat_id = ? AND user_id = ?
+              AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY relevance_score DESC
+            LIMIT 10
+        """, (chat_id, user_id, current_time)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def cleanup_expired_memories() -> int:
+    """Удалить истёкшие воспоминания"""
+    current_time = int(time.time())
+    
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute("""
+            DELETE FROM chat_memories WHERE expires_at IS NOT NULL AND expires_at < ?
+        """, (current_time,))
+        deleted = cursor.rowcount
+        await db.commit()
+        return deleted
+
+
+async def cleanup_old_summaries(days: int = 30) -> int:
+    """Удалить сводки старше N дней"""
+    cutoff_time = int(time.time()) - (days * 24 * 3600)
+    
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute("""
+            DELETE FROM chat_summaries WHERE created_at < ?
+        """, (cutoff_time,))
+        deleted = cursor.rowcount
+        await db.commit()
+        return deleted
+
+
+async def get_database_stats() -> Dict[str, Any]:
+    """Получить статистику базы данных для мониторинга"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        stats = {}
+        
+        # Количество записей в таблицах
+        tables = ['chat_messages', 'chat_summaries', 'chat_memories', 'players', 'achievements']
+        for table in tables:
+            try:
+                async with db.execute(f"SELECT COUNT(*) as count FROM {table}") as cursor:
+                    row = await cursor.fetchone()
+                    stats[f'{table}_count'] = row[0] if row else 0
+            except Exception:
+                stats[f'{table}_count'] = 0
+        
+        # Размер сообщений за последние сутки
+        day_ago = int(time.time()) - 86400
+        async with db.execute("""
+            SELECT COUNT(*) as count FROM chat_messages WHERE created_at >= ?
+        """, (day_ago,)) as cursor:
+            row = await cursor.fetchone()
+            stats['messages_24h'] = row[0] if row else 0
+        
+        # Старейшее сообщение
+        async with db.execute("""
+            SELECT MIN(created_at) as oldest FROM chat_messages
+        """) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                stats['oldest_message_days'] = (int(time.time()) - row[0]) // 86400
+            else:
+                stats['oldest_message_days'] = 0
+        
+        # Активные чаты за сутки
+        async with db.execute("""
+            SELECT COUNT(DISTINCT chat_id) as count FROM chat_messages WHERE created_at >= ?
+        """, (day_ago,)) as cursor:
+            row = await cursor.fetchone()
+            stats['active_chats_24h'] = row[0] if row else 0
+        
+        return stats
+
+
+async def full_cleanup() -> Dict[str, int]:
+    """Полная очистка устаревших данных"""
+    results = {}
+    
+    # Очистка сообщений старше 7 дней
+    results['messages_deleted'] = await cleanup_old_messages(days=7)
+    
+    # Очистка сводок старше 30 дней
+    results['summaries_deleted'] = await cleanup_old_summaries(days=30)
+    
+    # Очистка истёкших воспоминаний
+    results['memories_deleted'] = await cleanup_expired_memories()
+    
+    return results
