@@ -129,6 +129,18 @@ def cleanup_cooldowns():
         del cooldowns[key]
 
 
+def cleanup_api_calls():
+    """Удалить устаревшие записи API вызовов"""
+    current_time = time.time()
+    for key in list(api_calls.keys()):
+        if key in api_calls:
+            # Удаляем записи старше 5 минут
+            api_calls[key] = [t for t in api_calls[key] if current_time - t < 300]
+            # Если список пустой — удаляем ключ
+            if not api_calls[key]:
+                del api_calls[key]
+
+
 # ==================== СБОР КОНТЕКСТА (DRY) ====================
 
 async def gather_user_context(chat_id: int, user_id: int, limit: int = 100) -> tuple[str, int]:
@@ -2409,10 +2421,56 @@ async def log_database_stats():
         logger.error(f"❌ Ошибка статистики БД: {e}")
 
 
+async def cleanup_memory():
+    """Очистка памяти (cooldowns и api_calls) — запускается каждые 10 минут"""
+    try:
+        cooldowns_before = len(cooldowns)
+        api_calls_before = len(api_calls)
+        
+        cleanup_cooldowns()
+        cleanup_api_calls()
+        
+        cooldowns_after = len(cooldowns)
+        api_calls_after = len(api_calls)
+        
+        if cooldowns_before != cooldowns_after or api_calls_before != api_calls_after:
+            logger.info(
+                f"🧹 Очистка памяти: cooldowns {cooldowns_before}→{cooldowns_after}, "
+                f"api_calls {api_calls_before}→{api_calls_after}"
+            )
+    except Exception as e:
+        logger.error(f"❌ Ошибка очистки памяти: {e}")
+
+
 # ==================== АДМИНКА ====================
 
 # ID администраторов (добавь свой Telegram ID)
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+
+
+def admin_only(func):
+    """Декоратор для админских команд"""
+    async def wrapper(message: Message, *args, **kwargs):
+        if message.chat.type != "private":
+            return
+        if not is_admin(message.from_user.id):
+            return
+        return await func(message, *args, **kwargs)
+    return wrapper
+
+
+def admin_postgres_only(func):
+    """Декоратор для админских команд, требующих PostgreSQL"""
+    async def wrapper(message: Message, *args, **kwargs):
+        if message.chat.type != "private":
+            return
+        if not is_admin(message.from_user.id):
+            return
+        if not USE_POSTGRES:
+            await message.answer("❌ Доступно только с PostgreSQL")
+            return
+        return await func(message, *args, **kwargs)
+    return wrapper
 
 
 def is_admin(user_id: int) -> bool:
@@ -2893,8 +2951,15 @@ async def main():
     if USE_POSTGRES:
         scheduler.add_job(scheduled_cleanup, 'interval', hours=6, id='cleanup')
         scheduler.add_job(log_database_stats, 'interval', hours=1, id='stats')
-        scheduler.start()
-        logger.info("⏰ Планировщик очистки запущен (каждые 6 часов)")
+    
+    # Очистка памяти (cooldowns и api_calls) каждые 10 минут
+    scheduler.add_job(cleanup_memory, 'interval', minutes=10, id='memory_cleanup')
+    scheduler.start()
+    
+    if USE_POSTGRES:
+        logger.info("⏰ Планировщик запущен: очистка БД (6ч), статистика (1ч), память (10м)")
+    else:
+        logger.info("⏰ Планировщик запущен: очистка памяти (10м)")
     
     logger.info("🔫 Гильдия Беспредела запущена!")
     

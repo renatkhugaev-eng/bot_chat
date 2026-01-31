@@ -291,6 +291,18 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_memories_expires 
             ON chat_memories(expires_at) WHERE expires_at IS NOT NULL
         """)
+        
+        # Индекс для players по chat_id (для get_all_active_players и других)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_players_chat 
+            ON players(chat_id) WHERE is_active = 1
+        """)
+        
+        # Индекс для achievements по user_id
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_achievements_user 
+            ON achievements(user_id)
+        """)
     
     logger.info("✅ PostgreSQL database initialized!")
 
@@ -783,58 +795,45 @@ async def cleanup_old_summaries(days: int = 30) -> int:
 
 
 async def get_database_stats() -> Dict[str, Any]:
-    """Получить статистику базы данных для мониторинга"""
+    """Получить статистику базы данных для мониторинга (ОПТИМИЗИРОВАНО)"""
     async with (await get_pool()).acquire() as conn:
-        stats = {}
-        
-        # Количество записей в таблицах
-        tables = ['chat_messages', 'chat_summaries', 'chat_memories', 'players', 'achievements', 'event_log']
-        for table in tables:
-            try:
-                row = await conn.fetchrow(f"SELECT COUNT(*) as count FROM {table}")
-                stats[f'{table}_count'] = row['count'] if row else 0
-            except Exception:
-                stats[f'{table}_count'] = -1
-        
-        # Размер сообщений за последние сутки
         day_ago = int(time.time()) - 86400
+        current_time = int(time.time())
+        
+        # Один большой запрос вместо 8+ мелких
         row = await conn.fetchrow("""
-            SELECT COUNT(*) as count FROM chat_messages WHERE created_at >= $1
+            SELECT 
+                (SELECT COUNT(*) FROM chat_messages) as chat_messages_count,
+                (SELECT COUNT(*) FROM chat_summaries) as chat_summaries_count,
+                (SELECT COUNT(*) FROM chat_memories) as chat_memories_count,
+                (SELECT COUNT(*) FROM players) as players_count,
+                (SELECT COUNT(*) FROM achievements) as achievements_count,
+                (SELECT COUNT(*) FROM event_log) as event_log_count,
+                (SELECT COUNT(*) FROM chat_messages WHERE created_at >= $1) as messages_24h,
+                (SELECT COUNT(DISTINCT chat_id) FROM chat_messages WHERE created_at >= $1) as active_chats_24h,
+                (SELECT COUNT(DISTINCT chat_id) FROM chat_messages) as total_chats,
+                (SELECT COUNT(DISTINCT user_id) FROM chat_messages) as total_users,
+                (SELECT COALESCE(SUM(money), 0) FROM chat_treasury) as total_treasury,
+                (SELECT MIN(created_at) FROM chat_messages) as oldest_message
         """, day_ago)
-        stats['messages_24h'] = row['count'] if row else 0
+        
+        stats = {
+            'chat_messages_count': row['chat_messages_count'] or 0,
+            'chat_summaries_count': row['chat_summaries_count'] or 0,
+            'chat_memories_count': row['chat_memories_count'] or 0,
+            'players_count': row['players_count'] or 0,
+            'achievements_count': row['achievements_count'] or 0,
+            'event_log_count': row['event_log_count'] or 0,
+            'messages_24h': row['messages_24h'] or 0,
+            'active_chats_24h': row['active_chats_24h'] or 0,
+            'total_chats': row['total_chats'] or 0,
+            'total_users': row['total_users'] or 0,
+            'total_treasury': row['total_treasury'] or 0,
+        }
         
         # Старейшее сообщение
-        row = await conn.fetchrow("""
-            SELECT MIN(created_at) as oldest FROM chat_messages
-        """)
-        if row and row['oldest']:
-            stats['oldest_message_days'] = (int(time.time()) - row['oldest']) // 86400
-        else:
-            stats['oldest_message_days'] = 0
-        
-        # Активные чаты за сутки
-        row = await conn.fetchrow("""
-            SELECT COUNT(DISTINCT chat_id) as count FROM chat_messages WHERE created_at >= $1
-        """, day_ago)
-        stats['active_chats_24h'] = row['count'] if row else 0
-        
-        # ВСЕГО уникальных чатов
-        row = await conn.fetchrow("""
-            SELECT COUNT(DISTINCT chat_id) as count FROM chat_messages
-        """)
-        stats['total_chats'] = row['count'] if row else 0
-        
-        # Всего уникальных пользователей
-        row = await conn.fetchrow("""
-            SELECT COUNT(DISTINCT user_id) as count FROM chat_messages
-        """)
-        stats['total_users'] = row['count'] if row else 0
-        
-        # Общак всех чатов
-        row = await conn.fetchrow("""
-            SELECT COALESCE(SUM(money), 0) as total FROM chat_treasury
-        """)
-        stats['total_treasury'] = row['total'] if row else 0
+        oldest = row['oldest_message']
+        stats['oldest_message_days'] = (current_time - oldest) // 86400 if oldest else 0
         
         return stats
 
