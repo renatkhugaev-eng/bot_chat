@@ -2424,8 +2424,8 @@ async def collect_photos(message: Message):
         caption=caption
     )
     
-    # Шанс 2% что Тётя Роза пришлёт случайный мем из коллекции
-    if random.random() < 0.02:
+    # Шанс 15% для теста (потом вернуть на 2-3%)
+    if random.random() < 0.15:
         await maybe_send_random_meme(message.chat.id, trigger="photo")
 
 
@@ -2458,14 +2458,14 @@ async def collect_animations(message: Message):
             caption=caption
         )
     
-    # Шанс 3% что Тётя Роза пришлёт мем в ответ
-    if random.random() < 0.03:
+    # Шанс 15% для теста (потом вернуть на 2-3%)
+    if random.random() < 0.15:
         await maybe_send_random_meme(message.chat.id, trigger="animation")
 
 
 @router.message(F.voice | F.video_note)
 async def collect_voice(message: Message):
-    """Сбор голосовых и кружочков"""
+    """Сбор голосовых и кружочков + сохранение в коллекцию"""
     if message.chat.type == "private":
         return
     
@@ -2479,6 +2479,37 @@ async def collect_voice(message: Message):
         message_text="",
         message_type=msg_type
     )
+    
+    # Сохраняем голосовое/кружочек в коллекцию
+    if message.voice:
+        voice = message.voice
+        sender_name = message.from_user.first_name or "Аноним"
+        await save_media(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            file_id=voice.file_id,
+            file_type="voice",
+            file_unique_id=voice.file_unique_id,
+            description=f"Голосовое от {sender_name} ({voice.duration} сек)"
+        )
+        # Шанс 15% для теста
+        if random.random() < 0.15:
+            await maybe_send_random_meme(message.chat.id, trigger="voice")
+    
+    elif message.video_note:
+        video_note = message.video_note
+        sender_name = message.from_user.first_name or "Аноним"
+        await save_media(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            file_id=video_note.file_id,
+            file_type="video_note",
+            file_unique_id=video_note.file_unique_id,
+            description=f"Кружочек от {sender_name} ({video_note.duration} сек)"
+        )
+        # Шанс 15% для теста
+        if random.random() < 0.15:
+            await maybe_send_random_meme(message.chat.id, trigger="video_note")
 
 
 # ==================== СИСТЕМА МЕМОВ ====================
@@ -2502,6 +2533,39 @@ MEME_COMMENTS = [
     "Культурная программа от Тёти Розы.",
 ]
 
+# Комментарии к голосовым сообщениям
+VOICE_COMMENTS = [
+    "🎤 Нашла в архиве чьё-то пьяное бормотание. Наслаждайтесь.",
+    "🎤 Кто-то это записывал. Теперь все послушают.",
+    "🎤 Голосовуха из прошлого. Компромат навеки.",
+    "🎤 Тётя Роза нашла аудиодоказательство вашей тупости.",
+    "🎤 Это кто-то из вас наговорил. Теперь не отвертитесь.",
+    "🎤 Архив голосовух открыт. Стыдитесь.",
+    "🎤 Рандомная голосовуха. Возможно, пьяная. Скорее всего — да.",
+    "🎤 Нашла это в закромах. Кто записывал — молодец. Нет.",
+    "🎤 Голос из прошлого. Напоминание о ваших грехах.",
+    "🎤 Кто-то думал, что это останется между нами. Ха-ха.",
+    "🎤 Аудиопривет из архива Тёти Розы.",
+    "🎤 Слушайте и плачьте. Или смейтесь. Мне похуй.",
+    "🎤 Это записали трезвым? Сомневаюсь.",
+    "🎤 Голосовое сообщение эпохи. Какой эпохи — хуй знает.",
+    "🎤 Компромат дня. Или ночи. Зависит от того, когда записывали.",
+]
+
+# Комментарии к кружочкам
+VIDEO_NOTE_COMMENTS = [
+    "🔵 Кружочек из прошлого! Кто-то показал ебало.",
+    "🔵 Нашла видосик. Лицо — огонь. В плохом смысле.",
+    "🔵 Архивный кружок. Смотрите на это лицо и думайте о жизни.",
+    "🔵 Кто-то записал это. Теперь не развидеть.",
+    "🔵 Тётя Роза делится видеокомпроматом.",
+    "🔵 Кружочек позора. Наслаждайтесь.",
+    "🔵 Это записывали добровольно. Вдумайтесь.",
+    "🔵 Лицо из архива. Возможно, ваше. Возможно, нет.",
+    "🔵 Видеопривет из прошлого. Кринж обеспечен.",
+    "🔵 Рандомный кружок. Рандомное ебало.",
+]
+
 
 async def maybe_send_random_meme(chat_id: int, trigger: str = "random"):
     """Отправить случайный мем из коллекции (если есть)"""
@@ -2516,8 +2580,15 @@ async def maybe_send_random_meme(chat_id: int, trigger: str = "random"):
         file_id = media['file_id']
         file_type = media['file_type']
         media_id = media['id']
+        description = media.get('description', '')
         
-        comment = random.choice(MEME_COMMENTS)
+        # Выбираем комментарий в зависимости от типа
+        if file_type == "voice":
+            comment = random.choice(VOICE_COMMENTS)
+        elif file_type == "video_note":
+            comment = random.choice(VIDEO_NOTE_COMMENTS)
+        else:
+            comment = random.choice(MEME_COMMENTS)
         
         # Отправляем в зависимости от типа
         if file_type == "photo":
@@ -2527,6 +2598,12 @@ async def maybe_send_random_meme(chat_id: int, trigger: str = "random"):
             await bot.send_message(chat_id, comment)
         elif file_type == "animation":
             await bot.send_animation(chat_id, file_id, caption=comment)
+        elif file_type == "voice":
+            await bot.send_message(chat_id, comment)
+            await bot.send_voice(chat_id, file_id)
+        elif file_type == "video_note":
+            await bot.send_message(chat_id, comment)
+            await bot.send_video_note(chat_id, file_id)
         
         # Увеличиваем счётчик использования
         await increment_media_usage(media_id)
@@ -2572,7 +2649,9 @@ async def cmd_random_meme(message: Message):
         type_map = {
             "фото": "photo", "photo": "photo", "картинка": "photo",
             "стикер": "sticker", "sticker": "sticker",
-            "гиф": "animation", "gif": "animation", "гифка": "animation"
+            "гиф": "animation", "gif": "animation", "гифка": "animation",
+            "голосовое": "voice", "voice": "voice", "войс": "voice", "голосовуха": "voice",
+            "кружок": "video_note", "кружочек": "video_note", "видео": "video_note"
         }
         file_type = type_map.get(args[1].lower())
     
@@ -2589,6 +2668,12 @@ async def cmd_random_meme(message: Message):
     comment = random.choice(MEME_COMMENTS)
     
     try:
+        # Выбираем комментарий по типу
+        if media_type == "voice":
+            comment = random.choice(VOICE_COMMENTS)
+        elif media_type == "video_note":
+            comment = random.choice(VIDEO_NOTE_COMMENTS)
+        
         if media_type == "photo":
             await message.answer_photo(file_id, caption=comment)
         elif media_type == "sticker":
@@ -2596,6 +2681,12 @@ async def cmd_random_meme(message: Message):
             await message.answer(comment)
         elif media_type == "animation":
             await message.answer_animation(file_id, caption=comment)
+        elif media_type == "voice":
+            await message.answer(comment)
+            await message.answer_voice(file_id)
+        elif media_type == "video_note":
+            await message.answer(comment)
+            await message.answer_video_note(file_id)
         
         await increment_media_usage(media_id)
         metrics.track_command("meme")
@@ -2625,8 +2716,10 @@ async def cmd_meme_stats(message: Message):
 🖼 Фото: {stats.get('photo', 0)}
 😀 Стикеры: {stats.get('sticker', 0)}
 🎬 Гифки: {stats.get('animation', 0)}
+🎤 Голосовые: {stats.get('voice', 0)}
+🔵 Кружочки: {stats.get('video_note', 0)}
 
-💡 Кидайте мемы — бот их запоминает и иногда выдаёт случайно!
+💡 Кидайте мемы, голосовые, кружочки — бот запоминает и выдаёт!
 Команда /мем — получить рандомный мем
 """
     await message.answer(text)
