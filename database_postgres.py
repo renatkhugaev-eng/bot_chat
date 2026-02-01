@@ -8,6 +8,7 @@ import asyncio
 import time
 import os
 import logging
+import json
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 
@@ -350,23 +351,95 @@ async def init_db():
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_profiles (
                 user_id BIGINT PRIMARY KEY,
+                -- Базовая информация
+                first_name TEXT,
+                username TEXT,
+                -- Определение пола
                 detected_gender TEXT DEFAULT 'unknown',
                 gender_confidence REAL DEFAULT 0.0,
                 gender_female_score INTEGER DEFAULT 0,
                 gender_male_score INTEGER DEFAULT 0,
+                -- Активность
+                total_messages INTEGER DEFAULT 0,
                 messages_analyzed INTEGER DEFAULT 0,
+                first_seen_at BIGINT,
+                last_seen_at BIGINT,
                 last_analysis_at BIGINT,
-                first_name TEXT,
-                username TEXT,
+                -- Временные паттерны (часы активности 0-23)
+                active_hours JSONB DEFAULT '{}',
+                peak_hour INTEGER,
+                is_night_owl BOOLEAN DEFAULT FALSE,
+                is_early_bird BOOLEAN DEFAULT FALSE,
+                -- Тональность и эмоции
+                sentiment_score REAL DEFAULT 0.0,
+                positive_messages INTEGER DEFAULT 0,
+                negative_messages INTEGER DEFAULT 0,
+                neutral_messages INTEGER DEFAULT 0,
+                emoji_usage_rate REAL DEFAULT 0.0,
+                avg_message_length REAL DEFAULT 0.0,
+                -- Характер общения
+                toxicity_score REAL DEFAULT 0.0,
+                humor_score REAL DEFAULT 0.0,
+                activity_level TEXT DEFAULT 'normal',
+                communication_style TEXT DEFAULT 'neutral',
+                -- Интересы (топ тем)
+                interests JSONB DEFAULT '[]',
+                frequent_words JSONB DEFAULT '[]',
+                -- Социальные связи
+                friends JSONB DEFAULT '[]',
+                frequent_replies_to JSONB DEFAULT '[]',
+                frequent_replies_from JSONB DEFAULT '[]',
+                -- Метаданные
+                profile_version INTEGER DEFAULT 1,
                 created_at BIGINT NOT NULL,
                 updated_at BIGINT NOT NULL
             )
         """)
         
-        # Индекс для профилей
+        # Индексы для профилей
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_user_profiles_gender 
             ON user_profiles(detected_gender)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_profiles_activity
+            ON user_profiles(activity_level, last_seen_at DESC)
+        """)
+        
+        # Таблица социальных связей (кто с кем общается)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_interactions (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                target_user_id BIGINT NOT NULL,
+                interaction_type TEXT NOT NULL,
+                interaction_count INTEGER DEFAULT 1,
+                last_interaction_at BIGINT NOT NULL,
+                sentiment_avg REAL DEFAULT 0.0,
+                UNIQUE(chat_id, user_id, target_user_id, interaction_type)
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_interactions_users
+            ON user_interactions(chat_id, user_id, target_user_id)
+        """)
+        
+        # Таблица тематических интересов
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_interests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                topic TEXT NOT NULL,
+                score REAL DEFAULT 1.0,
+                message_count INTEGER DEFAULT 1,
+                last_mentioned_at BIGINT NOT NULL,
+                UNIQUE(user_id, topic)
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_interests_user
+            ON user_interests(user_id, score DESC)
         """)
     
     logger.info("✅ PostgreSQL database initialized!")
@@ -1604,8 +1677,8 @@ async def update_user_gender_incrementally(user_id: int, new_message: str, first
                 INSERT INTO user_profiles 
                 (user_id, detected_gender, gender_confidence, gender_female_score,
                  gender_male_score, messages_analyzed, last_analysis_at,
-                 first_name, username, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $6, $6)
+                 first_name, username, first_seen_at, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $6, $6, $6)
             """, user_id, gender, confidence, new_result['female_score'],
                  new_result['male_score'], now, first_name or None, username or None)
             
@@ -1616,3 +1689,424 @@ async def update_user_gender_incrementally(user_id: int, new_message: str, first
                 'male_score': new_result['male_score'],
                 'messages_analyzed': 1
             }
+
+
+# ==================== РАСШИРЕННОЕ ПРОФИЛИРОВАНИЕ ПОЛЬЗОВАТЕЛЕЙ ====================
+
+# Темы для автоматического определения интересов
+TOPIC_KEYWORDS = {
+    'gaming': ['игра', 'играть', 'геймер', 'стрим', 'twitch', 'ps5', 'xbox', 'steam', 'dota', 'cs', 'valorant', 'minecraft', 'fortnite', 'рейд', 'босс', 'лвл', 'скилл', 'респ', 'фраг', 'читер', 'нуб', 'про', 'ранкед', 'катка', 'матч'],
+    'tech': ['код', 'программ', 'python', 'javascript', 'react', 'api', 'сервер', 'баг', 'фикс', 'девелоп', 'it', 'айти', 'комп', 'ноут', 'софт', 'хард', 'линукс', 'винда', 'мак', 'андроид', 'ios', 'нейросеть', 'gpt', 'ai', 'ии'],
+    'crypto': ['крипт', 'биткоин', 'btc', 'eth', 'эфир', 'блокчейн', 'nft', 'токен', 'альткоин', 'холд', 'трейд', 'памп', 'дамп', 'бычий', 'медвежий', 'defi', 'web3', 'метамаск', 'binance', 'байбит'],
+    'finance': ['деньги', 'зарплат', 'кредит', 'ипотек', 'банк', 'инвест', 'акци', 'дивиденд', 'вклад', 'процент', 'курс', 'доллар', 'рубл', 'евро', 'сбер', 'тинькофф', 'альфа', 'брокер'],
+    'food': ['еда', 'готов', 'рецепт', 'вкусн', 'ресторан', 'кафе', 'пицц', 'суши', 'бургер', 'кофе', 'чай', 'пиво', 'вино', 'водка', 'завтрак', 'обед', 'ужин', 'доставк', 'яндекс еда', 'деливери'],
+    'fitness': ['спорт', 'качал', 'тренир', 'зал', 'фитнес', 'бег', 'йога', 'кардио', 'протеин', 'диет', 'похуд', 'мышц', 'пресс', 'бицепс', 'штанг', 'гантел', 'тренер'],
+    'travel': ['путешеств', 'поезд', 'полёт', 'самолёт', 'отель', 'виза', 'загран', 'турц', 'египет', 'тайланд', 'бали', 'европ', 'пляж', 'море', 'горы', 'поход', 'отпуск', 'каникул'],
+    'cars': ['машин', 'авто', 'тачк', 'бмв', 'мерс', 'ауди', 'тойот', 'лексус', 'порш', 'ламб', 'феррари', 'двигател', 'масло', 'шины', 'колёс', 'права', 'гаи', 'штраф', 'парков'],
+    'music': ['музык', 'песн', 'трек', 'альбом', 'концерт', 'группа', 'рэп', 'хип-хоп', 'рок', 'поп', 'электро', 'диджей', 'spotify', 'яндекс музык', 'плейлист', 'слушаю', 'наушник'],
+    'movies': ['фильм', 'кино', 'сериал', 'netflix', 'кинопоиск', 'актёр', 'режиссёр', 'смотрел', 'смотрю', 'трейлер', 'премьер', 'оскар', 'марвел', 'dc', 'хоррор', 'комеди', 'драма'],
+    'politics': ['политик', 'путин', 'навальн', 'выбор', 'депутат', 'закон', 'госдум', 'правительств', 'санкци', 'война', 'украин', 'сво', 'мобилизац', 'протест', 'митинг', 'оппозиц'],
+    'work': ['работ', 'офис', 'начальник', 'коллег', 'зарплат', 'уволи', 'повыш', 'проект', 'дедлайн', 'созвон', 'митинг', 'отчёт', 'клиент', 'задач', 'kpi', 'hr', 'резюме', 'собеседован'],
+    'relationships': ['отношен', 'девушк', 'парень', 'муж', 'жена', 'свадьб', 'развод', 'любов', 'секс', 'свидан', 'тиндер', 'баду', 'встреч', 'романтик', 'измен', 'ревност', 'расстал'],
+    'memes': ['мем', 'лол', 'кек', 'рофл', 'хаха', 'ахах', 'смешно', 'угар', 'ору', 'орнул', 'прикол', 'жиза', 'база', 'кринж', 'зашквар', 'вайб', 'рил', 'факт'],
+}
+
+# Позитивные и негативные слова для анализа тональности
+POSITIVE_WORDS = [
+    'круто', 'класс', 'супер', 'отлично', 'прекрасно', 'замечательно', 'восхитительно',
+    'люблю', 'обожаю', 'нравится', 'рад', 'рада', 'счастлив', 'счастлива', 'доволен', 'довольна',
+    'спасибо', 'благодарю', 'молодец', 'умница', 'красавчик', 'красотка', 'гений',
+    'лучший', 'лучшая', 'топ', 'огонь', 'бомба', 'шик', 'кайф', 'красота', 'прелесть',
+    'ура', 'йес', 'yes', 'вау', 'wow', 'охуенно', 'заебись', 'пиздато', 'ништяк',
+    'победа', 'успех', 'удача', 'везение', 'праздник', 'радость', 'счастье',
+    '❤️', '😍', '🥰', '😊', '🔥', '👍', '💪', '🎉', '✨', '💯', '👏', '🙌',
+]
+
+NEGATIVE_WORDS = [
+    'плохо', 'ужас', 'кошмар', 'отстой', 'дерьмо', 'говно', 'хуйня', 'пиздец', 'блять',
+    'ненавижу', 'бесит', 'раздражает', 'достало', 'надоело', 'заебало', 'устал', 'устала',
+    'грустно', 'печально', 'депрессия', 'тоска', 'скука', 'одиноко', 'плохо',
+    'злой', 'злая', 'злюсь', 'бешусь', 'в ярости', 'ненависть', 'презираю',
+    'проблема', 'беда', 'катастрофа', 'провал', 'неудача', 'облом', 'фиаско',
+    'больно', 'страшно', 'тревожно', 'паника', 'стресс', 'выгорание',
+    'мудак', 'идиот', 'дебил', 'тупой', 'тупая', 'урод', 'уродина', 'тварь',
+    '😢', '😭', '😡', '🤬', '💔', '👎', '😤', '😠', '🙄', '😒', '😞', '😔',
+]
+
+# Токсичные слова/фразы
+TOXIC_MARKERS = [
+    'убей себя', 'сдохни', 'иди нахуй', 'пошёл нахуй', 'пошла нахуй', 'ебал',
+    'ёбаный', 'пидор', 'пидорас', 'петух', 'чмо', 'лох', 'даун', 'дебил',
+    'уёбок', 'уебан', 'мразь', 'тварь', 'сука', 'блядь', 'шлюха', 'проститутка',
+    'нигер', 'хач', 'чурка', 'жид', 'ненавижу тебя', 'умри',
+]
+
+# Юмор-маркеры
+HUMOR_MARKERS = [
+    'хаха', 'ахах', 'лол', 'lol', 'кек', 'рофл', 'rofl', 'ору', 'орнул',
+    'смешно', 'угар', 'прикол', 'ржу', 'ржунимагу', '😂', '🤣', '😹',
+    'шутка', 'анекдот', 'стёб', 'троллинг', 'сарказм', 'ирония',
+]
+
+
+def analyze_message_sentiment(text: str) -> dict:
+    """Анализ тональности сообщения"""
+    text_lower = text.lower()
+    
+    positive_count = sum(1 for word in POSITIVE_WORDS if word in text_lower)
+    negative_count = sum(1 for word in NEGATIVE_WORDS if word in text_lower)
+    toxic_count = sum(1 for marker in TOXIC_MARKERS if marker in text_lower)
+    humor_count = sum(1 for marker in HUMOR_MARKERS if marker in text_lower)
+    
+    # Считаем эмодзи
+    import re
+    emoji_pattern = re.compile(r'[\U0001F300-\U0001F9FF]')
+    emoji_count = len(emoji_pattern.findall(text))
+    
+    # Определяем тональность
+    total = positive_count + negative_count
+    if total == 0:
+        sentiment = 0.0  # нейтральный
+        sentiment_label = 'neutral'
+    elif positive_count > negative_count:
+        sentiment = positive_count / total
+        sentiment_label = 'positive'
+    else:
+        sentiment = -negative_count / total
+        sentiment_label = 'negative'
+    
+    return {
+        'sentiment': round(sentiment, 3),
+        'sentiment_label': sentiment_label,
+        'positive_count': positive_count,
+        'negative_count': negative_count,
+        'toxic_count': toxic_count,
+        'humor_count': humor_count,
+        'emoji_count': emoji_count,
+        'message_length': len(text)
+    }
+
+
+def detect_topics(text: str) -> List[str]:
+    """Определить темы в сообщении"""
+    text_lower = text.lower()
+    detected_topics = []
+    
+    for topic, keywords in TOPIC_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword in text_lower:
+                detected_topics.append(topic)
+                break
+    
+    return detected_topics
+
+
+def get_hour_from_timestamp(timestamp: int) -> int:
+    """Получить час из timestamp"""
+    from datetime import datetime
+    return datetime.fromtimestamp(timestamp).hour
+
+
+async def update_user_profile_comprehensive(
+    user_id: int,
+    chat_id: int,
+    message_text: str,
+    timestamp: int,
+    first_name: str = "",
+    username: str = "",
+    reply_to_user_id: int = None
+):
+    """
+    Комплексное обновление профиля пользователя.
+    Вызывается при каждом сообщении для инкрементального обучения.
+    """
+    async with (await get_pool()).acquire() as conn:
+        now = int(time.time())
+        hour = get_hour_from_timestamp(timestamp)
+        
+        # Анализируем сообщение
+        sentiment = analyze_message_sentiment(message_text)
+        topics = detect_topics(message_text)
+        gender_result = analyze_gender_from_text(message_text, first_name)
+        
+        # Получаем текущий профиль
+        profile = await conn.fetchrow(
+            "SELECT * FROM user_profiles WHERE user_id = $1", user_id
+        )
+        
+        if profile:
+            # Обновляем существующий профиль
+            # Обновляем часы активности
+            active_hours = dict(profile.get('active_hours') or {})
+            hour_str = str(hour)
+            active_hours[hour_str] = active_hours.get(hour_str, 0) + 1
+            
+            # Определяем пиковый час
+            peak_hour = int(max(active_hours, key=active_hours.get)) if active_hours else hour
+            
+            # Определяем паттерн активности
+            night_hours = sum(active_hours.get(str(h), 0) for h in [0, 1, 2, 3, 4, 5])
+            morning_hours = sum(active_hours.get(str(h), 0) for h in [6, 7, 8, 9])
+            total_hours = sum(active_hours.values()) or 1
+            is_night_owl = night_hours / total_hours > 0.3
+            is_early_bird = morning_hours / total_hours > 0.3
+            
+            # Обновляем счётчики тональности
+            positive = profile['positive_messages'] + (1 if sentiment['sentiment_label'] == 'positive' else 0)
+            negative = profile['negative_messages'] + (1 if sentiment['sentiment_label'] == 'negative' else 0)
+            neutral = profile['neutral_messages'] + (1 if sentiment['sentiment_label'] == 'neutral' else 0)
+            total_msgs = profile['total_messages'] + 1
+            
+            # Средняя тональность (скользящее среднее)
+            old_sentiment = profile['sentiment_score'] or 0
+            new_sentiment = (old_sentiment * (total_msgs - 1) + sentiment['sentiment']) / total_msgs
+            
+            # Средняя токсичность
+            old_toxicity = profile['toxicity_score'] or 0
+            msg_toxicity = min(sentiment['toxic_count'] / 3, 1.0)  # нормализуем до 1
+            new_toxicity = (old_toxicity * (total_msgs - 1) + msg_toxicity) / total_msgs
+            
+            # Средний юмор
+            old_humor = profile['humor_score'] or 0
+            msg_humor = min(sentiment['humor_count'] / 2, 1.0)
+            new_humor = (old_humor * (total_msgs - 1) + msg_humor) / total_msgs
+            
+            # Средняя длина сообщения
+            old_avg_len = profile['avg_message_length'] or 0
+            new_avg_len = (old_avg_len * (total_msgs - 1) + len(message_text)) / total_msgs
+            
+            # Частота эмодзи
+            old_emoji_rate = profile['emoji_usage_rate'] or 0
+            msg_emoji_rate = sentiment['emoji_count'] / max(len(message_text), 1) * 100
+            new_emoji_rate = (old_emoji_rate * (total_msgs - 1) + msg_emoji_rate) / total_msgs
+            
+            # Определяем уровень активности
+            if total_msgs > 1000:
+                activity_level = 'hyperactive'
+            elif total_msgs > 500:
+                activity_level = 'very_active'
+            elif total_msgs > 100:
+                activity_level = 'active'
+            elif total_msgs > 20:
+                activity_level = 'normal'
+            else:
+                activity_level = 'lurker'
+            
+            # Определяем стиль общения
+            if new_toxicity > 0.3:
+                communication_style = 'toxic'
+            elif new_humor > 0.3:
+                communication_style = 'humorous'
+            elif new_sentiment > 0.3:
+                communication_style = 'positive'
+            elif new_sentiment < -0.3:
+                communication_style = 'negative'
+            else:
+                communication_style = 'neutral'
+            
+            # Обновляем гендерные счётчики
+            new_female_score = profile['gender_female_score'] + gender_result['female_score']
+            new_male_score = profile['gender_male_score'] + gender_result['male_score']
+            gender_total = new_female_score + new_male_score
+            if gender_total > 0:
+                if new_female_score > new_male_score:
+                    gender_confidence = new_female_score / gender_total
+                    detected_gender = 'женский' if gender_confidence >= 0.55 else 'unknown'
+                elif new_male_score > new_female_score:
+                    gender_confidence = new_male_score / gender_total
+                    detected_gender = 'мужской' if gender_confidence >= 0.55 else 'unknown'
+                else:
+                    gender_confidence = 0.5
+                    detected_gender = profile['detected_gender']
+            else:
+                gender_confidence = profile['gender_confidence']
+                detected_gender = profile['detected_gender']
+            
+            # Обновляем профиль
+            await conn.execute("""
+                UPDATE user_profiles SET
+                    first_name = COALESCE($2, first_name),
+                    username = COALESCE($3, username),
+                    detected_gender = $4,
+                    gender_confidence = $5,
+                    gender_female_score = $6,
+                    gender_male_score = $7,
+                    total_messages = $8,
+                    messages_analyzed = $8,
+                    last_seen_at = $9,
+                    last_analysis_at = $9,
+                    active_hours = $10,
+                    peak_hour = $11,
+                    is_night_owl = $12,
+                    is_early_bird = $13,
+                    sentiment_score = $14,
+                    positive_messages = $15,
+                    negative_messages = $16,
+                    neutral_messages = $17,
+                    emoji_usage_rate = $18,
+                    avg_message_length = $19,
+                    toxicity_score = $20,
+                    humor_score = $21,
+                    activity_level = $22,
+                    communication_style = $23,
+                    updated_at = $9
+                WHERE user_id = $1
+            """, user_id, first_name or None, username or None,
+                 detected_gender, gender_confidence, new_female_score, new_male_score,
+                 total_msgs, now, json.dumps(active_hours), peak_hour,
+                 is_night_owl, is_early_bird, new_sentiment, positive, negative, neutral,
+                 new_emoji_rate, new_avg_len, new_toxicity, new_humor,
+                 activity_level, communication_style)
+        
+        else:
+            # Создаём новый профиль
+            active_hours = {str(hour): 1}
+            
+            detected_gender = gender_result['gender']
+            gender_confidence = gender_result['confidence']
+            
+            sentiment_label = sentiment['sentiment_label']
+            positive = 1 if sentiment_label == 'positive' else 0
+            negative = 1 if sentiment_label == 'negative' else 0
+            neutral = 1 if sentiment_label == 'neutral' else 0
+            
+            await conn.execute("""
+                INSERT INTO user_profiles (
+                    user_id, first_name, username,
+                    detected_gender, gender_confidence, gender_female_score, gender_male_score,
+                    total_messages, messages_analyzed, first_seen_at, last_seen_at, last_analysis_at,
+                    active_hours, peak_hour, is_night_owl, is_early_bird,
+                    sentiment_score, positive_messages, negative_messages, neutral_messages,
+                    emoji_usage_rate, avg_message_length, toxicity_score, humor_score,
+                    activity_level, communication_style, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, 1, 1, $8, $8, $8,
+                    $9, $10, FALSE, FALSE,
+                    $11, $12, $13, $14, $15, $16, $17, $18,
+                    'lurker', 'neutral', $8, $8
+                )
+            """, user_id, first_name or None, username or None,
+                 detected_gender, gender_confidence, 
+                 gender_result['female_score'], gender_result['male_score'],
+                 now, json.dumps(active_hours), hour,
+                 sentiment['sentiment'], positive, negative, neutral,
+                 sentiment['emoji_count'] / max(len(message_text), 1) * 100,
+                 len(message_text),
+                 min(sentiment['toxic_count'] / 3, 1.0),
+                 min(sentiment['humor_count'] / 2, 1.0))
+        
+        # Обновляем темы/интересы
+        for topic in topics:
+            await conn.execute("""
+                INSERT INTO user_interests (user_id, topic, score, message_count, last_mentioned_at)
+                VALUES ($1, $2, 1.0, 1, $3)
+                ON CONFLICT (user_id, topic) DO UPDATE SET
+                    score = user_interests.score + 0.1,
+                    message_count = user_interests.message_count + 1,
+                    last_mentioned_at = $3
+            """, user_id, topic, now)
+        
+        # Обновляем социальные связи (если это реплай)
+        if reply_to_user_id and reply_to_user_id != user_id:
+            await conn.execute("""
+                INSERT INTO user_interactions 
+                (chat_id, user_id, target_user_id, interaction_type, interaction_count, last_interaction_at, sentiment_avg)
+                VALUES ($1, $2, $3, 'reply', 1, $4, $5)
+                ON CONFLICT (chat_id, user_id, target_user_id, interaction_type) DO UPDATE SET
+                    interaction_count = user_interactions.interaction_count + 1,
+                    last_interaction_at = $4,
+                    sentiment_avg = (user_interactions.sentiment_avg * user_interactions.interaction_count + $5) / (user_interactions.interaction_count + 1)
+            """, chat_id, user_id, reply_to_user_id, now, sentiment['sentiment'])
+
+
+async def get_user_full_profile(user_id: int) -> Optional[Dict[str, Any]]:
+    """Получить полный профиль пользователя со всеми данными"""
+    async with (await get_pool()).acquire() as conn:
+        # Основной профиль
+        profile = await conn.fetchrow(
+            "SELECT * FROM user_profiles WHERE user_id = $1", user_id
+        )
+        
+        if not profile:
+            return None
+        
+        result = dict(profile)
+        
+        # Получаем интересы
+        interests = await conn.fetch("""
+            SELECT topic, score, message_count 
+            FROM user_interests 
+            WHERE user_id = $1 
+            ORDER BY score DESC 
+            LIMIT 10
+        """, user_id)
+        result['top_interests'] = [dict(i) for i in interests]
+        
+        # Получаем топ собеседников
+        interactions = await conn.fetch("""
+            SELECT target_user_id, interaction_count, sentiment_avg
+            FROM user_interactions
+            WHERE user_id = $1 AND interaction_type = 'reply'
+            ORDER BY interaction_count DESC
+            LIMIT 10
+        """, user_id)
+        result['top_interactions'] = [dict(i) for i in interactions]
+        
+        return result
+
+
+async def get_chat_social_graph(chat_id: int) -> List[Dict[str, Any]]:
+    """Получить социальный граф чата (кто с кем общается)"""
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT 
+                user_id, target_user_id, 
+                SUM(interaction_count) as total_interactions,
+                AVG(sentiment_avg) as avg_sentiment
+            FROM user_interactions
+            WHERE chat_id = $1
+            GROUP BY user_id, target_user_id
+            ORDER BY total_interactions DESC
+            LIMIT 100
+        """, chat_id)
+        return [dict(row) for row in rows]
+
+
+async def get_user_activity_report(user_id: int) -> Dict[str, Any]:
+    """Получить отчёт об активности пользователя"""
+    profile = await get_user_full_profile(user_id)
+    
+    if not profile:
+        return {'error': 'Profile not found'}
+    
+    # Формируем читаемый отчёт
+    report = {
+        'user_id': user_id,
+        'name': profile.get('first_name') or profile.get('username') or 'Unknown',
+        'gender': profile.get('detected_gender', 'unknown'),
+        'gender_confidence': f"{(profile.get('gender_confidence', 0) * 100):.0f}%",
+        'total_messages': profile.get('total_messages', 0),
+        'activity_level': profile.get('activity_level', 'unknown'),
+        'communication_style': profile.get('communication_style', 'neutral'),
+        'sentiment': {
+            'score': profile.get('sentiment_score', 0),
+            'positive': profile.get('positive_messages', 0),
+            'negative': profile.get('negative_messages', 0),
+            'neutral': profile.get('neutral_messages', 0),
+        },
+        'behavior': {
+            'is_night_owl': profile.get('is_night_owl', False),
+            'is_early_bird': profile.get('is_early_bird', False),
+            'peak_hour': profile.get('peak_hour'),
+            'avg_message_length': round(profile.get('avg_message_length', 0)),
+            'emoji_rate': f"{profile.get('emoji_usage_rate', 0):.1f}%",
+            'toxicity': f"{(profile.get('toxicity_score', 0) * 100):.0f}%",
+            'humor': f"{(profile.get('humor_score', 0) * 100):.0f}%",
+        },
+        'interests': [i['topic'] for i in profile.get('top_interests', [])],
+        'top_interacted_users': [i['target_user_id'] for i in profile.get('top_interactions', [])],
+        'first_seen': profile.get('first_seen_at'),
+        'last_seen': profile.get('last_seen_at'),
+    }
+    
+    return report

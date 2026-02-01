@@ -64,7 +64,8 @@ if USE_POSTGRES:
         save_media, get_random_media, get_media_stats, increment_media_usage,
         migrate_media_from_messages,
         get_user_profile, get_user_gender, analyze_and_update_user_gender,
-        update_user_gender_incrementally
+        update_user_gender_incrementally, update_user_profile_comprehensive,
+        get_user_full_profile, get_user_activity_report, get_chat_social_graph
     )
 else:
     from database import (
@@ -90,11 +91,15 @@ else:
     async def get_media_stats(chat_id): return {'total': 0}
     async def increment_media_usage(media_id): pass
     async def migrate_media_from_messages(): return {'migrated': 0, 'skipped': 0, 'errors': 0}
-    # Заглушки для определения пола (только PostgreSQL)
+    # Заглушки для профилирования пользователей (только PostgreSQL)
     async def get_user_profile(user_id): return None
     async def get_user_gender(user_id): return 'unknown'
     async def analyze_and_update_user_gender(user_id, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
     async def update_user_gender_incrementally(user_id, new_message, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
+    async def update_user_profile_comprehensive(user_id, chat_id, message_text, timestamp, first_name="", username="", reply_to_user_id=None): pass
+    async def get_user_full_profile(user_id): return None
+    async def get_user_activity_report(user_id): return {'error': 'PostgreSQL required'}
+    async def get_chat_social_graph(chat_id): return []
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
     calculate_crime_success, calculate_crime_reward, get_random_crime_message,
@@ -936,8 +941,173 @@ async def cmd_help(message: Message):
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
 _Бот запоминает все мемы и иногда выдаёт их сам!_
+
+/profile — Твоё досье 📋
+/социал — Социальный граф чата 🕸️
 """
     await message.answer(help_text, parse_mode=ParseMode.MARKDOWN)
+
+
+@router.message(Command("profile", "профиль", "досье"))
+async def cmd_profile(message: Message):
+    """Показать профиль пользователя с полным анализом"""
+    if not USE_POSTGRES:
+        await message.answer("⚠️ Профили доступны только в полной версии")
+        return
+    
+    # Определяем чей профиль показать
+    target_user = message.from_user
+    target_name = target_user.first_name or target_user.username or "Аноним"
+    
+    # Если реплай - показываем профиль того, кому реплай
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        target_name = target_user.first_name or target_user.username or "Аноним"
+    
+    try:
+        report = await get_user_activity_report(target_user.id)
+        
+        if report.get('error'):
+            await message.answer(f"🔍 Досье на *{target_name}* пока не собрано. Пусть побольше болтает!", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        # Формируем красивый вывод
+        gender_icon = "👨" if report['gender'] == 'мужской' else "👩" if report['gender'] == 'женский' else "🤷"
+        activity_icons = {
+            'hyperactive': '🔥🔥🔥',
+            'very_active': '🔥🔥',
+            'active': '🔥',
+            'normal': '🙂',
+            'lurker': '👀'
+        }
+        style_icons = {
+            'toxic': '☠️ Токсичный',
+            'humorous': '😂 Юморист',
+            'positive': '😊 Позитивный',
+            'negative': '😔 Негативный',
+            'neutral': '😐 Нейтральный'
+        }
+        
+        activity_icon = activity_icons.get(report['activity_level'], '🙂')
+        style_text = style_icons.get(report['communication_style'], '😐 Нейтральный')
+        
+        # Временные паттерны
+        time_pattern = ""
+        if report['behavior']['is_night_owl']:
+            time_pattern = "🦉 Сова (ночная тварь)"
+        elif report['behavior']['is_early_bird']:
+            time_pattern = "🐓 Жаворонок (ранняя пташка)"
+        else:
+            time_pattern = "🌞 Обычный режим"
+        
+        peak = report['behavior']['peak_hour']
+        if peak is not None:
+            time_pattern += f" | Пик: {peak}:00"
+        
+        # Интересы
+        interests_text = ", ".join(report['interests'][:5]) if report['interests'] else "Не определены"
+        
+        # Sentiment bar
+        sent = report['sentiment']
+        total_sent = sent['positive'] + sent['negative'] + sent['neutral']
+        if total_sent > 0:
+            pos_pct = sent['positive'] / total_sent * 100
+            neg_pct = sent['negative'] / total_sent * 100
+            sentiment_bar = f"🟢 {pos_pct:.0f}% | 🔴 {neg_pct:.0f}%"
+        else:
+            sentiment_bar = "Нет данных"
+        
+        text = f"""
+📋 *ДОСЬЕ: {target_name}*
+{gender_icon} Пол: {report['gender']} ({report['gender_confidence']})
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 *АКТИВНОСТЬ*
+{activity_icon} Уровень: {report['activity_level']}
+💬 Сообщений: {report['total_messages']}
+📏 Средняя длина: {report['behavior']['avg_message_length']} символов
+
+🎭 *ХАРАКТЕР*
+{style_text}
+{sentiment_bar}
+😀 Эмодзи: {report['behavior']['emoji_rate']}
+☠️ Токсичность: {report['behavior']['toxicity']}
+😂 Юмор: {report['behavior']['humor']}
+
+⏰ *РЕЖИМ*
+{time_pattern}
+
+🎯 *ИНТЕРЕСЫ*
+{interests_text}
+"""
+        
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+        
+    except Exception as e:
+        logger.error(f"Profile error: {e}")
+        await message.answer("❌ Ошибка получения профиля")
+
+
+@router.message(Command("социал", "social", "граф"))
+async def cmd_social_graph(message: Message):
+    """Показать социальный граф чата - кто с кем общается"""
+    if not USE_POSTGRES:
+        await message.answer("⚠️ Социальный граф доступен только в полной версии")
+        return
+    
+    if message.chat.type == "private":
+        await message.answer("👥 Команда работает только в групповых чатах")
+        return
+    
+    try:
+        chat_id = message.chat.id
+        graph = await get_chat_social_graph(chat_id)
+        
+        if not graph:
+            await message.answer("🕸️ Социальный граф пуст. Чатьтесь больше!")
+            return
+        
+        # Собираем уникальных пользователей
+        user_ids = set()
+        for edge in graph[:20]:  # Топ-20 связей
+            user_ids.add(edge['user_id'])
+            user_ids.add(edge['target_user_id'])
+        
+        # Получаем имена
+        user_names = {}
+        for uid in user_ids:
+            try:
+                member = await message.bot.get_chat_member(chat_id, uid)
+                user_names[uid] = member.user.first_name or member.user.username or str(uid)
+            except:
+                user_names[uid] = f"User_{uid}"
+        
+        text = "🕸️ *СОЦИАЛЬНЫЙ ГРАФ ЧАТА*\n\n"
+        text += "_Кто кому чаще отвечает:_\n\n"
+        
+        for i, edge in enumerate(graph[:15], 1):
+            from_name = user_names.get(edge['user_id'], '?')
+            to_name = user_names.get(edge['target_user_id'], '?')
+            count = edge['total_interactions']
+            sentiment = edge['avg_sentiment'] or 0
+            
+            # Эмодзи по настроению
+            if sentiment > 0.2:
+                mood = "💚"
+            elif sentiment < -0.2:
+                mood = "💔"
+            else:
+                mood = "💬"
+            
+            text += f"{i}. {from_name} → {to_name}: {count}x {mood}\n"
+        
+        text += "\n_💚 позитив | 💔 негатив | 💬 нейтрал_"
+        
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+        
+    except Exception as e:
+        logger.error(f"Social graph error: {e}")
+        await message.answer("❌ Ошибка построения графа")
 
 
 @router.message(Command("achievements", "ach"))
@@ -2857,17 +3027,20 @@ async def collect_messages_and_exp(message: Message):
         reply_to_username=reply_to_username
     )
     
-    # Обновляем профиль пользователя (пол) инкрементально
+    # Обновляем профиль пользователя комплексно (пол, тональность, интересы, активность)
     if USE_POSTGRES and message.text:
         try:
-            await update_user_gender_incrementally(
+            await update_user_profile_comprehensive(
                 user_id=user_id,
-                new_message=message.text,
+                chat_id=chat_id,
+                message_text=message.text,
+                timestamp=int(time.time()),
                 first_name=message.from_user.first_name or "",
-                username=message.from_user.username or ""
+                username=message.from_user.username or "",
+                reply_to_user_id=reply_to_user_id
             )
         except Exception as e:
-            logger.debug(f"Gender update error: {e}")
+            logger.debug(f"Profile update error: {e}")
     
     # Пассивный опыт для игроков
     player = await get_player(user_id, chat_id)
@@ -3549,10 +3722,12 @@ async def cmd_admin(message: Message):
 /chats — список всех чатов
 /topusers — топ пользователей
 /metrics — метрики бота (аптайм, команды)
+/userstats — статистика профилей
 
 🔍 *Поиск:*
 /chat `<id>` — инфо о чате
 /finduser `<имя>` — поиск пользователя
+/rawprofile `<id>` — сырой профиль юзера
 
 🛠 *Управление:*
 /cleanup — очистка старых данных
@@ -3959,6 +4134,148 @@ async def cmd_cleanup(message: Message):
         )
     except Exception as e:
         await message.answer(f"❌ Ошибка очистки: {e}")
+
+
+@router.message(Command("userstats", "user_stats"))
+async def cmd_userstats(message: Message):
+    """Статистика профилей пользователей"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Статистика доступна только с PostgreSQL")
+        return
+    
+    try:
+        from database_postgres import get_pool
+        async with (await get_pool()).acquire() as conn:
+            stats = await conn.fetchrow("""
+                SELECT 
+                    COUNT(*) as total_profiles,
+                    COUNT(CASE WHEN detected_gender = 'мужской' THEN 1 END) as males,
+                    COUNT(CASE WHEN detected_gender = 'женский' THEN 1 END) as females,
+                    COUNT(CASE WHEN detected_gender = 'unknown' THEN 1 END) as unknown,
+                    COUNT(CASE WHEN activity_level = 'hyperactive' THEN 1 END) as hyperactive,
+                    COUNT(CASE WHEN activity_level = 'very_active' THEN 1 END) as very_active,
+                    COUNT(CASE WHEN activity_level = 'active' THEN 1 END) as active,
+                    COUNT(CASE WHEN activity_level = 'normal' THEN 1 END) as normal,
+                    COUNT(CASE WHEN activity_level = 'lurker' THEN 1 END) as lurkers,
+                    COUNT(CASE WHEN communication_style = 'toxic' THEN 1 END) as toxic,
+                    COUNT(CASE WHEN communication_style = 'humorous' THEN 1 END) as humorous,
+                    COUNT(CASE WHEN communication_style = 'positive' THEN 1 END) as positive,
+                    AVG(total_messages) as avg_messages,
+                    SUM(total_messages) as total_messages,
+                    COUNT(CASE WHEN is_night_owl THEN 1 END) as night_owls,
+                    COUNT(CASE WHEN is_early_bird THEN 1 END) as early_birds
+                FROM user_profiles
+            """)
+            
+            interests_stats = await conn.fetch("""
+                SELECT topic, COUNT(*) as users, SUM(message_count) as mentions
+                FROM user_interests
+                GROUP BY topic
+                ORDER BY users DESC
+                LIMIT 10
+            """)
+            
+            interactions = await conn.fetchrow("""
+                SELECT COUNT(*) as total, SUM(interaction_count) as interactions
+                FROM user_interactions
+            """)
+        
+        interests_text = "\n".join([
+            f"  • {row['topic']}: {row['users']} юзеров, {row['mentions']} упоминаний"
+            for row in interests_stats
+        ]) or "Нет данных"
+        
+        text = f"""📊 *СТАТИСТИКА ПРОФИЛЕЙ*
+
+👥 *Всего профилей:* {stats['total_profiles']}
+└ 👨 Мужчины: {stats['males']}
+└ 👩 Женщины: {stats['females']}
+└ 🤷 Неизвестно: {stats['unknown']}
+
+🔥 *Активность:*
+└ 🔥🔥🔥 Гиперактивные: {stats['hyperactive']}
+└ 🔥🔥 Очень активные: {stats['very_active']}
+└ 🔥 Активные: {stats['active']}
+└ 🙂 Обычные: {stats['normal']}
+└ 👀 Лурки: {stats['lurkers']}
+
+🎭 *Стиль общения:*
+└ ☠️ Токсичные: {stats['toxic']}
+└ 😂 Юмористы: {stats['humorous']}
+└ 😊 Позитивные: {stats['positive']}
+
+⏰ *Режим сна:*
+└ 🦉 Совы: {stats['night_owls']}
+└ 🐓 Жаворонки: {stats['early_birds']}
+
+📝 *Сообщения:*
+└ Всего: {stats['total_messages'] or 0:,.0f}
+└ Среднее: {stats['avg_messages'] or 0:,.1f} на юзера
+
+🕸️ *Социальные связи:*
+└ Уникальных: {interactions['total'] or 0}
+└ Взаимодействий: {interactions['interactions'] or 0:,}
+
+🎯 *Топ интересов:*
+{interests_text}
+"""
+        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"User stats error: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@router.message(Command("rawprofile", "raw_profile"))
+async def cmd_rawprofile(message: Message):
+    """Показать сырой JSON профиля пользователя"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Профили доступны только с PostgreSQL")
+        return
+    
+    # Получаем ID из аргумента
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Использование: /rawprofile <user_id>")
+        return
+    
+    try:
+        user_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ ID должен быть числом")
+        return
+    
+    try:
+        profile = await get_user_full_profile(user_id)
+        if not profile:
+            await message.answer(f"❌ Профиль {user_id} не найден")
+            return
+        
+        # Конвертируем все в строку
+        import json
+        
+        # Обрабатываем специальные типы
+        for key, value in profile.items():
+            if isinstance(value, (dict, list)):
+                continue
+            if value is None:
+                profile[key] = None
+        
+        json_text = json.dumps(profile, ensure_ascii=False, indent=2, default=str)
+        
+        # Разбиваем на части если слишком длинное
+        if len(json_text) > 4000:
+            json_text = json_text[:4000] + "\n... (обрезано)"
+        
+        await message.answer(f"```json\n{json_text}\n```", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Raw profile error: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
 
 @router.message(Command("migrate_media", "миграция_медиа"))
