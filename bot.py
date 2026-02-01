@@ -90,6 +90,11 @@ else:
     async def get_media_stats(chat_id): return {'total': 0}
     async def increment_media_usage(media_id): pass
     async def migrate_media_from_messages(): return {'migrated': 0, 'skipped': 0, 'errors': 0}
+    # Заглушки для определения пола (только PostgreSQL)
+    async def get_user_profile(user_id): return None
+    async def get_user_gender(user_id): return 'unknown'
+    async def analyze_and_update_user_gender(user_id, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
+    async def update_user_gender_incrementally(user_id, new_message, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
     calculate_crime_success, calculate_crime_reward, get_random_crime_message,

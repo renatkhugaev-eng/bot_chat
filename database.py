@@ -399,7 +399,9 @@ async def save_chat_message(
     reply_to_first_name: str = None,
     reply_to_username: str = None,
     sticker_emoji: str = None,
-    image_description: str = None
+    image_description: str = None,
+    file_id: str = None,
+    file_unique_id: str = None
 ):
     """Сохранить сообщение чата для аналитики"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -415,6 +417,7 @@ async def save_chat_message(
             image_description, int(time.time())
         ))
         await db.commit()
+        # Note: file_id и file_unique_id игнорируются в SQLite версии
 
 
 async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]]:
