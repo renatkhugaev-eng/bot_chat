@@ -345,6 +345,29 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_media_chat 
             ON chat_media(chat_id, file_type, created_at DESC)
         """)
+        
+        # Таблица профилей пользователей (глобальное определение пола и характеристик)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id BIGINT PRIMARY KEY,
+                detected_gender TEXT DEFAULT 'unknown',
+                gender_confidence REAL DEFAULT 0.0,
+                gender_female_score INTEGER DEFAULT 0,
+                gender_male_score INTEGER DEFAULT 0,
+                messages_analyzed INTEGER DEFAULT 0,
+                last_analysis_at BIGINT,
+                first_name TEXT,
+                username TEXT,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL
+            )
+        """)
+        
+        # Индекс для профилей
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_profiles_gender 
+            ON user_profiles(detected_gender)
+        """)
     
     logger.info("✅ PostgreSQL database initialized!")
 
@@ -1225,3 +1248,371 @@ async def migrate_media_from_messages() -> Dict[str, int]:
                 stats['errors'] += 1
         
         return stats
+
+
+# ==================== ПРОФИЛИ ПОЛЬЗОВАТЕЛЕЙ И ОПРЕДЕЛЕНИЕ ПОЛА ====================
+
+# Расширенные маркеры для определения пола
+FEMALE_VERB_MARKERS = [
+    # Глаголы прошедшего времени (-ла, -лась)
+    'сделала', 'пошла', 'была', 'хотела', 'могла', 'знала', 'видела',
+    'написала', 'сказала', 'думала', 'решила', 'поняла', 'взяла',
+    'пришла', 'ушла', 'нашла', 'потеряла', 'купила', 'продала',
+    'пила', 'ела', 'спала', 'читала', 'смотрела', 'слушала',
+    'работала', 'училась', 'жила', 'любила', 'ненавидела',
+    'ходила', 'бегала', 'летала', 'ездила', 'плавала',
+    'играла', 'пела', 'танцевала', 'рисовала', 'писала',
+    'готовила', 'убирала', 'стирала', 'мыла', 'чистила',
+    'звонила', 'отвечала', 'спрашивала', 'просила', 'требовала',
+    'ждала', 'надеялась', 'верила', 'мечтала', 'планировала',
+    'смеялась', 'плакала', 'радовалась', 'грустила', 'злилась',
+    'боялась', 'волновалась', 'переживала', 'успокоилась',
+    'проснулась', 'уснула', 'легла', 'встала', 'села',
+    'оделась', 'разделась', 'помылась', 'накрасилась', 'причесалась',
+    'влюбилась', 'развелась', 'родила', 'забеременела',
+    'заболела', 'выздоровела', 'похудела', 'поправилась',
+    'опоздала', 'успела', 'забыла', 'вспомнила', 'узнала',
+    'поехала', 'приехала', 'уехала', 'вернулась', 'осталась',
+    'начала', 'закончила', 'продолжила', 'бросила', 'попробовала',
+    'получила', 'отдала', 'подарила', 'выиграла', 'проиграла',
+    'удивилась', 'обрадовалась', 'расстроилась', 'разозлилась',
+    'испугалась', 'обиделась', 'влюбилась', 'разлюбила',
+    'ошиблась', 'исправилась', 'изменилась', 'согласилась',
+    'отказалась', 'решилась', 'постаралась', 'устроилась',
+    'уволилась', 'заработала', 'потратила', 'сэкономила',
+    'познакомилась', 'поссорилась', 'помирилась', 'расставалась',
+    'скучала', 'соскучилась', 'дождалась', 'надоела', 'достала',
+]
+
+FEMALE_ADJ_MARKERS = [
+    'рада', 'устала', 'готова', 'довольна', 'счастлива', 'несчастна',
+    'злая', 'добрая', 'весёлая', 'грустная', 'красивая', 'умная',
+    'глупая', 'сильная', 'слабая', 'больная', 'здоровая',
+    'молодая', 'старая', 'высокая', 'низкая', 'толстая', 'худая',
+    'беременна', 'замужняя', 'разведённая', 'одинокая',
+    'голодная', 'сытая', 'пьяная', 'трезвая', 'уставшая',
+    'занятая', 'свободная', 'богатая', 'бедная', 'влюблена',
+    'занята', 'увлечена', 'одета', 'раздета', 'накрашена',
+    'расстроена', 'раздражена', 'удивлена', 'шокирована',
+    'замужем', 'разведена', 'помолвлена', 'беременная',
+]
+
+FEMALE_PHRASES = [
+    'я девушка', 'я женщина', 'я мама', 'я жена', 'я бабушка',
+    'я девочка', 'я тётя', 'я сестра', 'я дочь', 'я подруга',
+    'как баба', 'как девка', 'как женщина', 'как мама',
+    'мой муж', 'мой парень', 'мой мужчина', 'мой бывший',
+    'мой молодой человек', 'мой мч', 'мой бойфренд',
+    'у меня месячные', 'критические дни', 'пмс', 'кд',
+    'маникюр', 'педикюр', 'эпиляция', 'макияж', 'косметика',
+    'платье', 'юбка', 'каблуки', 'туфли', 'сумочка', 'клатч',
+    'рожала', 'кормила грудью', 'беременная', 'роды',
+    'гинеколог', 'женская консультация', 'узи беременность',
+    'декрет', 'в декрете', 'декретный отпуск',
+    'подруга сказала', 'подруги', 'с подругами', 'девичник',
+    'женский день', 'восьмое марта', 'цветы подарили',
+    'кольцо подарил', 'замуж позвал', 'предложение сделал',
+]
+
+MALE_VERB_MARKERS = [
+    # Глаголы прошедшего времени (-л, -лся)
+    'сделал', 'пошёл', 'пошел', 'был', 'хотел', 'мог', 'знал', 'видел',
+    'написал', 'сказал', 'думал', 'решил', 'понял', 'взял',
+    'пришёл', 'пришел', 'ушёл', 'ушел', 'нашёл', 'нашел', 'потерял',
+    'пил', 'ел', 'спал', 'читал', 'смотрел', 'слушал',
+    'работал', 'учился', 'жил', 'любил', 'ненавидел',
+    'ходил', 'бегал', 'летал', 'ездил', 'плавал',
+    'играл', 'пел', 'танцевал', 'рисовал', 'писал',
+    'готовил', 'убирал', 'чинил', 'строил', 'ремонтировал',
+    'звонил', 'отвечал', 'спрашивал', 'просил', 'требовал',
+    'ждал', 'надеялся', 'верил', 'мечтал', 'планировал',
+    'смеялся', 'плакал', 'радовался', 'грустил', 'злился',
+    'боялся', 'волновался', 'переживал', 'успокоился',
+    'проснулся', 'уснул', 'лёг', 'лег', 'встал', 'сел',
+    'оделся', 'разделся', 'помылся', 'побрился',
+    'влюбился', 'женился', 'развёлся', 'развелся', 'расстался',
+    'заболел', 'выздоровел', 'похудел', 'поправился',
+    'опоздал', 'успел', 'забыл', 'вспомнил', 'узнал',
+    'поехал', 'приехал', 'уехал', 'вернулся', 'остался',
+    'начал', 'закончил', 'продолжил', 'бросил', 'попробовал',
+    'получил', 'отдал', 'подарил', 'выиграл', 'проиграл',
+    'удивился', 'обрадовался', 'расстроился', 'разозлился',
+    'испугался', 'обиделся', 'влюбился', 'разлюбил',
+    'ошибся', 'исправился', 'изменился', 'согласился',
+    'отказался', 'решился', 'постарался', 'устроился',
+    'уволился', 'заработал', 'потратил', 'сэкономил',
+    'познакомился', 'поссорился', 'помирился', 'расставался',
+    'скучал', 'соскучился', 'дождался', 'надоел', 'достал',
+]
+
+MALE_ADJ_MARKERS = [
+    'рад', 'устал', 'готов', 'доволен', 'счастлив', 'несчастен',
+    'злой', 'добрый', 'весёлый', 'грустный', 'красивый', 'умный',
+    'глупый', 'сильный', 'слабый', 'больной', 'здоровый',
+    'молодой', 'старый', 'высокий', 'низкий', 'толстый', 'худой',
+    'женатый', 'разведённый', 'холостой', 'одинокий',
+    'голодный', 'сытый', 'пьяный', 'трезвый', 'уставший',
+    'занятый', 'свободный', 'богатый', 'бедный', 'влюблён',
+    'занят', 'увлечён', 'одет', 'раздет', 'побрит',
+    'расстроен', 'раздражён', 'удивлён', 'шокирован',
+    'женат', 'разведён', 'помолвлен', 'холост',
+]
+
+MALE_PHRASES = [
+    'я парень', 'я мужик', 'я муж', 'я отец', 'я папа', 'я дед',
+    'я мальчик', 'я дядя', 'я брат', 'я сын', 'я друг', 'я пацан',
+    'как мужик', 'как пацан', 'как батя', 'как отец', 'как мужчина',
+    'моя жена', 'моя девушка', 'моя женщина', 'моя бывшая',
+    'моя подруга', 'моя тёлка', 'моя баба',
+    'у меня борода', 'побрился', 'бреюсь', 'борода растёт',
+    'служил в армии', 'армия', 'военкомат', 'повестка', 'призыв',
+    'качалка', 'штанга', 'гантели', 'бицепс', 'качаюсь', 'жму',
+    'с пацанами', 'с друзьями пиво', 'мальчишник', 'на рыбалку',
+    'на охоту', 'в гараж', 'машину чинил', 'под машиной',
+    'предложение сделал', 'кольцо купил', 'замуж позвал',
+    'отец ребёнка', 'дети мои', 'сын родился', 'дочь родилась',
+]
+
+# Женские имена для fallback
+FEMALE_NAMES = [
+    'анна', 'аня', 'мария', 'маша', 'екатерина', 'катя', 'ольга', 'оля',
+    'наталья', 'наташа', 'елена', 'лена', 'татьяна', 'таня', 'ирина', 'ира',
+    'светлана', 'света', 'юлия', 'юля', 'анастасия', 'настя', 'дарья', 'даша',
+    'полина', 'алина', 'виктория', 'вика', 'кристина', 'александра',
+    'софья', 'софия', 'алёна', 'алена', 'ксения', 'ксюша', 'вероника', 'марина',
+    'валерия', 'лера', 'диана', 'карина', 'арина', 'милана', 'ева', 'яна',
+    'регина', 'ангелина', 'валентина', 'людмила', 'люда', 'надежда', 'надя',
+    'галина', 'галя', 'лилия', 'лиля', 'жанна', 'инна', 'эльвира', 'элина',
+    'оксана', 'лариса', 'вера', 'любовь', 'люба', 'нина', 'зоя', 'рита',
+    'алиса', 'соня', 'варя', 'варвара', 'ульяна', 'лиза', 'елизавета',
+]
+
+# Мужские имена на -а/-я (исключения)
+MALE_NAMES_ENDING_A = [
+    'никита', 'илья', 'кузьма', 'фома', 'лука', 'саша', 'женя', 'валя',
+    'миша', 'гоша', 'паша', 'лёша', 'леша', 'гриша', 'коля', 'толя',
+    'вася', 'петя', 'ваня', 'дима', 'стёпа', 'степа', 'лёня', 'леня',
+    'гена', 'боря', 'федя', 'сеня', 'костя', 'витя', 'вова', 'серёжа',
+    'сережа', 'андрюша', 'данила', 'данька', 'тёма', 'тема', 'лёва',
+]
+
+
+def analyze_gender_from_text(text: str, name: str = "") -> dict:
+    """
+    Анализ пола по тексту сообщений.
+    Возвращает: {'gender': str, 'confidence': float, 'female_score': int, 'male_score': int}
+    """
+    text_lower = text.lower()
+    
+    female_score = 0
+    male_score = 0
+    
+    # Считаем глаголы (вес 3)
+    for marker in FEMALE_VERB_MARKERS:
+        if f' {marker}' in text_lower or text_lower.startswith(marker):
+            female_score += 3
+    
+    for marker in MALE_VERB_MARKERS:
+        if f' {marker}' in text_lower or text_lower.startswith(marker):
+            male_score += 3
+    
+    # Считаем прилагательные (вес 2)
+    for marker in FEMALE_ADJ_MARKERS:
+        if f' {marker}' in text_lower or text_lower.startswith(marker):
+            female_score += 2
+    
+    for marker in MALE_ADJ_MARKERS:
+        if f' {marker}' in text_lower or text_lower.startswith(marker):
+            male_score += 2
+    
+    # Считаем фразы (вес 10 — очень значимо)
+    for phrase in FEMALE_PHRASES:
+        if phrase in text_lower:
+            female_score += 10
+    
+    for phrase in MALE_PHRASES:
+        if phrase in text_lower:
+            male_score += 10
+    
+    # Определяем результат
+    total = female_score + male_score
+    if total == 0:
+        # Fallback по имени
+        name_lower = name.lower().strip()
+        if name_lower in FEMALE_NAMES:
+            return {'gender': 'женский', 'confidence': 0.6, 'female_score': 1, 'male_score': 0}
+        elif name_lower in MALE_NAMES_ENDING_A:
+            return {'gender': 'мужской', 'confidence': 0.6, 'female_score': 0, 'male_score': 1}
+        elif name_lower.endswith(('а', 'я')) and len(name_lower) > 2:
+            return {'gender': 'женский', 'confidence': 0.4, 'female_score': 1, 'male_score': 0}
+        return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0}
+    
+    # Вычисляем уверенность
+    if female_score > male_score:
+        confidence = female_score / total
+        gender = 'женский' if confidence >= 0.6 else 'unknown'
+    elif male_score > female_score:
+        confidence = male_score / total
+        gender = 'мужской' if confidence >= 0.6 else 'unknown'
+    else:
+        confidence = 0.5
+        gender = 'unknown'
+    
+    return {
+        'gender': gender,
+        'confidence': round(confidence, 3),
+        'female_score': female_score,
+        'male_score': male_score
+    }
+
+
+async def get_user_profile(user_id: int) -> Optional[Dict[str, Any]]:
+    """Получить профиль пользователя с определённым полом"""
+    async with (await get_pool()).acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM user_profiles WHERE user_id = $1",
+            user_id
+        )
+        return dict(row) if row else None
+
+
+async def get_user_gender(user_id: int) -> str:
+    """Быстро получить пол пользователя (или 'unknown')"""
+    profile = await get_user_profile(user_id)
+    if profile and profile.get('detected_gender') and profile['detected_gender'] != 'unknown':
+        return profile['detected_gender']
+    return 'unknown'
+
+
+async def analyze_and_update_user_gender(user_id: int, first_name: str = "", username: str = "") -> dict:
+    """
+    Проанализировать все сообщения пользователя и обновить его пол в профиле.
+    Возвращает результат анализа.
+    """
+    async with (await get_pool()).acquire() as conn:
+        # Получаем все сообщения пользователя
+        rows = await conn.fetch("""
+            SELECT message_text FROM chat_messages 
+            WHERE user_id = $1 AND message_text IS NOT NULL AND message_text != ''
+            ORDER BY created_at DESC
+            LIMIT 1000
+        """, user_id)
+        
+        messages_count = len(rows)
+        
+        if messages_count == 0:
+            # Нет сообщений — анализируем только по имени
+            result = analyze_gender_from_text("", first_name)
+        else:
+            # Объединяем все сообщения
+            all_text = " ".join([row['message_text'] for row in rows])
+            result = analyze_gender_from_text(all_text, first_name)
+        
+        now = int(time.time())
+        
+        # Обновляем или создаём профиль
+        await conn.execute("""
+            INSERT INTO user_profiles 
+            (user_id, detected_gender, gender_confidence, gender_female_score, 
+             gender_male_score, messages_analyzed, last_analysis_at, 
+             first_name, username, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+            ON CONFLICT (user_id) DO UPDATE SET
+                detected_gender = $2,
+                gender_confidence = $3,
+                gender_female_score = $4,
+                gender_male_score = $5,
+                messages_analyzed = $6,
+                last_analysis_at = $7,
+                first_name = COALESCE($8, user_profiles.first_name),
+                username = COALESCE($9, user_profiles.username),
+                updated_at = $10
+        """, user_id, result['gender'], result['confidence'], 
+             result['female_score'], result['male_score'], messages_count,
+             now, first_name or None, username or None, now)
+        
+        result['messages_analyzed'] = messages_count
+        return result
+
+
+async def update_user_gender_incrementally(user_id: int, new_message: str, first_name: str = "", username: str = "") -> dict:
+    """
+    Инкрементально обновить пол пользователя на основе нового сообщения.
+    Более эффективно чем полный анализ.
+    """
+    async with (await get_pool()).acquire() as conn:
+        # Получаем текущий профиль
+        profile = await conn.fetchrow(
+            "SELECT * FROM user_profiles WHERE user_id = $1", user_id
+        )
+        
+        # Анализируем новое сообщение
+        new_result = analyze_gender_from_text(new_message, first_name)
+        
+        now = int(time.time())
+        
+        if profile:
+            # Добавляем к существующим очкам
+            new_female = profile['gender_female_score'] + new_result['female_score']
+            new_male = profile['gender_male_score'] + new_result['male_score']
+            messages_count = profile['messages_analyzed'] + 1
+            
+            # Пересчитываем пол
+            total = new_female + new_male
+            if total > 0:
+                if new_female > new_male:
+                    confidence = new_female / total
+                    gender = 'женский' if confidence >= 0.55 else 'unknown'
+                elif new_male > new_female:
+                    confidence = new_male / total
+                    gender = 'мужской' if confidence >= 0.55 else 'unknown'
+                else:
+                    confidence = 0.5
+                    gender = 'unknown'
+            else:
+                confidence = 0.0
+                gender = profile['detected_gender']
+            
+            await conn.execute("""
+                UPDATE user_profiles SET
+                    detected_gender = $2,
+                    gender_confidence = $3,
+                    gender_female_score = $4,
+                    gender_male_score = $5,
+                    messages_analyzed = $6,
+                    last_analysis_at = $7,
+                    first_name = COALESCE($8, first_name),
+                    username = COALESCE($9, username),
+                    updated_at = $7
+                WHERE user_id = $1
+            """, user_id, gender, confidence, new_female, new_male,
+                 messages_count, now, first_name or None, username or None)
+            
+            return {
+                'gender': gender, 
+                'confidence': round(confidence, 3),
+                'female_score': new_female,
+                'male_score': new_male,
+                'messages_analyzed': messages_count
+            }
+        else:
+            # Создаём новый профиль
+            gender = new_result['gender']
+            confidence = new_result['confidence']
+            
+            await conn.execute("""
+                INSERT INTO user_profiles 
+                (user_id, detected_gender, gender_confidence, gender_female_score,
+                 gender_male_score, messages_analyzed, last_analysis_at,
+                 first_name, username, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $6, $6)
+            """, user_id, gender, confidence, new_result['female_score'],
+                 new_result['male_score'], now, first_name or None, username or None)
+            
+            return {
+                'gender': gender,
+                'confidence': confidence,
+                'female_score': new_result['female_score'],
+                'male_score': new_result['male_score'],
+                'messages_analyzed': 1
+            }

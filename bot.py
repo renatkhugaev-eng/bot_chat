@@ -62,7 +62,9 @@ if USE_POSTGRES:
         get_all_chats_stats, get_chat_details, get_top_users_global, search_user,
         health_check, save_chat_info,
         save_media, get_random_media, get_media_stats, increment_media_usage,
-        migrate_media_from_messages
+        migrate_media_from_messages,
+        get_user_profile, get_user_gender, analyze_and_update_user_gender,
+        update_user_gender_incrementally
     )
 else:
     from database import (
@@ -2759,8 +2761,31 @@ async def who_is_this_handler(message: Message):
     if not target_name:
         return  # Нет цели — не отвечаем
     
-    # Определяем пол и склоняем имя
-    gender = detect_gender_simple(target_name)
+    # Определяем пол: сначала из БД, потом fallback на простой анализ
+    gender = "мужской"  # default
+    if USE_POSTGRES and target_id:
+        try:
+            db_gender = await get_user_gender(target_id)
+            if db_gender and db_gender != 'unknown':
+                gender = db_gender
+                logger.debug(f"Got gender from DB for {target_name}: {gender}")
+            else:
+                # Если в БД нет — анализируем сообщения пользователя
+                result = await analyze_and_update_user_gender(
+                    target_id, target_name, target_username or ""
+                )
+                if result['gender'] != 'unknown':
+                    gender = result['gender']
+                    logger.debug(f"Analyzed gender for {target_name}: {gender} (confidence: {result['confidence']})")
+                else:
+                    # Fallback на простой анализ по имени
+                    gender = detect_gender_simple(target_name)
+        except Exception as e:
+            logger.debug(f"Gender detection error: {e}")
+            gender = detect_gender_simple(target_name)
+    else:
+        gender = detect_gender_simple(target_name)
+    
     declined = decline_russian_name(target_name, gender)
     
     # Создаём кликабельную ссылку
@@ -2826,6 +2851,18 @@ async def collect_messages_and_exp(message: Message):
         reply_to_first_name=reply_to_first_name,
         reply_to_username=reply_to_username
     )
+    
+    # Обновляем профиль пользователя (пол) инкрементально
+    if USE_POSTGRES and message.text:
+        try:
+            await update_user_gender_incrementally(
+                user_id=user_id,
+                new_message=message.text,
+                first_name=message.from_user.first_name or "",
+                username=message.from_user.username or ""
+            )
+        except Exception as e:
+            logger.debug(f"Gender update error: {e}")
     
     # Пассивный опыт для игроков
     player = await get_player(user_id, chat_id)
