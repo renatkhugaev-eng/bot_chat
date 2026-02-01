@@ -101,6 +101,50 @@ DIRTY_RESPONSES = [
 ]
 
 
+def get_profile_addition(profile: dict) -> str:
+    """Получить персонализированную добавку на основе профиля"""
+    if not profile:
+        return ""
+    
+    additions = []
+    
+    # По активности
+    activity = profile.get('activity_level', '')
+    if activity == 'hyperactive':
+        additions.append("\n\n(P.S. Этот графоман весь чат засрал — пусть лучше ртом работает, а не клавой.)")
+    elif activity == 'lurker':
+        additions.append("\n\n(P.S. Тихушник, блять. Сидит молча, но всё видит. Извращенец, наверняка.)")
+    
+    # По стилю общения
+    style = profile.get('communication_style', '')
+    if style == 'toxic':
+        additions.append("\n\n(P.S. Токсичная тварь — пусть рот занят будет, меньше гадостей напишет.)")
+    elif style == 'humorous':
+        additions.append("\n\n(P.S. Думает что смешной. С хуем во рту будет ещё смешнее.)")
+    elif style == 'negative':
+        additions.append("\n\n(P.S. Вечно ноет. С полным ртом не поныть — win-win.)")
+    
+    # По режиму
+    if profile.get('is_night_owl'):
+        additions.append("\n\n(P.S. Ночная тварь — наверняка в темноте и сосёт лучше.)")
+    
+    # По интересам
+    interests = profile.get('interests', [])
+    interest_additions = {
+        'gaming': "\n\n(P.S. Геймер — пусть лучше джойстик сосёт. Хотя он и так это делает.)",
+        'crypto': "\n\n(P.S. Криптан — биткоин упал, зато хуй встал. Соси инвестиции.)",
+        'politics': "\n\n(P.S. Политолох — пусть лучше сосёт, чем о политике пиздит.)",
+        'tech': "\n\n(P.S. Айтишник — хорошо работает ртом. На созвонах. Теперь пусть попробует по-другому.)",
+        'fitness': "\n\n(P.S. Качок — протеин из спермы тоже считается. Соси и качайся.)"
+    }
+    for interest in interests[:1]:
+        if interest in interest_additions:
+            additions.append(interest_additions[interest])
+            break
+    
+    return random.choice(additions) if additions else ""
+
+
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
@@ -109,7 +153,16 @@ class handler(BaseHTTPRequestHandler):
             data = json.loads(post_data.decode('utf-8'))
             
             name = data.get('name', 'Эй ты')
+            profile = data.get('profile', {})
+            
+            # Выбираем рандомный ответ
             response = random.choice(DIRTY_RESPONSES).format(name=name)
+            
+            # Добавляем персонализацию с шансом 35%
+            if profile and random.random() < 0.35:
+                addition = get_profile_addition(profile)
+                if addition:
+                    response += addition
             
             self._send_json(200, {"text": response})
             

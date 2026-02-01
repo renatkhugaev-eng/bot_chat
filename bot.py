@@ -65,7 +65,8 @@ if USE_POSTGRES:
         migrate_media_from_messages,
         get_user_profile, get_user_gender, analyze_and_update_user_gender,
         update_user_gender_incrementally, update_user_profile_comprehensive,
-        get_user_full_profile, get_user_activity_report, get_chat_social_graph
+        get_user_full_profile, get_user_activity_report, get_chat_social_graph,
+        get_user_profile_for_ai, get_enriched_chat_data_for_ai, get_chat_social_data_for_ai
     )
 else:
     from database import (
@@ -100,6 +101,9 @@ else:
     async def get_user_full_profile(user_id): return None
     async def get_user_activity_report(user_id): return {'error': 'PostgreSQL required'}
     async def get_chat_social_graph(chat_id): return []
+    async def get_user_profile_for_ai(user_id, first_name="", username=""): return {'user_id': user_id, 'name': first_name or username or 'Аноним', 'gender': 'unknown', 'description': '', 'traits': [], 'interests': [], 'social': {}}
+    async def get_enriched_chat_data_for_ai(chat_id, hours=5): return {'profiles': [], 'profiles_text': '', 'social': {}, 'social_text': ''}
+    async def get_chat_social_data_for_ai(chat_id): return {'relationships': [], 'conflicts': [], 'friendships': [], 'description': ''}
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
     calculate_crime_success, calculate_crime_reward, get_random_crime_message,
@@ -1807,9 +1811,15 @@ async def cmd_suck(message: Message):
         return
     
     target_name = None
+    target_id = None
+    target_username = None
+    target_profile = {}
     
     if message.reply_to_message and message.reply_to_message.from_user:
-        target_name = message.reply_to_message.from_user.first_name
+        target = message.reply_to_message.from_user
+        target_name = target.first_name
+        target_id = target.id
+        target_username = target.username
     else:
         parts = message.text.split(maxsplit=1)
         if len(parts) > 1:
@@ -1820,6 +1830,13 @@ async def cmd_suck(message: Message):
     
     if not target_name:
         target_name = "Эй ты"
+    
+    # Получаем профиль для персонализации
+    if USE_POSTGRES and target_id:
+        try:
+            target_profile = await get_user_profile_for_ai(target_id, target_name, target_username or "")
+        except Exception as e:
+            logger.debug(f"Could not get profile for suck: {e}")
     
     if not SUCK_API_URL:
         # Fallback если API не настроен
@@ -1832,7 +1849,10 @@ async def cmd_suck(message: Message):
     try:
         metrics.track_api_call("suck")
         session = await get_http_session()
-        async with session.post(SUCK_API_URL, json={"name": target_name}) as response:
+        async with session.post(SUCK_API_URL, json={
+            "name": target_name,
+            "profile": target_profile  # Передаём профиль для персонализации
+        }) as response:
                 if response.status == 200:
                     result = await response.json()
                     text = result.get("text", f"🍭 {target_name}, соси. Тётя Роза так сказала.")
@@ -2027,27 +2047,33 @@ async def cmd_ventilate(message: Message):
         victim_id = message.from_user.id
     
     # Получаем последние сообщения жертвы для определения пола
+    victim_profile = {}
     try:
         if USE_POSTGRES and victim_id:
             # Берём больше сообщений для точного определения пола по глаголам
             messages = await get_user_messages(chat_id, victim_id, limit=30)
             victim_messages = [m.get('text', '') for m in messages if m.get('text')]
+            
+            # Получаем полный профиль жертвы для персонализации
+            victim_profile = await get_user_profile_for_ai(victim_id, victim_name, victim_username or "")
     except Exception as e:
-        logger.warning(f"Could not get victim messages: {e}")
+        logger.warning(f"Could not get victim data: {e}")
     
-    # Определяем пол по имени (базовое определение для склонения)
-    # API определит более точно по сообщениям
-    is_female = False
-    name_lower = victim_name.lower() if victim_name else ""
-    female_endings = ['а', 'я', 'ия', 'ья']
-    male_with_a = ['никита', 'илья', 'кузьма', 'фома', 'лука', 'саша', 'женя']
-    if name_lower not in male_with_a:
-        for ending in female_endings:
-            if name_lower.endswith(ending):
-                is_female = True
-                break
-    
-    gender = "женский" if is_female else "мужской"
+    # Определяем пол: сначала из профиля, потом по имени
+    if victim_profile and victim_profile.get('gender') and victim_profile.get('gender') != 'unknown':
+        gender = victim_profile['gender']
+    else:
+        # Fallback по имени
+        is_female = False
+        name_lower = victim_name.lower() if victim_name else ""
+        female_endings = ['а', 'я', 'ия', 'ья']
+        male_with_a = ['никита', 'илья', 'кузьма', 'фома', 'лука', 'саша', 'женя']
+        if name_lower not in male_with_a:
+            for ending in female_endings:
+                if name_lower.endswith(ending):
+                    is_female = True
+                    break
+        gender = "женский" if is_female else "мужской"
     
     # Склоняем имя
     declined = decline_russian_name(victim_name, gender)
@@ -2082,7 +2108,8 @@ async def cmd_ventilate(message: Message):
                     "victim_username": victim_username or "",
                     "victim_id": victim_id,
                     "victim_messages": victim_messages,
-                    "initial_gender": gender  # Передаём начальное определение пола
+                    "initial_gender": gender,  # Передаём начальное определение пола
+                    "victim_profile": victim_profile  # Полный профиль для персонализации
                 }
             ) as response:
                 if response.status == 200:
@@ -2357,7 +2384,18 @@ async def cmd_svodka(message: Message):
     previous_summaries = await get_previous_summaries(chat_id, limit=3)
     memories = await get_memories(chat_id, limit=20)
     
-    # Отправляем запрос к Vercel API с памятью
+    # Получаем обогащённые данные профилей для персонализации (только PostgreSQL)
+    user_profiles = []
+    social_data = {}
+    if USE_POSTGRES:
+        try:
+            enriched = await get_enriched_chat_data_for_ai(chat_id, hours=5)
+            user_profiles = enriched.get('profiles', [])
+            social_data = enriched.get('social', {})
+        except Exception as e:
+            logger.warning(f"Failed to get enriched data: {e}")
+    
+    # Отправляем запрос к Vercel API с памятью и профилями
     metrics.track_command("svodka")
     try:
         metrics.track_api_call("summary")
@@ -2369,7 +2407,9 @@ async def cmd_svodka(message: Message):
                     "chat_title": message.chat.title or "Чат",
                     "hours": 5,
                     "previous_summaries": previous_summaries,
-                    "memories": memories
+                    "memories": memories,
+                    "user_profiles": user_profiles,
+                    "social_data": social_data
                 }
             ) as response:
                 if response.status == 200:
@@ -2936,27 +2976,33 @@ async def who_is_this_handler(message: Message):
     if not target_name:
         return  # Нет цели — не отвечаем
     
-    # Определяем пол: сначала из БД, потом fallback на простой анализ
+    # Получаем профиль пользователя для персонализации
+    target_profile = {}
     gender = "мужской"  # default
+    
     if USE_POSTGRES and target_id:
         try:
-            db_gender = await get_user_gender(target_id)
-            if db_gender and db_gender != 'unknown':
-                gender = db_gender
-                logger.debug(f"Got gender from DB for {target_name}: {gender}")
+            # Получаем полный профиль
+            target_profile = await get_user_profile_for_ai(target_id, target_name, target_username or "")
+            
+            # Пол из профиля
+            if target_profile.get('gender') and target_profile['gender'] != 'unknown':
+                gender = target_profile['gender']
             else:
-                # Если в БД нет — анализируем сообщения пользователя
-                result = await analyze_and_update_user_gender(
-                    target_id, target_name, target_username or ""
-                )
-                if result['gender'] != 'unknown':
-                    gender = result['gender']
-                    logger.debug(f"Analyzed gender for {target_name}: {gender} (confidence: {result['confidence']})")
+                # Fallback на анализ
+                db_gender = await get_user_gender(target_id)
+                if db_gender and db_gender != 'unknown':
+                    gender = db_gender
                 else:
-                    # Fallback на простой анализ по имени
-                    gender = detect_gender_simple(target_name)
+                    result = await analyze_and_update_user_gender(
+                        target_id, target_name, target_username or ""
+                    )
+                    if result['gender'] != 'unknown':
+                        gender = result['gender']
+                    else:
+                        gender = detect_gender_simple(target_name)
         except Exception as e:
-            logger.debug(f"Gender detection error: {e}")
+            logger.debug(f"Profile/gender detection error: {e}")
             gender = detect_gender_simple(target_name)
     else:
         gender = detect_gender_simple(target_name)
@@ -2976,6 +3022,45 @@ async def who_is_this_handler(message: Message):
         clickable_acc = declined['acc']
         clickable_dat = declined['dat']
     
+    # Формируем персонализированную добавку на основе профиля
+    profile_addition = ""
+    if target_profile:
+        additions = []
+        
+        # По активности
+        activity = target_profile.get('activity_level', '')
+        if activity == 'hyperactive':
+            additions.append("(Графоман, кстати — весь чат засрал своими высерами.)")
+        elif activity == 'lurker':
+            additions.append("(Тихушник — сидит молчит, но всё читает. Извращенец.)")
+        
+        # По стилю
+        style = target_profile.get('communication_style', '')
+        if style == 'toxic':
+            additions.append("(Токсичная тварь, между прочим — отравляет всё вокруг.)")
+        elif style == 'humorous':
+            additions.append("(Думает что смешной. Спойлер: нет.)")
+        
+        # По режиму
+        if target_profile.get('is_night_owl'):
+            additions.append("(Ночная тварь — бодрствует когда нормальные спят.)")
+        
+        # По интересам
+        interests = target_profile.get('interests', [])
+        interest_insults = {
+            'gaming': "(Задрот-геймер. Просиживает жизнь в играх.)",
+            'crypto': "(Криптодебил. Всё ещё верит в биткоин.)",
+            'politics': "(Политолох. Вечно ноет про власть.)",
+            'memes': "(Мемоед. Жрёт мемы вместо еды.)"
+        }
+        for interest in interests[:1]:  # Только одно
+            if interest in interest_insults:
+                additions.append(interest_insults[interest])
+                break
+        
+        if additions:
+            profile_addition = "\n\n" + random.choice(additions)
+    
     # Выбираем рандомный ответ и подставляем склонения
     response = random.choice(WHO_IS_THIS_RESPONSES)
     response = response.format(
@@ -2984,6 +3069,10 @@ async def who_is_this_handler(message: Message):
         name_acc=clickable_acc,
         name_dat=clickable_dat
     )
+    
+    # Добавляем персонализированную добавку с шансом 40%
+    if profile_addition and random.random() < 0.4:
+        response += profile_addition
     
     await message.reply(response, parse_mode=ParseMode.HTML)
 

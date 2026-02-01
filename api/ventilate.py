@@ -96,6 +96,10 @@ SYSTEM_PROMPT = """Ты — ТЁТЯ РОЗА, ЗЛОБНАЯ БАБКА-ТРО�
 {victim_messages}
 ═══════════════════════════════════════
 
+{victim_profile}
+
+═══════════════════════════════════════
+
 ФОРМАТ:
 🪟 Тётя Роза открыла форточку в чате.
 
@@ -211,6 +215,77 @@ HR-отдел ада уже звонит.
 ТЕПЕРЬ УНИЧТОЖЬ {victim_name} ({gender})!
 Тема для стёба: {current_topic}
 Будь ЖЁСТКИМ, ЗЛЫМ, используй СЛЕНГ! Стебись над тупостью, нищетой, одиночеством!"""
+
+
+def format_victim_profile(profile: dict) -> str:
+    """Форматирование профиля жертвы для персонализированного стёба"""
+    if not profile:
+        return ""
+    
+    lines = ["ПСИХОЛОГИЧЕСКИЙ ПРОФИЛЬ ЖЕРТВЫ (ИСПОЛЬЗУЙ ДЛЯ ПЕРСОНАЛИЗИРОВАННОГО УНИЖЕНИЯ!):"]
+    
+    # Активность
+    activity = profile.get('activity_level', '')
+    activity_insults = {
+        'hyperactive': '🔥 ГРАФОМАН — не затыкается, засирает чат 24/7',
+        'very_active': '📢 БОЛТУН — любит звук своего голоса больше всех',
+        'active': '💬 Средне-активный — иногда выползает из норы',
+        'lurker': '👀 ТИХУШНИК — сидит читает, но ссыт написать'
+    }
+    if activity in activity_insults:
+        lines.append(activity_insults[activity])
+    
+    # Стиль общения
+    style = profile.get('communication_style', '')
+    style_insults = {
+        'toxic': '☠️ ТОКСИК — отравляет всё вокруг своим ядом',
+        'humorous': '🤡 Думает что смешной (спойлер: нет)',
+        'positive': '🌈 ПОЗИТИВЧИК — подозрительно радостный, наверно наркоман',
+        'negative': '😤 НЫТИК — вечно ноет и жалуется'
+    }
+    if style in style_insults:
+        lines.append(style_insults[style])
+    
+    # Режим
+    if profile.get('is_night_owl'):
+        lines.append('🦉 НОЧНАЯ ТВАРЬ — живёт когда нормальные спят, социофоб наверно')
+    if profile.get('is_early_bird'):
+        lines.append('🐓 РАННЯЯ ПТАШКА — встаёт с петухами, душнила по жизни')
+    
+    # Токсичность
+    toxicity = profile.get('toxicity', 0)
+    if toxicity > 0.5:
+        lines.append('⚠️ КРАЙНЕ ТОКСИЧЕН — от него даже тараканы сбежали')
+    elif toxicity > 0.3:
+        lines.append('⚠️ Склонен к токсичности — иногда срывается')
+    
+    # Интересы
+    interests = profile.get('interests_readable', []) or profile.get('interests', [])
+    if interests:
+        interest_insults = {
+            'gaming': 'задрот-геймер',
+            'геймер': 'задрот-геймер',
+            'crypto': 'криптодебил',
+            'криптан': 'криптодебил',
+            'tech': 'айтишник без личной жизни',
+            'технарь/айтишник': 'айтишник без личной жизни',
+            'fitness': 'качок тупой',
+            'качок/спортсмен': 'качок тупой',
+            'politics': 'политолох',
+            'политолог': 'политолох',
+            'memes': 'мемоед',
+            'мемолог': 'мемоед'
+        }
+        interest_text = []
+        for i in interests[:3]:
+            interest_text.append(interest_insults.get(i, i))
+        lines.append(f'🎯 Интересы (читай: зависимости): {", ".join(interest_text)}')
+    
+    # Описание
+    if profile.get('description'):
+        lines.append(f'📝 Суть: {profile["description"]}')
+    
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def fetch_news_headlines() -> str:
@@ -441,15 +516,20 @@ class handler(BaseHTTPRequestHandler):
             victim_username = data.get("victim_username", "")
             victim_messages = data.get("victim_messages", [])
             initial_gender = data.get("initial_gender", "")  # Пол от бота
+            victim_profile = data.get("victim_profile", {})  # Профиль для персонализации
             
-            # Определяем пол по контексту сообщений
-            # Если есть сообщения — анализируем их, иначе используем initial_gender
-            if victim_messages:
-                gender = detect_gender_from_messages(victim_messages, victim_name)
+            # Определяем пол: сначала из профиля, потом из сообщений, потом по имени
+            if victim_profile and victim_profile.get('gender') and victim_profile.get('gender') != 'unknown':
+                gender = victim_profile['gender']
             elif initial_gender:
                 gender = initial_gender
+            elif victim_messages:
+                gender = detect_gender_from_messages(victim_messages, victim_name)
             else:
                 gender = detect_gender_from_messages([], victim_name)  # По имени
+            
+            # Форматируем профиль для промпта
+            profile_text = format_victim_profile(victim_profile)
             
             # Форматируем сообщения для промпта
             if victim_messages:
@@ -473,6 +553,7 @@ class handler(BaseHTTPRequestHandler):
                 victim_name=victim_name,
                 gender=gender,
                 victim_messages=messages_text,
+                victim_profile=profile_text,
                 category=category,
                 current_date=current_date,
                 current_topic=current_topic,

@@ -2110,3 +2110,310 @@ async def get_user_activity_report(user_id: int) -> Dict[str, Any]:
     }
     
     return report
+
+
+# ==================== ДАННЫЕ ДЛЯ AI-ГЕНЕРАЦИИ ====================
+
+async def get_user_profile_for_ai(user_id: int, first_name: str = "", username: str = "") -> Dict[str, Any]:
+    """
+    Получить профиль пользователя в формате, оптимизированном для AI-генерации.
+    Возвращает человекочитаемое описание для промптов.
+    """
+    profile = await get_user_full_profile(user_id)
+    
+    if not profile:
+        # Минимальный профиль для новых пользователей
+        return {
+            'user_id': user_id,
+            'name': first_name or username or 'Аноним',
+            'username': username,
+            'gender': 'unknown',
+            'description': f"{first_name or username or 'Аноним'} — новый персонаж, о нём пока ничего не известно",
+            'traits': [],
+            'interests': [],
+            'social': {}
+        }
+    
+    name = profile.get('first_name') or profile.get('username') or first_name or username or 'Аноним'
+    gender = profile.get('detected_gender', 'unknown')
+    
+    # Собираем характеристики
+    traits = []
+    
+    # Пол
+    if gender == 'мужской':
+        traits.append('мужчина')
+    elif gender == 'женский':
+        traits.append('женщина')
+    
+    # Активность
+    activity = profile.get('activity_level', 'normal')
+    activity_map = {
+        'hyperactive': 'гиперактивный графоман',
+        'very_active': 'очень активный болтун',
+        'active': 'активный участник',
+        'normal': 'обычный пользователь',
+        'lurker': 'молчаливый наблюдатель'
+    }
+    traits.append(activity_map.get(activity, 'обычный'))
+    
+    # Стиль общения
+    style = profile.get('communication_style', 'neutral')
+    style_map = {
+        'toxic': 'токсичный агрессор',
+        'humorous': 'шутник и юморист',
+        'positive': 'позитивный оптимист',
+        'negative': 'вечно недовольный нытик',
+        'neutral': 'нейтральный'
+    }
+    if style != 'neutral':
+        traits.append(style_map.get(style, ''))
+    
+    # Режим сна
+    if profile.get('is_night_owl'):
+        traits.append('ночная сова')
+    elif profile.get('is_early_bird'):
+        traits.append('ранняя пташка')
+    
+    # Токсичность
+    toxicity = profile.get('toxicity_score', 0)
+    if toxicity > 0.5:
+        traits.append('крайне токсичен')
+    elif toxicity > 0.3:
+        traits.append('склонен к токсичности')
+    
+    # Юмор
+    humor = profile.get('humor_score', 0)
+    if humor > 0.4:
+        traits.append('постоянно шутит')
+    elif humor > 0.2:
+        traits.append('любит пошутить')
+    
+    # Эмодзи
+    emoji_rate = profile.get('emoji_usage_rate', 0)
+    if emoji_rate > 5:
+        traits.append('засыпает эмодзи')
+    elif emoji_rate > 2:
+        traits.append('любит эмодзи')
+    
+    # Интересы
+    interests = [i['topic'] for i in profile.get('top_interests', [])][:5]
+    interests_map = {
+        'gaming': 'геймер',
+        'tech': 'технарь/айтишник',
+        'crypto': 'криптан',
+        'finance': 'финансист',
+        'food': 'гурман',
+        'fitness': 'качок/спортсмен',
+        'travel': 'путешественник',
+        'cars': 'автомобилист',
+        'music': 'меломан',
+        'movies': 'киноман',
+        'politics': 'политолог',
+        'work': 'трудоголик',
+        'relationships': 'романтик',
+        'memes': 'мемолог'
+    }
+    interests_readable = [interests_map.get(i, i) for i in interests]
+    
+    # Социальные связи
+    top_interactions = profile.get('top_interactions', [])
+    social = {
+        'frequently_talks_to': [i['target_user_id'] for i in top_interactions[:3]],
+        'interaction_count': sum(i['interaction_count'] for i in top_interactions)
+    }
+    
+    # Формируем текстовое описание для AI
+    traits_text = ', '.join(traits) if traits else 'обычный пользователь'
+    interests_text = ', '.join(interests_readable) if interests_readable else 'интересы не определены'
+    
+    # Пиковый час
+    peak = profile.get('peak_hour')
+    peak_text = f"активен около {peak}:00" if peak is not None else ""
+    
+    # Тональность
+    sentiment = profile.get('sentiment_score', 0)
+    if sentiment > 0.3:
+        mood = "обычно позитивен"
+    elif sentiment < -0.3:
+        mood = "обычно негативен"
+    else:
+        mood = "эмоционально нейтрален"
+    
+    description = f"{name} — {traits_text}. Интересы: {interests_text}. {mood}. {peak_text}".strip()
+    
+    return {
+        'user_id': user_id,
+        'name': name,
+        'username': profile.get('username', username),
+        'gender': gender,
+        'activity_level': activity,
+        'communication_style': style,
+        'toxicity': toxicity,
+        'humor': humor,
+        'sentiment': sentiment,
+        'is_night_owl': profile.get('is_night_owl', False),
+        'is_early_bird': profile.get('is_early_bird', False),
+        'peak_hour': peak,
+        'total_messages': profile.get('total_messages', 0),
+        'traits': traits,
+        'interests': interests,
+        'interests_readable': interests_readable,
+        'social': social,
+        'description': description  # Готовое описание для промпта
+    }
+
+
+async def get_chat_users_profiles_for_ai(chat_id: int, user_ids: List[int] = None) -> List[Dict[str, Any]]:
+    """
+    Получить профили всех пользователей чата для AI-генерации.
+    Если user_ids указан, получает только эти профили.
+    """
+    async with (await get_pool()).acquire() as conn:
+        if user_ids:
+            # Получаем конкретных пользователей
+            rows = await conn.fetch("""
+                SELECT DISTINCT user_id, first_name, username 
+                FROM chat_messages 
+                WHERE chat_id = $1 AND user_id = ANY($2)
+            """, chat_id, user_ids)
+        else:
+            # Получаем активных пользователей за последние 24 часа
+            day_ago = int(time.time()) - 86400
+            rows = await conn.fetch("""
+                SELECT user_id, first_name, username, COUNT(*) as msg_count
+                FROM chat_messages 
+                WHERE chat_id = $1 AND created_at >= $2
+                GROUP BY user_id, first_name, username
+                ORDER BY msg_count DESC
+                LIMIT 20
+            """, chat_id, day_ago)
+    
+    profiles = []
+    for row in rows:
+        profile = await get_user_profile_for_ai(
+            row['user_id'], 
+            row.get('first_name', ''), 
+            row.get('username', '')
+        )
+        profiles.append(profile)
+    
+    return profiles
+
+
+async def get_chat_social_data_for_ai(chat_id: int) -> Dict[str, Any]:
+    """
+    Получить социальные данные чата для AI: кто с кем общается, конфликты, дружба.
+    """
+    async with (await get_pool()).acquire() as conn:
+        # Топ взаимодействий
+        interactions = await conn.fetch("""
+            SELECT 
+                ui.user_id, ui.target_user_id, 
+                ui.interaction_count, ui.sentiment_avg,
+                up1.first_name as from_name, up1.username as from_username,
+                up2.first_name as to_name, up2.username as to_username
+            FROM user_interactions ui
+            LEFT JOIN user_profiles up1 ON ui.user_id = up1.user_id
+            LEFT JOIN user_profiles up2 ON ui.target_user_id = up2.user_id
+            WHERE ui.chat_id = $1
+            ORDER BY ui.interaction_count DESC
+            LIMIT 15
+        """, chat_id)
+        
+        # Формируем читаемые связи
+        relationships = []
+        conflicts = []
+        friendships = []
+        
+        for row in interactions:
+            from_name = row['from_name'] or row['from_username'] or f"User_{row['user_id']}"
+            to_name = row['to_name'] or row['to_username'] or f"User_{row['target_user_id']}"
+            sentiment = row['sentiment_avg'] or 0
+            count = row['interaction_count']
+            
+            rel = {
+                'from': from_name,
+                'to': to_name,
+                'count': count,
+                'sentiment': sentiment
+            }
+            relationships.append(rel)
+            
+            if sentiment < -0.2 and count > 5:
+                conflicts.append(f"{from_name} часто конфликтует с {to_name}")
+            elif sentiment > 0.2 and count > 10:
+                friendships.append(f"{from_name} дружит с {to_name}")
+        
+        return {
+            'relationships': relationships,
+            'conflicts': conflicts,
+            'friendships': friendships,
+            'description': _format_social_for_prompt(relationships, conflicts, friendships)
+        }
+
+
+def _format_social_for_prompt(relationships: list, conflicts: list, friendships: list) -> str:
+    """Форматировать социальные данные в текст для промпта"""
+    lines = []
+    
+    if friendships:
+        lines.append("ДРУЖЕСКИЕ СВЯЗИ:")
+        lines.extend([f"  • {f}" for f in friendships[:5]])
+    
+    if conflicts:
+        lines.append("КОНФЛИКТЫ:")
+        lines.extend([f"  • {c}" for c in conflicts[:5]])
+    
+    if relationships:
+        lines.append("КТО КОМУ ЧАЩЕ ОТВЕЧАЕТ:")
+        for r in relationships[:10]:
+            mood = "😊" if r['sentiment'] > 0.2 else "😠" if r['sentiment'] < -0.2 else "😐"
+            lines.append(f"  • {r['from']} → {r['to']}: {r['count']}x {mood}")
+    
+    return "\n".join(lines) if lines else "Социальные связи не определены"
+
+
+async def get_enriched_chat_data_for_ai(chat_id: int, hours: int = 5) -> Dict[str, Any]:
+    """
+    Получить полные обогащённые данные чата для AI-генерации.
+    Включает: статистику, профили пользователей, социальные связи.
+    """
+    since_time = int(time.time()) - (hours * 3600)
+    
+    async with (await get_pool()).acquire() as conn:
+        # Получаем активных пользователей за период
+        users = await conn.fetch("""
+            SELECT user_id, first_name, username, COUNT(*) as msg_count
+            FROM chat_messages 
+            WHERE chat_id = $1 AND created_at >= $2
+            GROUP BY user_id, first_name, username
+            ORDER BY msg_count DESC
+            LIMIT 15
+        """, chat_id, since_time)
+    
+    # Получаем профили
+    profiles = []
+    for user in users:
+        profile = await get_user_profile_for_ai(
+            user['user_id'],
+            user['first_name'] or '',
+            user['username'] or ''
+        )
+        profile['messages_in_period'] = user['msg_count']
+        profiles.append(profile)
+    
+    # Получаем социальные данные
+    social = await get_chat_social_data_for_ai(chat_id)
+    
+    # Форматируем профили для промпта
+    profiles_text = []
+    for p in profiles:
+        profiles_text.append(f"@{p['username'] or p['name']} ({p['name']}): {p['description']}")
+    
+    return {
+        'profiles': profiles,
+        'profiles_text': "\n".join(profiles_text),
+        'social': social,
+        'social_text': social['description']
+    }

@@ -236,6 +236,113 @@ def format_memory_for_prompt(previous_summaries: list, memories: list) -> str:
     return memory_text
 
 
+def format_user_profiles_for_prompt(user_profiles: list) -> str:
+    """Форматирование профилей пользователей для персонализированного буллинга"""
+    if not user_profiles:
+        return ""
+    
+    profile_text = "\n<психологические_профили_персонажей>\n"
+    profile_text += "ИСПОЛЬЗУЙ ЭТУ ИНФОРМАЦИЮ ДЛЯ ПЕРСОНАЛИЗИРОВАННЫХ ОСКОРБЛЕНИЙ!\n"
+    profile_text += "Это глубокий анализ личностей — используй для ТОЧЕЧНОГО уничтожения:\n\n"
+    
+    for p in user_profiles[:10]:
+        name = f"@{p.get('username')}" if p.get('username') else p.get('name', 'Аноним')
+        
+        # Базовое описание
+        lines = [f"【{name}】"]
+        
+        # Пол
+        gender = p.get('gender', 'unknown')
+        if gender == 'мужской':
+            lines.append("  ♂ Мужик")
+        elif gender == 'женский':
+            lines.append("  ♀ Баба")
+        
+        # Уровень активности
+        activity = p.get('activity_level', 'normal')
+        activity_insults = {
+            'hyperactive': '  🔥 ГИПЕРАКТИВНЫЙ ГРАФОМАН — не затыкается ни на секунду',
+            'very_active': '  📢 БОЛТУН — обожает слышать свой голос',
+            'active': '  💬 Активный — регулярно засоряет чат',
+            'normal': '  🙂 Обычный — ничего особенного',
+            'lurker': '  👀 ТИХУШНИК — наблюдает, но помалкивает'
+        }
+        lines.append(activity_insults.get(activity, ''))
+        
+        # Стиль общения
+        style = p.get('communication_style', 'neutral')
+        style_insults = {
+            'toxic': '  ☠️ ТОКСИК — отравляет всё вокруг',
+            'humorous': '  🤡 КЛОУН — думает что смешной',
+            'positive': '  🌈 ПОЗИТИВЧИК — подозрительно радостный',
+            'negative': '  😤 НЫТИК — вечно всем недоволен'
+        }
+        if style in style_insults:
+            lines.append(style_insults[style])
+        
+        # Режим сна
+        if p.get('is_night_owl'):
+            lines.append('  🦉 НОЧНАЯ ТВАРЬ — бодрствует когда нормальные спят')
+        elif p.get('is_early_bird'):
+            lines.append('  🐓 РАННЯЯ ПТАШКА — просыпается с петухами')
+        
+        # Токсичность
+        toxicity = p.get('toxicity', 0)
+        if toxicity > 0.5:
+            lines.append('  ⚠️ КРАЙНЕ ТОКСИЧЕН — яд в чистом виде')
+        elif toxicity > 0.3:
+            lines.append('  ⚠️ Склонен к токсичности')
+        
+        # Юмор
+        humor = p.get('humor', 0)
+        if humor > 0.4:
+            lines.append('  😂 Постоянно шутит (считает себя комиком)')
+        
+        # Интересы
+        interests = p.get('interests_readable', [])
+        if interests:
+            lines.append(f"  🎯 Интересы: {', '.join(interests[:4])}")
+        
+        # Готовое описание
+        if p.get('description'):
+            lines.append(f"  📝 {p['description']}")
+        
+        profile_text += "\n".join(lines) + "\n\n"
+    
+    profile_text += "</психологические_профили_персонажей>\n"
+    return profile_text
+
+
+def format_social_data_for_prompt(social_data: dict) -> str:
+    """Форматирование социальных связей для AI"""
+    if not social_data:
+        return ""
+    
+    text = "\n<социальные_связи_и_конфликты>\n"
+    
+    conflicts = social_data.get('conflicts', [])
+    if conflicts:
+        text += "🔥 КОНФЛИКТЫ (используй для драмы!):\n"
+        for c in conflicts[:5]:
+            text += f"  • {c}\n"
+    
+    friendships = social_data.get('friendships', [])
+    if friendships:
+        text += "💕 ПАРОЧКИ/ДРУЖБА (высмеивай их связь!):\n"
+        for f in friendships[:5]:
+            text += f"  • {f}\n"
+    
+    relationships = social_data.get('relationships', [])
+    if relationships:
+        text += "📊 КТО КОМУ ОТВЕЧАЕТ:\n"
+        for r in relationships[:8]:
+            mood = "😊" if r.get('sentiment', 0) > 0.2 else "😠" if r.get('sentiment', 0) < -0.2 else "😐"
+            text += f"  • {r['from']} → {r['to']}: {r['count']}x {mood}\n"
+    
+    text += "</социальные_связи_и_конфликты>\n"
+    return text
+
+
 def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> str:
     """Форматирование данных — только персонажи и их роли, БЕЗ цифр"""
     
@@ -329,6 +436,8 @@ class handler(BaseHTTPRequestHandler):
             hours = data.get("hours", 5)
             previous_summaries = data.get("previous_summaries", [])
             memories = data.get("memories", [])
+            user_profiles = data.get("user_profiles", [])
+            social_data = data.get("social_data", {})
             
             api_key = os.environ.get("VERCEL_AI_GATEWAY_KEY", "").strip()
             if not api_key:
@@ -337,6 +446,8 @@ class handler(BaseHTTPRequestHandler):
             
             scene_data = format_statistics_for_prompt(statistics, chat_title, hours)
             memory_data = format_memory_for_prompt(previous_summaries, memories)
+            profiles_data = format_user_profiles_for_prompt(user_profiles)
+            social_text = format_social_data_for_prompt(social_data)
             
             request_body = json.dumps({
                 "model": "anthropic/claude-sonnet-4-20250514",
@@ -351,14 +462,23 @@ class handler(BaseHTTPRequestHandler):
 
 {memory_data}
 
+{profiles_data}
+
+{social_text}
+
 {scene_data}
 
 КРИТИЧЕСКИ ВАЖНО:
 - НЕ упоминай количество сообщений — это скучно и банально
+- ИСПОЛЬЗУЙ ПСИХОЛОГИЧЕСКИЕ ПРОФИЛИ для персонализированных оскорблений!
+- Если человек ТОКСИК — издевайся над его токсичностью
+- Если НОЧНАЯ СОВА — высмеивай его режим
+- Если КРИПТАН или ГЕЙМЕР — используй это в метафорах
+- КОНФЛИКТЫ и ПАРОЧКИ — главный источник драмы!
 - СВЯЗЫВАЙ всех персонажей в КАЖДОМ абзаце — они части одного организма
 - Используй РАЗВЁРНУТЫЕ литературные метафоры
 - Библейские и античные аллюзии
-- ИЗЫСКАННЫЕ оскорбления, не банальщина
+- ИЗЫСКАННЫЕ оскорбления, основанные на их РЕАЛЬНЫХ характеристиках
 - Мат органично вплетён в высокий штиль
 - Callbacks между абзацами
 - Закончи гаданием и эпическим уходом
