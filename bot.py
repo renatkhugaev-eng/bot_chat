@@ -2536,6 +2536,93 @@ async def collect_voice(message: Message):
                 logger.warning(f"Failed to send random meme after video_note: {e}")
 
 
+@router.message(F.video)
+async def collect_videos(message: Message):
+    """Сбор видео + сохранение в коллекцию"""
+    if message.chat.type == "private":
+        return
+    
+    video = message.video
+    caption = message.caption[:200] if message.caption else ""
+    
+    await save_chat_message(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        username=message.from_user.username or "",
+        first_name=message.from_user.first_name or "Аноним",
+        message_text=caption,
+        message_type="video",
+        file_id=video.file_id if video else None,
+        file_unique_id=video.file_unique_id if video else None
+    )
+    
+    # Сохраняем видео в коллекцию
+    if video:
+        sender_name = message.from_user.first_name or "Аноним"
+        duration = video.duration or 0
+        await save_media(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            file_id=video.file_id,
+            file_type="video",
+            file_unique_id=video.file_unique_id,
+            description=f"Видео от {sender_name} ({duration} сек)",
+            caption=caption
+        )
+    
+    # Шанс 15% для теста
+    if random.random() < 0.15:
+        try:
+            await maybe_send_random_meme(message.chat.id, trigger="video")
+        except Exception as e:
+            logger.warning(f"Failed to send random meme after video: {e}")
+
+
+@router.message(F.audio)
+async def collect_audio(message: Message):
+    """Сбор аудио/музыки + сохранение в коллекцию"""
+    if message.chat.type == "private":
+        return
+    
+    audio = message.audio
+    caption = message.caption[:200] if message.caption else ""
+    
+    await save_chat_message(
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        username=message.from_user.username or "",
+        first_name=message.from_user.first_name or "Аноним",
+        message_text=caption,
+        message_type="audio",
+        file_id=audio.file_id if audio else None,
+        file_unique_id=audio.file_unique_id if audio else None
+    )
+    
+    # Сохраняем аудио в коллекцию
+    if audio:
+        sender_name = message.from_user.first_name or "Аноним"
+        # Собираем информацию о треке
+        title = audio.title or "Без названия"
+        performer = audio.performer or sender_name
+        duration = audio.duration or 0
+        await save_media(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id,
+            file_id=audio.file_id,
+            file_type="audio",
+            file_unique_id=audio.file_unique_id,
+            description=f"{performer} - {title} ({duration} сек)",
+            caption=caption
+        )
+    
+    # Шанс 15% для теста
+    if random.random() < 0.15:
+        try:
+            await maybe_send_random_meme(message.chat.id, trigger="audio")
+        except Exception as e:
+            logger.warning(f"Failed to send random meme after audio: {e}")
+
+
 # ==================== СИСТЕМА МЕМОВ ====================
 
 # Комментарии Тёти Розы к мемам
@@ -2582,6 +2669,34 @@ VIDEO_NOTE_COMMENTS = [
     "🔵 Нашла видосик. Лицо — огонь. В плохом смысле.",
     "🔵 Архивный кружок. Смотрите на это лицо и думайте о жизни.",
     "🔵 Кто-то записал это. Теперь не развидеть.",
+]
+
+# Комментарии к видео
+VIDEO_COMMENTS = [
+    "📹 Видосик из архива! Кто-то снял эту хуйню.",
+    "📹 Нашла видео в закромах. Наслаждайтесь.",
+    "📹 Архивное видео. Кинематограф уровня 'бог'.",
+    "📹 Кто-то это снял и отправил. Теперь смотрите все.",
+    "📹 Видео дня. Качество — говно, контент — огонь.",
+    "📹 Из коллекции видосов Тёти Розы.",
+    "📹 Рандомное видео. Судьба выбрала именно это.",
+    "📹 Архив открыт. Видеосекция.",
+    "📹 Кто снимал — молодец. Или нет. Смотрите сами.",
+    "📹 Культурное наследие чата в видеоформате.",
+]
+
+# Комментарии к аудио
+AUDIO_COMMENTS = [
+    "🎵 Музычка из архива! Кто-то это слушал.",
+    "🎵 Нашла трек в закромах. Врубайте.",
+    "🎵 Аудио из коллекции. Вкусы у вас... интересные.",
+    "🎵 Рандомный трек. DJ Тётя Роза в деле.",
+    "🎵 Музыкальный привет из прошлого.",
+    "🎵 Кто-то это кидал. Теперь слушайте все.",
+    "🎵 Из плейлиста Тёти Розы. Цените.",
+    "🎵 Аудиокультура чата. Наслаждайтесь.",
+    "🎵 Трек дня. Или ночи. Зависит от настроения.",
+    "🎵 Музыкальный архив открыт. Держите.",
     "🔵 Тётя Роза делится видеокомпроматом.",
     "🔵 Кружочек позора. Наслаждайтесь.",
     "🔵 Это записывали добровольно. Вдумайтесь.",
@@ -2611,6 +2726,10 @@ async def maybe_send_random_meme(chat_id: int, trigger: str = "random"):
             comment = random.choice(VOICE_COMMENTS)
         elif file_type == "video_note":
             comment = random.choice(VIDEO_NOTE_COMMENTS)
+        elif file_type == "video":
+            comment = random.choice(VIDEO_COMMENTS)
+        elif file_type == "audio":
+            comment = random.choice(AUDIO_COMMENTS)
         else:
             comment = random.choice(MEME_COMMENTS)
         
@@ -2628,6 +2747,11 @@ async def maybe_send_random_meme(chat_id: int, trigger: str = "random"):
         elif file_type == "video_note":
             await bot.send_message(chat_id, comment)
             await bot.send_video_note(chat_id, file_id)
+        elif file_type == "video":
+            await bot.send_video(chat_id, file_id, caption=comment)
+        elif file_type == "audio":
+            await bot.send_message(chat_id, comment)
+            await bot.send_audio(chat_id, file_id)
         
         # Увеличиваем счётчик использования
         await increment_media_usage(media_id)
@@ -2676,7 +2800,9 @@ async def cmd_random_meme(message: Message):
             "стикер": "sticker", "sticker": "sticker",
             "гиф": "animation", "gif": "animation", "гифка": "animation",
             "голосовое": "voice", "voice": "voice", "войс": "voice", "голосовуха": "voice",
-            "кружок": "video_note", "кружочек": "video_note", "видео": "video_note"
+            "кружок": "video_note", "кружочек": "video_note",
+            "видео": "video", "video": "video", "видос": "video", "видосик": "video",
+            "аудио": "audio", "audio": "audio", "музыка": "audio", "трек": "audio"
         }
         file_type = type_map.get(args[1].lower())
     
