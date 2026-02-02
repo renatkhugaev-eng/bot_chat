@@ -3839,6 +3839,244 @@ async def check_cringe_and_react(message: Message) -> bool:
         return False
 
 
+# ==================== ОТВЕТ НА РЕПЛАЙ/ТЕГ БОТА ====================
+
+# Шанс ответить на реплай/тег (40%)
+BOT_REPLY_CHANCE = 0.40
+# Кулдаун на ответы (30 сек на чат)
+bot_reply_cooldowns: Dict[int, float] = {}
+BOT_REPLY_COOLDOWN = 30
+
+# Ответы на разные типы контента
+BOT_REPLIES_TEXT = [
+    "Чё надо?",
+    "Иди нахуй",
+    "Отъебись",
+    "Чё те, блять?",
+    "Я занята",
+    "Пошёл нахуй",
+    "Ну и?",
+    "Это всё?",
+    "Мне похуй",
+    "Заебал",
+    "Чё пристал?",
+    "Не до тебя",
+    "Хуйня какая-то",
+    "И чё?",
+    "Серьёзно?",
+    "Тебе заняться нечем?",
+    "Опять ты",
+    "Бля, ну хватит",
+    "Достал уже",
+    "Нахуя ты это прислал?",
+]
+
+BOT_REPLIES_STICKER = [
+    "Стикер ебучий. И чё?",
+    "Охуенный стикер. Нет.",
+    "Стикером отвечаешь? Красава, блять",
+    "Это типа смешно? Стикер прислал",
+    "Стикер. Вау. Иди нахуй",
+    "О, стикер. Мне похуй",
+    "Классный стикер. Отъебись теперь",
+    "Стикерами общаешься? Слов не хватает?",
+]
+
+BOT_REPLIES_GIF = [
+    "Гифка. Охуенно. И чё?",
+    "О, гифка. Мне заебись как интересно",
+    "Гифку прислал. Молодец. Иди нахуй",
+    "Это типа я должна впечатлиться гифкой?",
+    "Гифка. Вау. Похуй.",
+    "Классная гифка. Отвали.",
+]
+
+BOT_REPLIES_PHOTO = [
+    "Фото. И чё ты хотел этим сказать?",
+    "Фоточка. Охуенно. Дальше что?",
+    "Картинку прислал. Молодец. Иди нахуй",
+    "Это что за хуйня на фото?",
+    "Фото. Интересно. Нет. Похуй.",
+    "Красивая фотка. Шутка. Мне похуй.",
+]
+
+BOT_REPLIES_VOICE = [
+    "Голосовое? Серьёзно? Не буду слушать эту хуйню",
+    "Войс прислал. Мне лень слушать",
+    "Голосовое. Напиши текстом, я не твоя мать",
+    "Войсы шлёшь? Тебе лет сколько?",
+    "Голосовое... Хуй я это буду слушать",
+]
+
+BOT_REPLIES_VIDEO = [
+    "Видос. Не буду смотреть",
+    "Видео прислал. Охуеть какой контент",
+    "Это что за видос? Похуй, не интересно",
+    "Видео. Вау. Мне заебись как интересно. Нет.",
+]
+
+BOT_REPLIES_VIDEO_NOTE = [
+    "Кружочек. Охуенно. Не буду смотреть",
+    "О, кружочек. Ебало своё снял? Молодец",
+    "Видеокружок. Инновационно. Мне похуй",
+]
+
+# Контекстные ответы на текст
+def get_contextual_reply(text: str) -> str:
+    """Генерирует контекстный ответ на основе текста"""
+    text_lower = text.lower()
+    
+    # Приветствия
+    if any(w in text_lower for w in ['привет', 'здравствуй', 'хай', 'хей', 'здорова', 'приветик']):
+        return random.choice([
+            "Привет-привет. Чё надо?",
+            "Здорова. И чё?",
+            "Привет. Отъебись.",
+            "Здарова. Дальше что?",
+        ])
+    
+    # Вопросы
+    if any(w in text_lower for w in ['как дела', 'как ты', 'чё делаешь', 'что делаешь']):
+        return random.choice([
+            "Норм. А тебе какое дело?",
+            "Заебись. Чё надо?",
+            "Нормально. Не твоё дело.",
+            "Дела? Ебашу. Отвали.",
+        ])
+    
+    # Похвала
+    if any(w in text_lower for w in ['молодец', 'красава', 'круто', 'класс', 'супер', 'охуенно', 'заебись']):
+        return random.choice([
+            "Спасибо. А теперь иди нахуй.",
+            "Знаю. Дальше?",
+            "Ага. И чё?",
+            "Круто. Мне похуй. Но круто.",
+        ])
+    
+    # Оскорбления
+    if any(w in text_lower for w in ['дура', 'тупая', 'идиот', 'мудак', 'сука', 'бля', 'хуй', 'пизд']):
+        return random.choice([
+            "Сам такой, блять",
+            "На себя посмотри",
+            "Ой, кто бы говорил",
+            "Иди нахуй сам",
+            "Сам ты хуй",
+            "Зеркало дома есть?",
+        ])
+    
+    # Смех
+    if any(w in text_lower for w in ['хаха', 'ахах', 'лол', 'ржу', 'смешно', 'угар', 'ору']):
+        return random.choice([
+            "Ржёшь? Над собой посмейся",
+            "Смешно ему. А мне нет.",
+            "Угар, да. Иди нахуй.",
+            "Ору с тебя. Но не от смеха.",
+        ])
+    
+    # Вопрос
+    if '?' in text:
+        return random.choice([
+            "Хуй знает",
+            "Не знаю. И знать не хочу.",
+            "А мне откуда знать?",
+            "Спроси у кого-нибудь другого",
+            "Это ты у меня спрашиваешь? Серьёзно?",
+        ])
+    
+    # По умолчанию
+    return random.choice(BOT_REPLIES_TEXT)
+
+
+async def handle_bot_mention_or_reply(message: Message) -> bool:
+    """
+    Обрабатывает реплай на бота или упоминание бота.
+    Возвращает True если ответили.
+    """
+    chat_id = message.chat.id
+    
+    # Проверяем кулдаун
+    last_reply = bot_reply_cooldowns.get(chat_id, 0)
+    if time.time() - last_reply < BOT_REPLY_COOLDOWN:
+        return False
+    
+    # Проверяем шанс
+    if random.random() > BOT_REPLY_CHANCE:
+        return False
+    
+    # Определяем тип контента и выбираем ответ
+    response = ""
+    
+    if message.sticker:
+        response = random.choice(BOT_REPLIES_STICKER)
+    elif message.animation:
+        response = random.choice(BOT_REPLIES_GIF)
+    elif message.photo:
+        response = random.choice(BOT_REPLIES_PHOTO)
+    elif message.voice:
+        response = random.choice(BOT_REPLIES_VOICE)
+    elif message.video:
+        response = random.choice(BOT_REPLIES_VIDEO)
+    elif message.video_note:
+        response = random.choice(BOT_REPLIES_VIDEO_NOTE)
+    elif message.text:
+        response = get_contextual_reply(message.text)
+    else:
+        response = random.choice(BOT_REPLIES_TEXT)
+    
+    # Обновляем кулдаун
+    bot_reply_cooldowns[chat_id] = time.time()
+    
+    # Отправляем ответ
+    try:
+        await message.reply(response)
+        logger.info(f"BOT REPLY: {response[:30]}...")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send bot reply: {e}")
+        return False
+
+
+@router.message(F.reply_to_message)
+async def handle_reply_to_bot(message: Message):
+    """Обработчик реплаев на сообщения бота"""
+    if message.chat.type == "private":
+        return
+    
+    # Проверяем, что реплай на сообщение бота
+    if message.reply_to_message and message.reply_to_message.from_user:
+        # Получаем ID бота
+        bot_info = await bot.get_me()
+        if message.reply_to_message.from_user.id == bot_info.id:
+            await handle_bot_mention_or_reply(message)
+
+
+async def check_bot_mention(message: Message) -> bool:
+    """Проверяет упоминание бота в сообщении и отвечает"""
+    if not message.text and not message.caption:
+        return False
+    
+    text = message.text or message.caption or ""
+    
+    # Получаем username бота
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
+    
+    if not bot_username:
+        return False
+    
+    # Проверяем упоминание @botusername
+    if f"@{bot_username.lower()}" in text.lower():
+        await handle_bot_mention_or_reply(message)
+        return True
+    
+    # Проверяем также упоминание "тётя роза" или "тетя роза"
+    if any(name in text.lower() for name in ['тётя роза', 'тетя роза', 'тёте розе', 'тете розе', 'тётю розу', 'тетю розу']):
+        await handle_bot_mention_or_reply(message)
+        return True
+    
+    return False
+
+
 @router.message(F.text, ~F.text.startswith("/"))
 async def collect_messages_and_exp(message: Message):
     """Сбор всех сообщений + пассивный опыт (кроме команд)"""
@@ -3847,6 +4085,9 @@ async def collect_messages_and_exp(message: Message):
     
     user_id = message.from_user.id
     chat_id = message.chat.id
+    
+    # Проверяем упоминание бота и отвечаем
+    await check_bot_mention(message)
     
     # Проверяем на кринж и реагируем (с шансом 5%)
     await check_cringe_and_react(message)
@@ -3920,6 +4161,12 @@ async def collect_stickers(message: Message):
     if message.chat.type == "private":
         return
     
+    # Проверяем реплай на бота
+    if message.reply_to_message and message.reply_to_message.from_user:
+        bot_info = await bot.get_me()
+        if message.reply_to_message.from_user.id == bot_info.id:
+            await handle_bot_mention_or_reply(message)
+    
     sticker = message.sticker
     
     await save_chat_message(
@@ -3951,6 +4198,12 @@ async def collect_photos(message: Message):
     """Сбор фото с анализом через Claude Vision"""
     if message.chat.type == "private":
         return
+    
+    # Проверяем реплай на бота
+    if message.reply_to_message and message.reply_to_message.from_user:
+        bot_info = await bot.get_me()
+        if message.reply_to_message.from_user.id == bot_info.id:
+            await handle_bot_mention_or_reply(message)
     
     caption = message.caption[:200] if message.caption else ""
     image_description = None
@@ -4034,6 +4287,12 @@ async def collect_animations(message: Message):
     if message.chat.type == "private":
         return
     
+    # Проверяем реплай на бота
+    if message.reply_to_message and message.reply_to_message.from_user:
+        bot_info = await bot.get_me()
+        if message.reply_to_message.from_user.id == bot_info.id:
+            await handle_bot_mention_or_reply(message)
+    
     animation = message.animation
     caption = message.caption[:200] if message.caption else ""
     
@@ -4072,6 +4331,12 @@ async def collect_voice(message: Message):
     """Сбор голосовых и кружочков + сохранение в коллекцию"""
     if message.chat.type == "private":
         return
+    
+    # Проверяем реплай на бота
+    if message.reply_to_message and message.reply_to_message.from_user:
+        bot_info = await bot.get_me()
+        if message.reply_to_message.from_user.id == bot_info.id:
+            await handle_bot_mention_or_reply(message)
     
     msg_type = "voice" if message.voice else "video_note"
     media_obj = message.voice or message.video_note
@@ -4131,6 +4396,12 @@ async def collect_videos(message: Message):
     if message.chat.type == "private":
         return
     
+    # Проверяем реплай на бота
+    if message.reply_to_message and message.reply_to_message.from_user:
+        bot_info = await bot.get_me()
+        if message.reply_to_message.from_user.id == bot_info.id:
+            await handle_bot_mention_or_reply(message)
+    
     video = message.video
     caption = message.caption[:200] if message.caption else ""
     
@@ -4172,6 +4443,12 @@ async def collect_audio(message: Message):
     """Сбор аудио/музыки + сохранение в коллекцию"""
     if message.chat.type == "private":
         return
+    
+    # Проверяем реплай на бота
+    if message.reply_to_message and message.reply_to_message.from_user:
+        bot_info = await bot.get_me()
+        if message.reply_to_message.from_user.id == bot_info.id:
+            await handle_bot_mention_or_reply(message)
     
     audio = message.audio
     caption = message.caption[:200] if message.caption else ""
