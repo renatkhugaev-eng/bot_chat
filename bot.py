@@ -3875,6 +3875,7 @@ async def cmd_admin(message: Message):
 /cleanup — очистка старых данных
 /health — проверка состояния системы
 /migrate\_media — миграция медиа в коллекцию
+/migrate\_users — миграция пользователей в реестр
 /vk\_import — импорт мемов из VK
 
 💡 _Твой ID:_ `{}`
@@ -4442,6 +4443,39 @@ async def cmd_migrate_media(message: Message):
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception as e:
+        await message.answer(f"❌ Ошибка миграции: {e}")
+
+
+@router.message(Command("migrate_users"))
+async def cmd_migrate_users(message: Message):
+    """Миграция пользователей из chat_messages в chat_users"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Миграция доступна только с PostgreSQL")
+        return
+    
+    try:
+        from database_postgres import migrate_chat_users_from_messages
+        
+        processing = await message.answer(
+            "🔄 Запускаю миграцию пользователей в реестр...\n\n"
+            "Это заполнит таблицу chat_users данными из всех сообщений."
+        )
+        
+        results = await migrate_chat_users_from_messages()
+        
+        await processing.edit_text(
+            f"✅ *Миграция пользователей завершена!*\n\n"
+            f"📊 Было записей: {results.get('before', 0):,}\n"
+            f"📊 Стало записей: {results.get('after', 0):,}\n"
+            f"➕ Добавлено: {results.get('added', 0):,}\n"
+            f"💬 Чатов с пользователями: {results.get('total_chats', 0):,}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Migration error: {e}")
         await message.answer(f"❌ Ошибка миграции: {e}")
 
 

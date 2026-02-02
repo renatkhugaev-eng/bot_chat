@@ -819,6 +819,52 @@ async def get_all_chat_users(chat_id: int) -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+async def migrate_chat_users_from_messages() -> Dict[str, Any]:
+    """
+    Миграция пользователей из chat_messages в chat_users.
+    Заполняет реестр пользователей старыми данными.
+    """
+    async with (await get_pool()).acquire() as conn:
+        # Считаем сколько уже есть
+        before = await conn.fetchval("SELECT COUNT(*) FROM chat_users")
+        
+        # Миграция с агрегацией
+        result = await conn.execute("""
+            INSERT INTO chat_users (chat_id, user_id, first_name, username, message_count, first_seen_at, last_seen_at)
+            SELECT 
+                chat_id, 
+                user_id, 
+                MAX(first_name) as first_name,
+                MAX(username) as username,
+                COUNT(*) as message_count, 
+                MIN(created_at) as first_seen_at, 
+                MAX(created_at) as last_seen_at
+            FROM chat_messages
+            WHERE user_id IS NOT NULL
+            GROUP BY chat_id, user_id
+            ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                first_name = COALESCE(EXCLUDED.first_name, chat_users.first_name),
+                username = COALESCE(EXCLUDED.username, chat_users.username),
+                message_count = EXCLUDED.message_count,
+                first_seen_at = LEAST(chat_users.first_seen_at, EXCLUDED.first_seen_at),
+                last_seen_at = GREATEST(chat_users.last_seen_at, EXCLUDED.last_seen_at)
+        """)
+        
+        # Считаем после
+        after = await conn.fetchval("SELECT COUNT(*) FROM chat_users")
+        
+        # Уникальные чаты
+        chats = await conn.fetchval("SELECT COUNT(DISTINCT chat_id) FROM chat_users")
+        
+        return {
+            'before': before,
+            'after': after,
+            'added': after - before,
+            'total_chats': chats,
+            'status': 'success'
+        }
+
+
 async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]]:
     """Получить сообщения чата за последние N часов"""
     since_time = int(time.time()) - (hours * 3600)
