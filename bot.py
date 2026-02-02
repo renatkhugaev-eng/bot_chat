@@ -3901,12 +3901,29 @@ async def cmd_dbstats(message: Message):
         processing = await message.answer("📊 Собираю статистику...")
         stats = await get_database_stats()
         
+        # Получаем статистику реестра пользователей
+        chat_users_count = 0
+        unique_users_in_messages = 0
+        try:
+            from database_postgres import get_pool
+            async with (await get_pool()).acquire() as conn:
+                chat_users_count = await conn.fetchval("SELECT COUNT(*) FROM chat_users") or 0
+                unique_users_in_messages = await conn.fetchval(
+                    "SELECT COUNT(DISTINCT (chat_id, user_id)) FROM chat_messages"
+                ) or 0
+        except:
+            pass
+        
         text = f"""📊 *ПОЛНАЯ СТАТИСТИКА БОТА*
 
 🌐 *Охват:*
 • Всего чатов: *{stats.get('total_chats', 0):,}*
 • Активных чатов (24ч): *{stats.get('active_chats_24h', 0)}*
 • Всего пользователей: *{stats.get('total_users', 0):,}*
+
+👥 *Реестр пользователей:*
+• В chat\_users: *{chat_users_count:,}*
+• Уникальных в сообщениях: *{unique_users_in_messages:,}*
 
 📝 *Сообщения:*
 • Всего в БД: {stats.get('chat_messages_count', 0):,}
