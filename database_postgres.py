@@ -396,15 +396,55 @@ async def init_db():
             )
         """)
         
+        # Добавляем недостающие колонки если таблица уже существует
+        # (для миграции старых баз данных)
+        migration_columns = [
+            ("activity_level", "TEXT DEFAULT 'normal'"),
+            ("communication_style", "TEXT DEFAULT 'neutral'"),
+            ("toxicity_score", "REAL DEFAULT 0.0"),
+            ("humor_score", "REAL DEFAULT 0.0"),
+            ("sentiment_score", "REAL DEFAULT 0.0"),
+            ("positive_messages", "INTEGER DEFAULT 0"),
+            ("negative_messages", "INTEGER DEFAULT 0"),
+            ("neutral_messages", "INTEGER DEFAULT 0"),
+            ("emoji_usage_rate", "REAL DEFAULT 0.0"),
+            ("avg_message_length", "REAL DEFAULT 0.0"),
+            ("peak_hour", "INTEGER"),
+            ("is_night_owl", "BOOLEAN DEFAULT FALSE"),
+            ("is_early_bird", "BOOLEAN DEFAULT FALSE"),
+            ("active_hours", "JSONB DEFAULT '{}'"),
+            ("interests", "JSONB DEFAULT '[]'"),
+            ("frequent_words", "JSONB DEFAULT '[]'"),
+            ("friends", "JSONB DEFAULT '[]'"),
+            ("frequent_replies_to", "JSONB DEFAULT '[]'"),
+            ("frequent_replies_from", "JSONB DEFAULT '[]'"),
+            ("profile_version", "INTEGER DEFAULT 1"),
+        ]
+        
+        for col_name, col_type in migration_columns:
+            try:
+                await conn.execute(f"""
+                    ALTER TABLE user_profiles 
+                    ADD COLUMN IF NOT EXISTS {col_name} {col_type}
+                """)
+            except Exception as e:
+                # Колонка уже существует или другая ошибка - пропускаем
+                pass
+        
         # Индексы для профилей
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_user_profiles_gender 
             ON user_profiles(detected_gender)
         """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_user_profiles_activity
-            ON user_profiles(activity_level, last_seen_at DESC)
-        """)
+        
+        # Проверяем наличие колонки activity_level перед созданием индекса
+        try:
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_profiles_activity
+                ON user_profiles(activity_level, last_seen_at DESC)
+            """)
+        except Exception as e:
+            logger.warning(f"Could not create activity index: {e}")
         
         # Таблица социальных связей (кто с кем общается)
         await conn.execute("""
