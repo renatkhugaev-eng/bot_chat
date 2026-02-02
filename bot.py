@@ -1823,6 +1823,7 @@ async def cmd_suck(message: Message):
         target_name = target.first_name
         target_id = target.id
         target_username = target.username
+        logger.info(f"SUCK: Reply to user - name={target_name}, id={target_id}, username={target_username}")
     else:
         # Приоритет 2: упоминание через @username или text_mention в команде
         if message.entities:
@@ -1883,8 +1884,10 @@ async def cmd_suck(message: Message):
     # Создаём кликабельное упоминание если есть ID
     if target_id:
         display_name = make_user_mention(target_id, target_name, target_username)
+        logger.info(f"SUCK: Created mention - display_name={display_name}")
     else:
         display_name = target_name  # Просто текст без ссылки
+        logger.info(f"SUCK: No ID, using plain name - {target_name}")
     
     if not SUCK_API_URL:
         # Fallback если API не настроен
@@ -1906,8 +1909,13 @@ async def cmd_suck(message: Message):
                     text = result.get("text", f"🍭 {target_name}, соси. Тётя Роза так сказала.")
                     
                     # Заменяем имя на кликабельное упоминание в ответе
-                    if target_id and target_name in text:
-                        text = text.replace(target_name, display_name)
+                    if target_id:
+                        # Заменяем все вхождения имени (регистронезависимо)
+                        import re
+                        # Экранируем спецсимволы в имени для regex
+                        escaped_name = re.escape(target_name)
+                        # Заменяем с сохранением регистра
+                        text = re.sub(escaped_name, display_name, text, flags=re.IGNORECASE)
                     
                     await processing_msg.edit_text(text, parse_mode=ParseMode.HTML)
                 else:
