@@ -446,6 +446,31 @@ async def init_db():
         except Exception as e:
             logger.warning(f"Could not create activity index: {e}")
         
+        # Таблица пользователей чата (для быстрого поиска по имени/username)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_users (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                first_name TEXT,
+                last_name TEXT,
+                username TEXT,
+                is_bot BOOLEAN DEFAULT FALSE,
+                message_count INTEGER DEFAULT 1,
+                first_seen_at BIGINT NOT NULL,
+                last_seen_at BIGINT NOT NULL,
+                UNIQUE(chat_id, user_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_chat_users_lookup
+            ON chat_users(chat_id, LOWER(username), LOWER(first_name))
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_chat_users_by_name
+            ON chat_users(chat_id, first_name)
+        """)
+        
         # Таблица социальных связей (кто с кем общается)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_interactions (
@@ -710,6 +735,7 @@ async def save_chat_message(
     file_unique_id: str = None
 ):
     """Сохранить сообщение чата для аналитики"""
+    now = int(time.time())
     async with (await get_pool()).acquire() as conn:
         await conn.execute("""
             INSERT INTO chat_messages 
@@ -719,7 +745,78 @@ async def save_chat_message(
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         """, chat_id, user_id, username, first_name, message_text, message_type,
              reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, 
-             image_description, file_id, file_unique_id, int(time.time()))
+             image_description, file_id, file_unique_id, now)
+        
+        # Обновляем реестр пользователей чата для быстрого поиска
+        await conn.execute("""
+            INSERT INTO chat_users (chat_id, user_id, first_name, username, message_count, first_seen_at, last_seen_at)
+            VALUES ($1, $2, $3, $4, 1, $5, $5)
+            ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                first_name = COALESCE(EXCLUDED.first_name, chat_users.first_name),
+                username = COALESCE(EXCLUDED.username, chat_users.username),
+                message_count = chat_users.message_count + 1,
+                last_seen_at = EXCLUDED.last_seen_at
+        """, chat_id, user_id, first_name, username, now)
+
+
+async def find_user_in_chat(chat_id: int, search_term: str) -> Optional[Dict[str, Any]]:
+    """
+    Найти пользователя в чате по имени или username.
+    Возвращает user_id, first_name, username если найден.
+    """
+    if not search_term:
+        return None
+    
+    search_lower = search_term.lower().strip()
+    
+    async with (await get_pool()).acquire() as conn:
+        # Сначала ищем точное совпадение по username
+        row = await conn.fetchrow("""
+            SELECT user_id, first_name, username
+            FROM chat_users
+            WHERE chat_id = $1 AND LOWER(username) = $2
+            ORDER BY last_seen_at DESC
+            LIMIT 1
+        """, chat_id, search_lower)
+        
+        if row:
+            return dict(row)
+        
+        # Затем ищем по имени (точное)
+        row = await conn.fetchrow("""
+            SELECT user_id, first_name, username
+            FROM chat_users
+            WHERE chat_id = $1 AND LOWER(first_name) = $2
+            ORDER BY last_seen_at DESC
+            LIMIT 1
+        """, chat_id, search_lower)
+        
+        if row:
+            return dict(row)
+        
+        # Ищем частичное совпадение
+        row = await conn.fetchrow("""
+            SELECT user_id, first_name, username
+            FROM chat_users
+            WHERE chat_id = $1 
+              AND (LOWER(first_name) LIKE $2 OR LOWER(username) LIKE $2)
+            ORDER BY last_seen_at DESC
+            LIMIT 1
+        """, chat_id, f"%{search_lower}%")
+        
+        return dict(row) if row else None
+
+
+async def get_all_chat_users(chat_id: int) -> List[Dict[str, Any]]:
+    """Получить всех известных пользователей чата"""
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT user_id, first_name, username, message_count, last_seen_at
+            FROM chat_users
+            WHERE chat_id = $1
+            ORDER BY message_count DESC
+        """, chat_id)
+        return [dict(row) for row in rows]
 
 
 async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]]:

@@ -66,7 +66,8 @@ if USE_POSTGRES:
         get_user_profile, get_user_gender, analyze_and_update_user_gender,
         update_user_gender_incrementally, update_user_profile_comprehensive,
         get_user_full_profile, get_user_activity_report, get_chat_social_graph,
-        get_user_profile_for_ai, get_enriched_chat_data_for_ai, get_chat_social_data_for_ai
+        get_user_profile_for_ai, get_enriched_chat_data_for_ai, get_chat_social_data_for_ai,
+        find_user_in_chat
     )
 else:
     from database import (
@@ -104,6 +105,7 @@ else:
     async def get_user_profile_for_ai(user_id, first_name="", username=""): return {'user_id': user_id, 'name': first_name or username or 'Аноним', 'gender': 'unknown', 'description': '', 'traits': [], 'interests': [], 'social': {}}
     async def get_enriched_chat_data_for_ai(chat_id, hours=5): return {'profiles': [], 'profiles_text': '', 'social': {}, 'social_text': ''}
     async def get_chat_social_data_for_ai(chat_id): return {'relationships': [], 'conflicts': [], 'friendships': [], 'description': ''}
+    async def find_user_in_chat(chat_id, search_term): return None
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
     calculate_crime_success, calculate_crime_reward, get_random_crime_message,
@@ -1815,18 +1817,58 @@ async def cmd_suck(message: Message):
     target_username = None
     target_profile = {}
     
+    # Приоритет 1: реплай на сообщение
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
         target_name = target.first_name
         target_id = target.id
         target_username = target.username
     else:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) > 1:
-            target_name = parts[1].strip().replace("@", "")
-        else:
-            await message.answer("🍭 Кому сосать? Ответь на сообщение или укажи имя!")
-            return
+        # Приоритет 2: упоминание через @username или text_mention в команде
+        if message.entities:
+            for entity in message.entities:
+                if entity.type == "mention":
+                    # @username в тексте команды
+                    mentioned = message.text[entity.offset:entity.offset + entity.length]
+                    target_username = mentioned.lstrip("@")
+                    target_name = target_username
+                    # Ищем в реестре пользователей чата
+                    if USE_POSTGRES:
+                        try:
+                            found = await find_user_in_chat(message.chat.id, target_username)
+                            if found:
+                                target_id = found['user_id']
+                                target_name = found['first_name'] or target_username
+                                target_username = found['username']
+                        except Exception as e:
+                            logger.debug(f"Could not find user by username: {e}")
+                    break
+                elif entity.type == "text_mention" and entity.user:
+                    # Упоминание через ID (text_mention)
+                    target_id = entity.user.id
+                    target_name = entity.user.first_name or entity.user.username or "Кто-то"
+                    target_username = entity.user.username
+                    break
+        
+        # Приоритет 3: просто текст после команды
+        if not target_name:
+            parts = message.text.split(maxsplit=1)
+            if len(parts) > 1:
+                raw_name = parts[1].strip().replace("@", "")
+                target_name = raw_name
+                # Ищем пользователя по имени в реестре чата
+                if USE_POSTGRES and raw_name:
+                    try:
+                        found = await find_user_in_chat(message.chat.id, raw_name)
+                        if found:
+                            target_id = found['user_id']
+                            target_name = found['first_name'] or raw_name
+                            target_username = found['username']
+                    except Exception as e:
+                        logger.debug(f"Could not find user by name: {e}")
+            else:
+                await message.answer("🍭 Кому сосать? Ответь на сообщение или укажи имя!")
+                return
     
     if not target_name:
         target_name = "Эй ты"
@@ -1838,9 +1880,15 @@ async def cmd_suck(message: Message):
         except Exception as e:
             logger.debug(f"Could not get profile for suck: {e}")
     
+    # Создаём кликабельное упоминание если есть ID
+    if target_id:
+        display_name = make_user_mention(target_id, target_name, target_username)
+    else:
+        display_name = target_name  # Просто текст без ссылки
+    
     if not SUCK_API_URL:
         # Fallback если API не настроен
-        await message.answer(f"🍭 {target_name}, пососи, пожалуйста. Вселенная ждёт. Соси, блять.")
+        await message.answer(f"🍭 {display_name}, пососи, пожалуйста. Вселенная ждёт. Соси, блять.", parse_mode=ParseMode.HTML)
         return
     
     processing_msg = await message.answer("🍭 Готовлю послание...")
@@ -1850,23 +1898,28 @@ async def cmd_suck(message: Message):
         metrics.track_api_call("suck")
         session = await get_http_session()
         async with session.post(SUCK_API_URL, json={
-            "name": target_name,
-            "profile": target_profile  # Передаём профиль для персонализации
+            "name": target_name,  # Для API отправляем просто имя
+            "profile": target_profile
         }) as response:
                 if response.status == 200:
                     result = await response.json()
                     text = result.get("text", f"🍭 {target_name}, соси. Тётя Роза так сказала.")
-                    await processing_msg.edit_text(text)
+                    
+                    # Заменяем имя на кликабельное упоминание в ответе
+                    if target_id and target_name in text:
+                        text = text.replace(target_name, display_name)
+                    
+                    await processing_msg.edit_text(text, parse_mode=ParseMode.HTML)
                 else:
                     error_text = await response.text()
                     logger.error(f"Suck API error: {response.status} - {error_text}")
-                    await processing_msg.edit_text(f"🍭 {target_name}, пососи. API сломался, но посыл остался.")
+                    await processing_msg.edit_text(f"🍭 {display_name}, пососи. API сломался, но посыл остался.", parse_mode=ParseMode.HTML)
     
     except asyncio.TimeoutError:
-        await processing_msg.edit_text(f"🍭 {target_name}, пососи. Тётя Роза задумалась, но посыл ясен.")
+        await processing_msg.edit_text(f"🍭 {display_name}, пососи. Тётя Роза задумалась, но посыл ясен.", parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Error in suck command: {e}")
-        await processing_msg.edit_text(f"🍭 {target_name}, соси. Ошибка, но соси.")
+        await processing_msg.edit_text(f"🍭 {display_name}, соси. Ошибка, но соси.", parse_mode=ParseMode.HTML)
 
 
 # ==================== ПРОВЕТРИТЬ ЧАТ ====================
