@@ -1054,6 +1054,165 @@ async def cmd_profile(message: Message):
         await message.answer("❌ Ошибка получения профиля")
 
 
+@router.message(Command("психоанализ", "psycho", "анализ", "разбор"))
+async def cmd_psychoanalysis(message: Message):
+    """Глубокий AI-психоанализ личности на основе всех данных"""
+    if not USE_POSTGRES:
+        await message.answer("⚠️ Психоанализ доступен только в полной версии")
+        return
+    
+    if message.chat.type == "private":
+        await message.answer("🧠 Психоанализ работает только в групповых чатах!")
+        return
+    
+    # Определяем цель анализа
+    target_user = message.from_user
+    
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+    
+    target_id = target_user.id
+    target_name = target_user.first_name or target_user.username or "Аноним"
+    target_username = target_user.username
+    
+    # Кулдаун 2 минуты на пользователя
+    cooldown_key = f"psycho_{target_id}"
+    can_do, remaining = check_cooldown(message.from_user.id, message.chat.id, cooldown_key, 120)
+    if not can_do:
+        await message.answer(f"⏰ Психоанализ {target_name} можно делать раз в 2 минуты. Подожди {remaining} сек")
+        return
+    
+    processing = await message.answer(f"🧠 Анализирую личность {target_name}...")
+    
+    try:
+        # Получаем полный профиль
+        profile = await get_user_profile_for_ai(target_id, target_name, target_username or "")
+        full_profile = await get_user_full_profile(target_id)
+        
+        if not full_profile or full_profile.get('total_messages', 0) < 10:
+            await processing.edit_text(
+                f"🔍 Недостаточно данных для психоанализа {target_name}.\n"
+                f"Нужно минимум 10 сообщений, а у него только {full_profile.get('total_messages', 0) if full_profile else 0}."
+            )
+            return
+        
+        # Получаем последние сообщения для анализа
+        messages = await get_user_messages(message.chat.id, target_id, limit=50)
+        messages_text = "\n".join([f"- {m.get('message_text', '')[:100]}" for m in messages[:20] if m.get('message_text')])
+        
+        # Создаём кликабельное упоминание
+        user_mention = make_user_mention(target_id, target_name, target_username)
+        
+        # Формируем данные для анализа
+        gender = profile.get('gender', 'неизвестно')
+        gender_icon = "👨" if gender == 'мужской' else "👩" if gender == 'женский' else "🤷"
+        
+        activity = profile.get('activity_level', 'normal')
+        activity_desc = {
+            'hyperactive': 'ГИПЕРАКТИВНЫЙ (графоман, не затыкается)',
+            'very_active': 'Очень активный (любит поболтать)',
+            'active': 'Активный (регулярно участвует)',
+            'normal': 'Обычный (средняя активность)',
+            'lurker': 'Молчун (редко пишет, больше читает)'
+        }.get(activity, 'Обычный')
+        
+        style = profile.get('communication_style', 'neutral')
+        style_desc = {
+            'toxic': '☠️ ТОКСИЧНЫЙ (агрессивен, конфликтен)',
+            'humorous': '😂 Юморист (часто шутит)',
+            'positive': '😊 Позитивный (доброжелателен)',
+            'negative': '😔 Негативный (склонен ныть)',
+            'neutral': '😐 Нейтральный'
+        }.get(style, 'Нейтральный')
+        
+        toxicity = profile.get('toxicity', 0)
+        toxicity_level = "🟢 Низкая" if toxicity < 0.2 else "🟡 Средняя" if toxicity < 0.4 else "🔴 ВЫСОКАЯ"
+        
+        humor = profile.get('humor', 0)
+        humor_level = "Не особо" if humor < 0.2 else "Иногда шутит" if humor < 0.4 else "Постоянно шутит"
+        
+        # Интересы
+        interests = profile.get('interests_readable', []) or profile.get('interests', [])
+        interests_text = ", ".join(interests[:5]) if interests else "Не определены"
+        
+        # Режим
+        time_mode = "🦉 Ночная сова" if profile.get('is_night_owl') else "🐓 Жаворонок" if profile.get('is_early_bird') else "🌞 Обычный"
+        peak_hour = profile.get('peak_hour')
+        peak_text = f"Пик активности: {peak_hour}:00" if peak_hour is not None else ""
+        
+        # Социальные связи
+        social = profile.get('social', {})
+        talks_to = social.get('frequently_talks_to', [])
+        
+        # Формируем отчёт
+        report = f"""
+🧠 *ПСИХОАНАЛИЗ: {user_mention}*
+{'━' * 25}
+
+{gender_icon} *БАЗОВЫЕ ДАННЫЕ*
+• Пол: {gender}
+• Сообщений проанализировано: {full_profile.get('total_messages', 0)}
+• В чате с: {full_profile.get('first_seen_at', 'неизвестно')}
+
+📊 *АКТИВНОСТЬ*
+• Уровень: {activity_desc}
+• Режим: {time_mode}
+{f'• {peak_text}' if peak_text else ''}
+
+🎭 *ХАРАКТЕР*
+• Стиль: {style_desc}
+• Токсичность: {toxicity_level} ({toxicity:.0%})
+• Чувство юмора: {humor_level}
+• Эмодзи: {full_profile.get('emoji_usage_rate', 0):.1f}%
+
+🎯 *ИНТЕРЕСЫ*
+• {interests_text}
+
+{'━' * 25}
+
+🔮 *ДИАГНОЗ ТЁТИ РОЗЫ:*
+"""
+        
+        # Генерируем диагноз на основе данных
+        diagnoses = []
+        
+        if toxicity > 0.4:
+            diagnoses.append(f"— {target_name} — токсичная тварь. Каждое второе сообщение — яд. Держитесь от него подальше, или надевайте противогаз.")
+        elif toxicity > 0.2:
+            diagnoses.append(f"— {target_name} иногда срывается на токсичность. Наверное, проблемы дома. Или на работе. Или везде.")
+        
+        if activity == 'hyperactive':
+            diagnoses.append(f"— Графоман уровня «бог». {target_name} пишет столько, будто ему платят за каждую букву. Спойлер: не платят.")
+        elif activity == 'lurker':
+            diagnoses.append(f"— Тихушник. {target_name} всё видит, всё читает, но молчит как партизан. Подозрительно.")
+        
+        if style == 'negative':
+            diagnoses.append(f"— Вечный нытик. {target_name} жалуется на жизнь чаще, чем дышит. Кто-то дайте ему обнимашки. Или антидепрессанты.")
+        elif style == 'humorous':
+            diagnoses.append(f"— Считает себя стендап-комиком. {target_name} шутит постоянно. Иногда даже смешно.")
+        
+        if profile.get('is_night_owl'):
+            diagnoses.append(f"— Ночной зомби. {target_name} активен когда нормальные люди спят. Возможно, вампир.")
+        
+        if 'crypto' in interests:
+            diagnoses.append(f"— Криптобро. {target_name} верит в биткоин больше, чем в себя. Ещё не поздно спасти.")
+        if 'gaming' in interests:
+            diagnoses.append(f"— Геймер. {target_name} просиживает жизнь в играх. Но хотя бы не на улице.")
+        if 'politics' in interests:
+            diagnoses.append(f"— Политолог диванный. {target_name} знает как управлять страной. Жаль, не знает как управлять своей жизнью.")
+        
+        if not diagnoses:
+            diagnoses.append(f"— {target_name} — обычный человек. Ничего интересного. Скукота.")
+        
+        report += "\n".join(diagnoses[:4])  # Максимум 4 диагноза
+        
+        await processing.edit_text(report, parse_mode=ParseMode.HTML)
+        
+    except Exception as e:
+        logger.error(f"Psychoanalysis error: {e}")
+        await processing.edit_text(f"❌ Ошибка анализа: {e}")
+
+
 @router.message(Command("социал", "social", "граф"))
 async def cmd_social_graph(message: Message):
     """Показать социальный граф чата - кто с кем общается"""
@@ -1600,11 +1759,24 @@ async def cmd_diagnosis(message: Message):
         context, messages_found = await gather_user_context(chat_id, target_user_id) if target_user_id else ("Пациент молчалив — это симптом", 0)
         logger.info(f"Diagnosis: {target_name}, {messages_found} msgs")
         
+        # Получаем профиль пользователя для персонализации
+        user_profile = {}
+        if USE_POSTGRES and target_user_id:
+            try:
+                user_profile = await get_user_profile_for_ai(target_user_id, target_name, target_username or "")
+            except Exception as e:
+                logger.debug(f"Could not get profile for diagnosis: {e}")
+        
         metrics.track_api_call("diagnosis")
         session = await get_http_session()
         async with session.post(
                 diagnosis_api_url,
-                json={"name": target_name, "username": target_username or "", "context": context}
+                json={
+                    "name": target_name, 
+                    "username": target_username or "", 
+                    "context": context,
+                    "profile": user_profile  # Передаём профиль для персонализации
+                }
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -3469,18 +3641,32 @@ CRINGE_COOLDOWN_SECONDS = 600  # 10 минут
 async def check_cringe_and_react(message: Message) -> bool:
     """
     Проверяет сообщение на кринж и реагирует с шансом.
+    Шанс персонализирован на основе профиля пользователя.
     Возвращает True если среагировал.
     """
     if not message.text or len(message.text) < 10:
         return False
     
     chat_id = message.chat.id
+    user_id = message.from_user.id
     text_lower = message.text.lower()
     
     # Проверяем кулдаун
     last_reaction = cringe_cooldowns.get(chat_id, 0)
     if time.time() - last_reaction < CRINGE_COOLDOWN_SECONDS:
         return False
+    
+    # Получаем профиль пользователя для персонализации шанса
+    user_profile = {}
+    if USE_POSTGRES:
+        try:
+            user_profile = await get_user_profile_for_ai(
+                user_id, 
+                message.from_user.first_name or "", 
+                message.from_user.username or ""
+            )
+        except Exception as e:
+            logger.debug(f"Could not get profile for cringe check: {e}")
     
     # Проверяем паттерны
     is_cringe = False
@@ -3518,8 +3704,38 @@ async def check_cringe_and_react(message: Message) -> bool:
     if not is_cringe:
         return False
     
-    # Шанс срабатывания
-    if random.random() > CRINGE_TRIGGER_CHANCE:
+    # ПЕРСОНАЛИЗИРОВАННЫЙ шанс срабатывания на основе профиля
+    trigger_chance = CRINGE_TRIGGER_CHANCE  # База 20%
+    
+    # Увеличиваем шанс для определённых типов личности
+    if user_profile:
+        # Токсичные пользователи — больше кринжа (+15%)
+        if user_profile.get('toxicity', 0) > 0.3:
+            trigger_chance += 0.15
+        
+        # Негативный стиль общения — больше нытья (+10%)
+        if user_profile.get('communication_style') == 'negative':
+            trigger_chance += 0.10
+        
+        # Гиперактивные — чаще пишут кринж (+10%)
+        if user_profile.get('activity_level') in ['hyperactive', 'very_active']:
+            trigger_chance += 0.10
+        
+        # Определённые интересы увеличивают шанс
+        interests = user_profile.get('interests', [])
+        cringe_interests = ['crypto', 'politics', 'relationships', 'fitness']
+        if any(i in interests for i in cringe_interests):
+            trigger_chance += 0.10
+        
+        # Ночные совы — более эмоциональны ночью (+5%)
+        if user_profile.get('is_night_owl') and 0 <= time.localtime().tm_hour < 6:
+            trigger_chance += 0.05
+    
+    # Ограничиваем максимум 50%
+    trigger_chance = min(trigger_chance, 0.50)
+    
+    # Проверяем шанс
+    if random.random() > trigger_chance:
         return False
     
     # Создаём кликабельное упоминание
@@ -3579,13 +3795,44 @@ async def check_cringe_and_react(message: Message) -> bool:
     
     response = random.choice(reactions.get(cringe_reason, reactions["pattern"]))
     
+    # Добавляем персонализированную добавку на основе профиля (30% шанс)
+    if user_profile and random.random() < 0.30:
+        profile_additions = []
+        
+        # По токсичности
+        if user_profile.get('toxicity', 0) > 0.4:
+            profile_additions.append(f"\n\n(Кстати, {user_mention} — рецидивист. Токсичность зашкаливает.)")
+        
+        # По стилю общения
+        style = user_profile.get('communication_style', '')
+        if style == 'negative':
+            profile_additions.append(f"\n\n(Вечно ноет этот {user_mention}. Уже привыкли.)")
+        elif style == 'toxic':
+            profile_additions.append(f"\n\n({user_mention} опять токсит. Классика.)")
+        
+        # По интересам
+        interests = user_profile.get('interests', [])
+        if 'crypto' in interests:
+            profile_additions.append(f"\n\n(Ещё и криптан. Господи допоможи вдвойне.)")
+        elif 'politics' in interests:
+            profile_additions.append(f"\n\n(Политолог, блин. Ну конечно.)")
+        elif 'fitness' in interests:
+            profile_additions.append(f"\n\n(Качок-ЗОЖник. Ожидаемо.)")
+        
+        # По активности
+        if user_profile.get('activity_level') == 'hyperactive':
+            profile_additions.append(f"\n\n({user_mention} как всегда — графоманит без остановки.)")
+        
+        if profile_additions:
+            response += random.choice(profile_additions)
+    
     # Обновляем кулдаун
     cringe_cooldowns[chat_id] = time.time()
     
     # Отправляем реакцию
     try:
         await message.reply(response, parse_mode=ParseMode.HTML)
-        logger.info(f"CRINGE detected ({cringe_reason}): {message.text[:50]}...")
+        logger.info(f"CRINGE detected ({cringe_reason}) for user {user_id}, chance was {trigger_chance:.0%}: {message.text[:50]}...")
         return True
     except Exception as e:
         logger.error(f"Failed to send cringe reaction: {e}")
@@ -3776,7 +4023,7 @@ async def collect_photos(message: Message):
     # Шанс 15% для теста (потом вернуть на 2-3%)
     if random.random() < 0.15:
         try:
-            await maybe_send_random_meme(message.chat.id, trigger="photo")
+            await maybe_send_random_meme(message.chat.id, trigger="photo", target_user_id=message.from_user.id)
         except Exception as e:
             logger.warning(f"Failed to send random meme after photo: {e}")
 
@@ -3815,7 +4062,7 @@ async def collect_animations(message: Message):
     # Шанс 15% для теста (потом вернуть на 2-3%)
     if random.random() < 0.15:
         try:
-            await maybe_send_random_meme(message.chat.id, trigger="animation")
+            await maybe_send_random_meme(message.chat.id, trigger="animation", target_user_id=message.from_user.id)
         except Exception as e:
             logger.warning(f"Failed to send random meme after animation: {e}")
 
@@ -3855,7 +4102,7 @@ async def collect_voice(message: Message):
         # Шанс 15% для теста (потом вернуть на 3%)
         if random.random() < 0.15:
             try:
-                await maybe_send_random_meme(message.chat.id, trigger="voice")
+                await maybe_send_random_meme(message.chat.id, trigger="voice", target_user_id=message.from_user.id)
             except Exception as e:
                 logger.warning(f"Failed to send random meme after voice: {e}")
     
@@ -3873,7 +4120,7 @@ async def collect_voice(message: Message):
         # Шанс 15% для теста (потом вернуть на 3%)
         if random.random() < 0.15:
             try:
-                await maybe_send_random_meme(message.chat.id, trigger="video_note")
+                await maybe_send_random_meme(message.chat.id, trigger="video_note", target_user_id=message.from_user.id)
             except Exception as e:
                 logger.warning(f"Failed to send random meme after video_note: {e}")
 
@@ -3915,7 +4162,7 @@ async def collect_videos(message: Message):
     # Шанс 15% для теста
     if random.random() < 0.15:
         try:
-            await maybe_send_random_meme(message.chat.id, trigger="video")
+            await maybe_send_random_meme(message.chat.id, trigger="video", target_user_id=message.from_user.id)
         except Exception as e:
             logger.warning(f"Failed to send random meme after video: {e}")
 
@@ -3960,7 +4207,7 @@ async def collect_audio(message: Message):
     # Шанс 15% для теста
     if random.random() < 0.15:
         try:
-            await maybe_send_random_meme(message.chat.id, trigger="audio")
+            await maybe_send_random_meme(message.chat.id, trigger="audio", target_user_id=message.from_user.id)
         except Exception as e:
             logger.warning(f"Failed to send random meme after audio: {e}")
 
@@ -4048,8 +4295,8 @@ AUDIO_COMMENTS = [
 ]
 
 
-async def maybe_send_random_meme(chat_id: int, trigger: str = "random"):
-    """Отправить случайный мем из коллекции (если есть)"""
+async def maybe_send_random_meme(chat_id: int, trigger: str = "random", target_user_id: int = None):
+    """Отправить случайный мем из коллекции (если есть). Комментарий персонализирован."""
     if not USE_POSTGRES:
         return
     
@@ -4063,6 +4310,14 @@ async def maybe_send_random_meme(chat_id: int, trigger: str = "random"):
         media_id = media['id']
         description = media.get('description', '')
         
+        # Получаем профиль пользователя для персонализации комментария
+        user_profile = {}
+        if target_user_id:
+            try:
+                user_profile = await get_user_profile_for_ai(target_user_id, "", "")
+            except:
+                pass
+        
         # Выбираем комментарий в зависимости от типа
         if file_type == "voice":
             comment = random.choice(VOICE_COMMENTS)
@@ -4074,6 +4329,29 @@ async def maybe_send_random_meme(chat_id: int, trigger: str = "random"):
             comment = random.choice(AUDIO_COMMENTS)
         else:
             comment = random.choice(MEME_COMMENTS)
+        
+        # Персонализированные добавки к комментарию (20% шанс)
+        if user_profile and random.random() < 0.20:
+            interests = user_profile.get('interests', [])
+            style = user_profile.get('communication_style', '')
+            
+            personalized_additions = []
+            
+            if 'gaming' in interests:
+                personalized_additions.append(" Для геймера — самое то.")
+            if 'crypto' in interests:
+                personalized_additions.append(" Криптанам посвящается.")
+            if 'memes' in interests:
+                personalized_additions.append(" Знаток мемов оценит.")
+            if style == 'humorous':
+                personalized_additions.append(" Шутнику должно зайти.")
+            if style == 'toxic':
+                personalized_additions.append(" Для токсика в самый раз.")
+            if user_profile.get('is_night_owl'):
+                personalized_additions.append(" Ночным совам привет.")
+            
+            if personalized_additions:
+                comment += random.choice(personalized_additions)
         
         # Отправляем в зависимости от типа
         if file_type == "photo":

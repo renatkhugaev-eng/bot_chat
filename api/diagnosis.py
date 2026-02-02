@@ -212,6 +212,57 @@ class handler(BaseHTTPRequestHandler):
             name = data.get("name", "Аноним")
             username = data.get("username", "")
             context = data.get("context", "Сообщений нет, но диагноз и так очевиден — клинический мудак")
+            profile = data.get("profile", {})
+            
+            # Формируем профильную информацию для персонализации
+            profile_info = ""
+            if profile:
+                profile_parts = []
+                
+                # Пол
+                gender = profile.get('gender', '')
+                if gender and gender != 'unknown':
+                    profile_parts.append(f"Пол: {gender}")
+                
+                # Активность
+                activity = profile.get('activity_level', '')
+                activity_map = {
+                    'hyperactive': 'ГИПЕРАКТИВНЫЙ ГРАФОМАН',
+                    'very_active': 'Очень активный болтун',
+                    'lurker': 'Тихушник-молчун'
+                }
+                if activity in activity_map:
+                    profile_parts.append(f"Активность: {activity_map[activity]}")
+                
+                # Стиль общения
+                style = profile.get('communication_style', '')
+                style_map = {
+                    'toxic': 'ТОКСИЧНЫЙ КАК ЯД',
+                    'negative': 'Вечно ноет',
+                    'humorous': 'Думает что шутник'
+                }
+                if style in style_map:
+                    profile_parts.append(f"Характер: {style_map[style]}")
+                
+                # Токсичность
+                toxicity = profile.get('toxicity', 0)
+                if toxicity > 0.3:
+                    profile_parts.append(f"Токсичность: {toxicity:.0%}")
+                
+                # Режим
+                if profile.get('is_night_owl'):
+                    profile_parts.append("Режим: НОЧНАЯ СОВА (живёт по ночам)")
+                
+                # Интересы
+                interests = profile.get('interests_readable', []) or profile.get('interests', [])
+                if interests:
+                    profile_parts.append(f"Интересы: {', '.join(interests[:4])}")
+                
+                if profile_parts:
+                    profile_info = "\n\n🔬 АНАМНЕЗ ИЗ ПРОФИЛЯ:\n" + "\n".join(f"• {p}" for p in profile_parts)
+            
+            # Добавляем профиль к контексту
+            full_context = context + profile_info
             
             # РАНДОМИЗАЦИЯ для разнообразия
             clinic = random.choice(CLINICS)
@@ -219,6 +270,18 @@ class handler(BaseHTTPRequestHandler):
             focus_category = random.choice(DIAGNOSIS_CATEGORIES)
             special_reference = random.choice(SPECIAL_REFERENCES)
             current_date = datetime.now().strftime("%d.%m.%Y")
+            
+            # Выбираем категорию на основе профиля если есть
+            if profile:
+                interests = profile.get('interests', [])
+                if 'crypto' in interests:
+                    focus_category = "ФИНАНСОВЫЕ: кредитофилия, нищебродство гордое, шопоголизм на последние, криптобредовость, синдром айфона в кредит"
+                elif 'gaming' in interests:
+                    focus_category = "ИНТЕРНЕТ-ЗАВИСИМОСТИ: дотозависимость, тиктокомания, редит-синдром, порнозависимость латентная, скроллинг патологический"
+                elif 'politics' in interests:
+                    focus_category = "СОЦИАЛЬНЫЕ РАССТРОЙСТВА: ЧСВ-гипертрофия, нытьё хроническое, выёбистость компенсаторная, понты на кредит, синдром эксперта диванного"
+                elif profile.get('communication_style') == 'negative':
+                    focus_category = "ЭМОЦИОНАЛЬНЫЕ: депрессушка районная, тревожность от жизни, истерика бытовая, апатия к успеху, меланхолия офисного планктона"
             
             prompt = SYSTEM_PROMPT.format(
                 clinic_name=clinic["name"],
@@ -232,7 +295,7 @@ class handler(BaseHTTPRequestHandler):
                 name=name,
                 username=f"@{username}" if username else "нет",
                 date=current_date,
-                context=context
+                context=full_context
             )
             
             api_key = os.environ.get("VERCEL_AI_GATEWAY_KEY", "").strip()
