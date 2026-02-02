@@ -4116,6 +4116,73 @@ def get_contextual_reply(text: str) -> str:
     return random.choice(BOT_REPLIES_TEXT)
 
 
+async def transcribe_voice_message(message: Message) -> str:
+    """Транскрибирует голосовое сообщение через Whisper API"""
+    transcribe_api_url = os.getenv("TRANSCRIBE_API_URL")
+    if not transcribe_api_url:
+        return ""
+    
+    try:
+        voice = message.voice or message.video_note
+        if not voice:
+            return ""
+        
+        # Скачиваем голосовое
+        file = await bot.get_file(voice.file_id)
+        voice_bytes = await bot.download_file(file.file_path)
+        
+        import base64
+        audio_base64 = base64.b64encode(voice_bytes.read()).decode('utf-8')
+        
+        # Определяем формат
+        file_format = "ogg" if message.voice else "mp4"
+        
+        # Отправляем на транскрипцию
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                transcribe_api_url,
+                json={
+                    "audio_base64": audio_base64,
+                    "format": file_format
+                },
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    text = result.get("text", "")
+                    if text:
+                        logger.info(f"Voice transcribed: {text[:50]}...")
+                        return text
+    except Exception as e:
+        logger.warning(f"Failed to transcribe voice: {e}")
+    
+    return ""
+
+
+async def analyze_voice_for_reply(message: Message) -> str:
+    """Анализирует голосовое сообщение и генерирует грубый ответ"""
+    # Пробуем транскрибировать
+    transcription = await transcribe_voice_message(message)
+    
+    if transcription:
+        # Если удалось транскрибировать - отвечаем по существу
+        voice_type = "голосовом" if message.voice else "кружочке"
+        
+        # Генерируем ответ на основе текста
+        response = await generate_rude_response_to_content(voice_type, transcription)
+        if response:
+            return response
+        
+        # Фоллбэк - используем контекстный анализ текста
+        return get_contextual_reply(transcription)
+    
+    # Если не удалось транскрибировать - стандартный ответ
+    if message.voice:
+        return random.choice(BOT_REPLIES_VOICE)
+    else:
+        return random.choice(BOT_REPLIES_VIDEO_NOTE)
+
+
 async def analyze_photo_for_reply(message: Message) -> str:
     """Анализирует фото через Vision API и генерирует грубый ответ"""
     vision_api_url = os.getenv("VISION_API_URL")
@@ -4297,8 +4364,11 @@ async def handle_bot_mention_or_reply(message: Message) -> bool:
         else:
             response = random.choice(BOT_REPLIES_GIF)
             
-    elif message.voice:
-        response = random.choice(BOT_REPLIES_VOICE)
+    elif message.voice or message.video_note:
+        # Транскрибируем и анализируем голосовое/кружочек
+        response = await analyze_voice_for_reply(message)
+        media_type = "voice" if message.voice else "video_note"
+        logger.info(f"BOT REPLY: Analyzed {media_type} content")
         
     elif message.video:
         caption = message.caption or ""
@@ -4306,9 +4376,6 @@ async def handle_bot_mention_or_reply(message: Message) -> bool:
             response = await generate_rude_response_to_content("видео", caption)
         else:
             response = random.choice(BOT_REPLIES_VIDEO)
-            
-    elif message.video_note:
-        response = random.choice(BOT_REPLIES_VIDEO_NOTE)
         
     elif message.text:
         # Глубокий анализ текста
