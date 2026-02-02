@@ -1,5 +1,6 @@
 """
-Vercel Serverless Function для транскрипции голосовых сообщений через OpenAI Whisper
+Vercel Serverless Function для транскрипции голосовых сообщений
+Поддерживает: Groq Whisper (бесплатно!) или OpenAI Whisper
 """
 import json
 import os
@@ -7,9 +8,10 @@ import base64
 from http.server import BaseHTTPRequestHandler
 import urllib.request
 import urllib.error
-import tempfile
 
 
+# Groq быстрее и бесплатный!
+GROQ_API_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 OPENAI_API_URL = "https://api.openai.com/v1/audio/transcriptions"
 
 
@@ -27,9 +29,20 @@ class handler(BaseHTTPRequestHandler):
                 self._send_error(400, "No audio_base64 provided")
                 return
             
-            api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-            if not api_key:
-                self._send_error(500, "OPENAI_API_KEY not configured")
+            # Приоритет: Groq (бесплатный) -> OpenAI
+            groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+            openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+            
+            if groq_key:
+                api_url = GROQ_API_URL
+                api_key = groq_key
+                model = "whisper-large-v3"  # Лучшая модель Groq
+            elif openai_key:
+                api_url = OPENAI_API_URL
+                api_key = openai_key
+                model = "whisper-1"
+            else:
+                self._send_error(500, "No API key configured (GROQ_API_KEY or OPENAI_API_KEY)")
                 return
             
             # Декодируем аудио из base64
@@ -49,7 +62,7 @@ class handler(BaseHTTPRequestHandler):
             body += (
                 f"\r\n--{boundary}\r\n"
                 f'Content-Disposition: form-data; name="model"\r\n\r\n'
-                f"whisper-1\r\n"
+                f"{model}\r\n"
                 f"--{boundary}\r\n"
                 f'Content-Disposition: form-data; name="language"\r\n\r\n'
                 f"ru\r\n"
@@ -57,7 +70,7 @@ class handler(BaseHTTPRequestHandler):
             ).encode('utf-8')
             
             req = urllib.request.Request(
-                OPENAI_API_URL,
+                api_url,
                 data=body,
                 headers={
                     'Content-Type': f'multipart/form-data; boundary={boundary}',
@@ -78,7 +91,7 @@ class handler(BaseHTTPRequestHandler):
             
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8') if e.fp else str(e)
-            self._send_error(500, f"OpenAI API error: {e.code} - {error_body}")
+            self._send_error(500, f"Whisper API error: {e.code} - {error_body}")
             
         except Exception as e:
             self._send_error(500, str(e))
