@@ -23,6 +23,15 @@
     },
     "api/ventilate.py": {
       "maxDuration": 60
+    },
+    "api/dream.py": {
+      "maxDuration": 60
+    },
+    "api/tts.py": {
+      "maxDuration": 60
+    },
+    "api/transcribe.py": {
+      "maxDuration": 60
     }
   }
 }

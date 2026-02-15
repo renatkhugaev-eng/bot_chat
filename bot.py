@@ -2649,7 +2649,12 @@ async def cmd_dream(message: Message):
     
     try:
         # Вызываем API
-        dream_url = DREAM_API_URL or VERCEL_API_URL.replace("/summary", "/dream")
+        # Формируем URL для dream API
+        dream_url = DREAM_API_URL
+        if not dream_url:
+            # Берём базовый URL и добавляем /dream
+            base_url = VERCEL_API_URL.rsplit('/api/', 1)[0] if '/api/' in VERCEL_API_URL else VERCEL_API_URL.rsplit('/', 1)[0]
+            dream_url = f"{base_url}/api/dream"
         
         session = await get_http_session()
         async with session.post(
