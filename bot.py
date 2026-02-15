@@ -3232,12 +3232,83 @@ def detect_gender_simple(name: str) -> str:
     return "мужской"
 
 
+async def _save_text_message(message: Message):
+    """Вспомогательная функция для сохранения текстового сообщения в БД"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    # Сохраняем информацию о чате
+    await save_chat_info(
+        chat_id=chat_id,
+        title=message.chat.title,
+        username=message.chat.username,
+        chat_type=message.chat.type
+    )
+    
+    # Сохраняем сообщение
+    reply_to_user_id = None
+    reply_to_first_name = None
+    reply_to_username = None
+    
+    if message.reply_to_message and message.reply_to_message.from_user:
+        reply_to_user_id = message.reply_to_message.from_user.id
+        reply_to_first_name = message.reply_to_message.from_user.first_name
+        reply_to_username = message.reply_to_message.from_user.username
+    
+    await save_chat_message(
+        chat_id=chat_id,
+        user_id=user_id,
+        username=message.from_user.username or "",
+        first_name=message.from_user.first_name or "Аноним",
+        message_text=message.text[:500] if message.text else "",
+        message_type="text",
+        reply_to_user_id=reply_to_user_id,
+        reply_to_first_name=reply_to_first_name,
+        reply_to_username=reply_to_username
+    )
+    
+    # Обновляем профиль пользователя
+    if USE_POSTGRES and message.text:
+        try:
+            await update_user_profile_comprehensive(
+                user_id=user_id,
+                chat_id=chat_id,
+                message_text=message.text,
+                timestamp=int(time.time()),
+                first_name=message.from_user.first_name or "",
+                username=message.from_user.username or "",
+                reply_to_user_id=reply_to_user_id
+            )
+        except Exception as e:
+            logger.debug(f"Profile update error: {e}")
+    
+    # Пассивный опыт для игроков
+    player = await get_player(user_id, chat_id)
+    if player and player.get('player_class'):
+        can_get_exp, _ = check_cooldown(user_id, chat_id, "message_exp", 30)
+        if can_get_exp:
+            exp_gain = random.randint(1, 3)
+            money_gain = random.randint(0, 2)
+            await update_player_stats(user_id, chat_id, experience=f"+{exp_gain}", money=f"+{money_gain}")
+
+
 @router.message(F.text, ~F.text.startswith("/"))
 async def who_is_this_handler(message: Message):
-    """Обработчик 'это кто?' с реплаем или упоминанием"""
+    """Обработчик 'это кто?' с реплаем или упоминанием + общая обработка текста"""
     if message.chat.type == "private":
         return
     
+    # === ОБЩАЯ ОБРАБОТКА ВСЕХ ТЕКСТОВЫХ СООБЩЕНИЙ ===
+    # Проверяем на кринж (до проверки триггеров!)
+    await check_cringe_and_react(message)
+    
+    # Проверяем упоминание бота
+    await check_bot_mention(message)
+    
+    # Сохраняем сообщение в БД (делаем это здесь, т.к. этот хэндлер ловит все текстовые)
+    await _save_text_message(message)
+    
+    # === СПЕЦИФИЧНАЯ ЛОГИКА "ЭТО КТО?" ===
     text_lower = message.text.lower().strip()
     
     # Проверяем триггер
@@ -3713,9 +3784,6 @@ async def check_cringe_and_react(message: Message) -> bool:
     """
     if not message.text or len(message.text) < 10:
         return False
-    
-    # DEBUG: Логируем что функция вызывается
-    logger.info(f"CRINGE_CHECK: Checking message '{message.text[:40]}...' from user {message.from_user.id}")
     
     chat_id = message.chat.id
     user_id = message.from_user.id
@@ -4517,87 +4585,6 @@ async def check_bot_mention(message: Message) -> bool:
         return True
     
     return False
-
-
-@router.message(F.text, ~F.text.startswith("/"))
-async def collect_messages_and_exp(message: Message):
-    """Сбор всех сообщений + пассивный опыт (кроме команд)"""
-    if message.chat.type == "private":
-        return
-    
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    
-    # DEBUG: Логируем что хэндлер вызывается
-    logger.info(f"MSG_HANDLER: Got text message from {user_id} in chat {chat_id}: '{message.text[:30] if message.text else 'None'}...'")
-    
-    # Проверяем упоминание бота и отвечаем
-    await check_bot_mention(message)
-    
-    # Проверяем на кринж и реагируем (шанс 60-85% в зависимости от профиля)
-    await check_cringe_and_react(message)
-    
-    # Сохраняем информацию о чате
-    await save_chat_info(
-        chat_id=chat_id,
-        title=message.chat.title,
-        username=message.chat.username,
-        chat_type=message.chat.type
-    )
-    
-    # Сохраняем сообщение для аналитики
-    reply_to_user_id = None
-    reply_to_first_name = None
-    reply_to_username = None
-    
-    if message.reply_to_message and message.reply_to_message.from_user:
-        reply_to_user_id = message.reply_to_message.from_user.id
-        reply_to_first_name = message.reply_to_message.from_user.first_name
-        reply_to_username = message.reply_to_message.from_user.username
-    
-    await save_chat_message(
-        chat_id=chat_id,
-        user_id=user_id,
-        username=message.from_user.username or "",
-        first_name=message.from_user.first_name or "Аноним",
-        message_text=message.text[:500] if message.text else "",  # Лимит 500 символов
-        message_type="text",
-        reply_to_user_id=reply_to_user_id,
-        reply_to_first_name=reply_to_first_name,
-        reply_to_username=reply_to_username
-    )
-    
-    # Обновляем профиль пользователя комплексно (пол, тональность, интересы, активность)
-    if USE_POSTGRES and message.text:
-        try:
-            await update_user_profile_comprehensive(
-                user_id=user_id,
-                chat_id=chat_id,
-                message_text=message.text,
-                timestamp=int(time.time()),
-                first_name=message.from_user.first_name or "",
-                username=message.from_user.username or "",
-                reply_to_user_id=reply_to_user_id
-            )
-        except Exception as e:
-            logger.debug(f"Profile update error: {e}")
-    
-    # Пассивный опыт для игроков
-    player = await get_player(user_id, chat_id)
-    if not player or not player['player_class']:
-        return
-    
-    # Опыт за сообщения с кулдауном 30 сек
-    can_get_exp, _ = check_cooldown(user_id, chat_id, "message_exp", 30)
-    if can_get_exp:
-        exp_gain = random.randint(1, 3)
-        money_gain = random.randint(0, 2)
-        
-        await update_player_stats(
-            user_id, chat_id,
-            experience=f"+{exp_gain}",
-            money=f"+{money_gain}"
-        )
 
 
 @router.message(F.sticker)
