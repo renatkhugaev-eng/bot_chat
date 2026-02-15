@@ -99,10 +99,10 @@ else:
     async def analyze_and_update_user_gender(user_id, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
     async def update_user_gender_incrementally(user_id, new_message, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
     async def update_user_profile_comprehensive(user_id, chat_id, message_text, timestamp, first_name="", username="", reply_to_user_id=None): pass
-    async def get_user_full_profile(user_id): return None
-    async def get_user_activity_report(user_id): return {'error': 'PostgreSQL required'}
+    async def get_user_full_profile(user_id, chat_id): return None
+    async def get_user_activity_report(user_id, chat_id): return {'error': 'PostgreSQL required'}
     async def get_chat_social_graph(chat_id): return []
-    async def get_user_profile_for_ai(user_id, first_name="", username=""): return {'user_id': user_id, 'name': first_name or username or 'Аноним', 'gender': 'unknown', 'description': '', 'traits': [], 'interests': [], 'social': {}}
+    async def get_user_profile_for_ai(user_id, chat_id, first_name="", username=""): return {'user_id': user_id, 'name': first_name or username or 'Аноним', 'gender': 'unknown', 'description': '', 'traits': [], 'interests': [], 'social': {}}
     async def get_enriched_chat_data_for_ai(chat_id, hours=5): return {'profiles': [], 'profiles_text': '', 'social': {}, 'social_text': ''}
     async def get_chat_social_data_for_ai(chat_id): return {'relationships': [], 'conflicts': [], 'friendships': [], 'description': ''}
     async def find_user_in_chat(chat_id, search_term): return None
@@ -1085,9 +1085,9 @@ async def cmd_psychoanalysis(message: Message):
     processing = await message.answer(f"🧠 Анализирую личность {target_name}...")
     
     try:
-        # Получаем полный профиль
-        profile = await get_user_profile_for_ai(target_id, target_name, target_username or "")
-        full_profile = await get_user_full_profile(target_id)
+        # Получаем полный профиль (per-chat!)
+        profile = await get_user_profile_for_ai(target_id, message.chat.id, target_name, target_username or "")
+        full_profile = await get_user_full_profile(target_id, message.chat.id)
         
         if not full_profile or full_profile.get('total_messages', 0) < 10:
             await processing.edit_text(
@@ -1759,11 +1759,11 @@ async def cmd_diagnosis(message: Message):
         context, messages_found = await gather_user_context(chat_id, target_user_id) if target_user_id else ("Пациент молчалив — это симптом", 0)
         logger.info(f"Diagnosis: {target_name}, {messages_found} msgs")
         
-        # Получаем профиль пользователя для персонализации
+        # Получаем профиль пользователя для персонализации (per-chat!)
         user_profile = {}
         if USE_POSTGRES and target_user_id:
             try:
-                user_profile = await get_user_profile_for_ai(target_user_id, target_name, target_username or "")
+                user_profile = await get_user_profile_for_ai(target_user_id, message.chat.id, target_name, target_username or "")
             except Exception as e:
                 logger.debug(f"Could not get profile for diagnosis: {e}")
         
@@ -2046,10 +2046,10 @@ async def cmd_suck(message: Message):
     if not target_name:
         target_name = "Эй ты"
     
-    # Получаем профиль для персонализации
+    # Получаем профиль для персонализации (per-chat!)
     if USE_POSTGRES and target_id:
         try:
-            target_profile = await get_user_profile_for_ai(target_id, target_name, target_username or "")
+            target_profile = await get_user_profile_for_ai(target_id, message.chat.id, target_name, target_username or "")
         except Exception as e:
             logger.debug(f"Could not get profile for suck: {e}")
     
@@ -2287,8 +2287,8 @@ async def cmd_ventilate(message: Message):
             messages = await get_user_messages(chat_id, victim_id, limit=30)
             victim_messages = [m.get('text', '') for m in messages if m.get('text')]
             
-            # Получаем полный профиль жертвы для персонализации
-            victim_profile = await get_user_profile_for_ai(victim_id, victim_name, victim_username or "")
+            # Получаем полный профиль жертвы для персонализации (per-chat!)
+            victim_profile = await get_user_profile_for_ai(victim_id, chat_id, victim_name, victim_username or "")
     except Exception as e:
         logger.warning(f"Could not get victim data: {e}")
     
@@ -3215,8 +3215,8 @@ async def who_is_this_handler(message: Message):
     
     if USE_POSTGRES and target_id:
         try:
-            # Получаем полный профиль
-            target_profile = await get_user_profile_for_ai(target_id, target_name, target_username or "")
+            # Получаем полный профиль (per-chat!)
+            target_profile = await get_user_profile_for_ai(target_id, message.chat.id, target_name, target_username or "")
             
             # Пол из профиля
             if target_profile.get('gender') and target_profile['gender'] != 'unknown':
@@ -3656,12 +3656,13 @@ async def check_cringe_and_react(message: Message) -> bool:
     if time.time() - last_reaction < CRINGE_COOLDOWN_SECONDS:
         return False
     
-    # Получаем профиль пользователя для персонализации шанса
+    # Получаем профиль пользователя для персонализации шанса (per-chat!)
     user_profile = {}
     if USE_POSTGRES:
         try:
             user_profile = await get_user_profile_for_ai(
-                user_id, 
+                user_id,
+                message.chat.id,  # per-chat!
                 message.from_user.first_name or "", 
                 message.from_user.username or ""
             )
@@ -4948,11 +4949,11 @@ async def maybe_send_random_meme(chat_id: int, trigger: str = "random", target_u
         media_id = media['id']
         description = media.get('description', '')
         
-        # Получаем профиль пользователя для персонализации комментария
+        # Получаем профиль пользователя для персонализации комментария (per-chat!)
         user_profile = {}
         if target_user_id:
             try:
-                user_profile = await get_user_profile_for_ai(target_user_id, "", "")
+                user_profile = await get_user_profile_for_ai(target_user_id, chat_id, "", "")
             except:
                 pass
         
@@ -5875,6 +5876,68 @@ async def cmd_migrate_users(message: Message):
     except Exception as e:
         logger.error(f"Migration error: {e}")
         await message.answer(f"❌ Ошибка миграции: {e}")
+
+
+@dp.message(Command("admin"))
+async def admin_rebuild_profiles(message: Message):
+    """Миграция профилей на per-chat архитектуру"""
+    if message.chat.type != "private" or not is_admin(message.from_user.id):
+        return
+    
+    args = message.text.split()
+    if len(args) < 2 or args[1] != "rebuild_profiles":
+        return
+    
+    if not USE_POSTGRES:
+        await message.answer("❌ Миграция доступна только с PostgreSQL")
+        return
+    
+    try:
+        from database_postgres import rebuild_all_profiles, rebuild_profiles_from_messages
+        
+        # Проверяем, указан ли конкретный чат
+        if len(args) >= 3:
+            try:
+                target_chat_id = int(args[2])
+                processing = await message.answer(
+                    f"🔄 Пересобираю профили для чата {target_chat_id}...\n\n"
+                    "Это создаст per-chat профили из существующих сообщений."
+                )
+                
+                results = await rebuild_profiles_from_messages(target_chat_id)
+                
+                await processing.edit_text(
+                    f"✅ *Пересборка профилей завершена!*\n\n"
+                    f"👥 Пользователей обработано: {results.get('users_processed', 0):,}\n"
+                    f"📝 Профилей создано: {results.get('profiles_created', 0):,}\n"
+                    f"💬 Сообщений проанализировано: {results.get('messages_analyzed', 0):,}\n"
+                    f"❌ Ошибок: {len(results.get('errors', []))}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except ValueError:
+                await message.answer("❌ Неверный chat_id")
+        else:
+            # Пересборка для всех чатов
+            processing = await message.answer(
+                "🔄 Пересобираю профили для ВСЕХ чатов...\n\n"
+                "⚠️ Это может занять долгое время!\n"
+                "Создаются per-chat профили из существующих сообщений."
+            )
+            
+            results = await rebuild_all_profiles()
+            
+            await processing.edit_text(
+                f"✅ *Глобальная пересборка профилей завершена!*\n\n"
+                f"🏠 Чатов обработано: {results.get('chats_processed', 0):,}\n"
+                f"👥 Пользователей: {results.get('total_users', 0):,}\n"
+                f"📝 Профилей создано: {results.get('total_profiles', 0):,}\n"
+                f"💬 Сообщений: {results.get('total_messages', 0):,}\n"
+                f"❌ Ошибок: {len(results.get('errors', []))}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    except Exception as e:
+        logger.error(f"Profile rebuild error: {e}")
+        await message.answer(f"❌ Ошибка пересборки профилей: {e}")
 
 
 # ==================== VK ИНТЕГРАЦИЯ ====================

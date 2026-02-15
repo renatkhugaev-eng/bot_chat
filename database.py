@@ -12,7 +12,7 @@ DATABASE_PATH = "guild_of_crime.db"
 async def init_db():
     """Инициализация базы данных с полной схемой"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        # Таблица сообщений чата (для сводок)
+        # Таблица сообщений чата (для сводок) - синхронизировано с PostgreSQL
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,9 +27,19 @@ async def init_db():
                 reply_to_username TEXT,
                 sticker_emoji TEXT,
                 image_description TEXT,
+                file_id TEXT,
+                file_unique_id TEXT,
+                voice_transcription TEXT,
                 created_at INTEGER NOT NULL
             )
         """)
+        
+        # Миграция: добавляем колонки file_id, file_unique_id, voice_transcription если их нет
+        for col_name in ['file_id', 'file_unique_id', 'voice_transcription']:
+            try:
+                await db.execute(f"ALTER TABLE chat_messages ADD COLUMN {col_name} TEXT")
+            except:
+                pass  # Колонка уже существует
         
         # Индекс для быстрого поиска по времени
         await db.execute("""
@@ -401,23 +411,23 @@ async def save_chat_message(
     sticker_emoji: str = None,
     image_description: str = None,
     file_id: str = None,
-    file_unique_id: str = None
+    file_unique_id: str = None,
+    voice_transcription: str = None
 ):
-    """Сохранить сообщение чата для аналитики"""
+    """Сохранить сообщение чата для аналитики - синхронизировано с PostgreSQL"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("""
             INSERT INTO chat_messages 
             (chat_id, user_id, username, first_name, message_text, message_type,
              reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, 
-             image_description, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             image_description, file_id, file_unique_id, voice_transcription, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             chat_id, user_id, username, first_name, message_text, message_type,
             reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji,
-            image_description, int(time.time())
+            image_description, file_id, file_unique_id, voice_transcription, int(time.time())
         ))
         await db.commit()
-        # Note: file_id и file_unique_id игнорируются в SQLite версии
 
 
 async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]]:
@@ -485,9 +495,10 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         """, (chat_id, since_time)) as cursor:
             message_types = {row['message_type']: row['count'] for row in await cursor.fetchall()}
         
-        # Кто с кем больше общался (reply connections — с username!)
+        # Кто с кем больше общался (reply connections — ИСПРАВЛЕНО: добавлены user_id)
         async with db.execute("""
-            SELECT first_name, username, reply_to_first_name, reply_to_username, COUNT(*) as replies
+            SELECT user_id, reply_to_user_id, first_name, username, 
+                   reply_to_first_name, reply_to_username, COUNT(*) as replies
             FROM chat_messages 
             WHERE chat_id = ? AND created_at >= ? AND reply_to_user_id IS NOT NULL
             GROUP BY user_id, reply_to_user_id, first_name, username, reply_to_first_name, reply_to_username
@@ -507,12 +518,14 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         """, (chat_id, since_time)) as cursor:
             hourly_activity = {row['hour']: row['count'] for row in await cursor.fetchall()}
         
-        # Выборка последних сообщений (с image_description для фото!)
+        # Выборка последних сообщений (включая voice с транскрипцией)
         async with db.execute("""
             SELECT first_name, username, message_text, message_type, sticker_emoji,
-                   reply_to_first_name, reply_to_username, image_description, created_at
+                   reply_to_first_name, reply_to_username, image_description, 
+                   voice_transcription, created_at
             FROM chat_messages 
-            WHERE chat_id = ? AND created_at >= ? AND message_type IN ('text', 'photo')
+            WHERE chat_id = ? AND created_at >= ? 
+            AND (message_type IN ('text', 'photo') OR (message_type = 'voice' AND voice_transcription IS NOT NULL))
             ORDER BY created_at DESC
             LIMIT 50
         """, (chat_id, since_time)) as cursor:
@@ -730,3 +743,80 @@ async def full_cleanup() -> Dict[str, int]:
     results['memories_deleted'] = await cleanup_expired_memories()
     
     return results
+
+
+# ==================== ПРОФИЛИРОВАНИЕ (STUB для SQLite) ====================
+# Эти функции не реализованы в SQLite версии, используются только в PostgreSQL
+
+async def update_user_profile_comprehensive(
+    user_id: int,
+    chat_id: int,
+    message_text: str,
+    timestamp: int,
+    first_name: str = "",
+    username: str = "",
+    reply_to_user_id: int = None
+):
+    """Stub для SQLite - профилирование не поддерживается"""
+    pass
+
+
+async def get_user_full_profile(user_id: int, chat_id: int) -> Optional[Dict[str, Any]]:
+    """Stub для SQLite - профилирование не поддерживается"""
+    return None
+
+
+async def get_user_profile_for_ai(user_id: int, chat_id: int, first_name: str = "", username: str = "") -> Dict[str, Any]:
+    """Stub для SQLite - возвращает минимальный профиль"""
+    return {
+        'user_id': user_id,
+        'name': first_name or username or 'Аноним',
+        'username': username,
+        'gender': 'unknown',
+        'description': f"{first_name or username or 'Аноним'} — информация недоступна (SQLite)",
+        'traits': [],
+        'interests': [],
+        'social': {}
+    }
+
+
+async def get_enriched_chat_data_for_ai(chat_id: int, hours: int = 5) -> Dict[str, Any]:
+    """Stub для SQLite - возвращает минимальные данные"""
+    return {
+        'profiles': [],
+        'profiles_text': "Профилирование недоступно (SQLite)",
+        'social': {'relationships': [], 'conflicts': [], 'friendships': [], 'description': ''},
+        'social_text': "Социальные связи недоступны (SQLite)"
+    }
+
+
+async def get_chat_users_profiles_for_ai(chat_id: int, user_ids: List[int] = None) -> List[Dict[str, Any]]:
+    """Stub для SQLite - профилирование не поддерживается"""
+    return []
+
+
+async def get_chat_social_data_for_ai(chat_id: int) -> Dict[str, Any]:
+    """Stub для SQLite - профилирование не поддерживается"""
+    return {
+        'relationships': [],
+        'conflicts': [],
+        'friendships': [],
+        'description': "Социальные связи недоступны (SQLite)"
+    }
+
+
+async def update_or_create_chat_user(
+    chat_id: int,
+    user_id: int,
+    first_name: str = None,
+    last_name: str = None,
+    username: str = None,
+    is_bot: bool = False
+):
+    """Stub для SQLite - chat_users не поддерживается"""
+    pass
+
+
+async def find_user_in_chat(chat_id: int, search_term: str) -> Optional[Dict[str, Any]]:
+    """Stub для SQLite - возвращает None"""
+    return None

@@ -347,10 +347,41 @@ async def init_db():
             ON chat_media(chat_id, file_type, created_at DESC)
         """)
         
-        # Таблица профилей пользователей (глобальное определение пола и характеристик)
+        # ========== МИГРАЦИЯ user_profiles на PER-CHAT ==========
+        # Проверяем структуру существующей таблицы user_profiles
+        # Если она существует с user_id PRIMARY KEY (старая версия), пересоздаём
+        try:
+            existing_pk = await conn.fetchval("""
+                SELECT COUNT(*) FROM information_schema.table_constraints tc
+                JOIN information_schema.constraint_column_usage ccu USING (constraint_name, table_schema)
+                WHERE tc.table_name = 'user_profiles' 
+                AND tc.constraint_type = 'PRIMARY KEY'
+                AND ccu.column_name = 'chat_id'
+            """)
+            
+            if existing_pk == 0:
+                # Старая структура без chat_id в PRIMARY KEY - нужно пересоздать
+                logger.info("Миграция: пересоздание user_profiles для per-chat архитектуры...")
+                
+                # Сохраняем старые данные во временную таблицу
+                await conn.execute("DROP TABLE IF EXISTS user_profiles_old CASCADE")
+                
+                # Проверяем существует ли таблица
+                table_exists = await conn.fetchval("""
+                    SELECT EXISTS (SELECT FROM pg_tables WHERE tablename = 'user_profiles')
+                """)
+                
+                if table_exists:
+                    await conn.execute("ALTER TABLE user_profiles RENAME TO user_profiles_old")
+                    logger.info("Миграция: старая таблица user_profiles переименована в user_profiles_old")
+        except Exception as e:
+            logger.debug(f"Проверка миграции user_profiles: {e}")
+        
+        # Таблица профилей пользователей (PER-CHAT! Каждый чат имеет свой профиль)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_profiles (
-                user_id BIGINT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                chat_id BIGINT NOT NULL,
                 -- Базовая информация
                 first_name TEXT,
                 username TEXT,
@@ -359,7 +390,7 @@ async def init_db():
                 gender_confidence REAL DEFAULT 0.0,
                 gender_female_score INTEGER DEFAULT 0,
                 gender_male_score INTEGER DEFAULT 0,
-                -- Активность
+                -- Активность в этом чате
                 total_messages INTEGER DEFAULT 0,
                 messages_analyzed INTEGER DEFAULT 0,
                 first_seen_at BIGINT,
@@ -370,29 +401,30 @@ async def init_db():
                 peak_hour INTEGER,
                 is_night_owl BOOLEAN DEFAULT FALSE,
                 is_early_bird BOOLEAN DEFAULT FALSE,
-                -- Тональность и эмоции
+                -- Тональность и эмоции в этом чате
                 sentiment_score REAL DEFAULT 0.0,
                 positive_messages INTEGER DEFAULT 0,
                 negative_messages INTEGER DEFAULT 0,
                 neutral_messages INTEGER DEFAULT 0,
                 emoji_usage_rate REAL DEFAULT 0.0,
                 avg_message_length REAL DEFAULT 0.0,
-                -- Характер общения
+                -- Характер общения в этом чате
                 toxicity_score REAL DEFAULT 0.0,
                 humor_score REAL DEFAULT 0.0,
                 activity_level TEXT DEFAULT 'normal',
                 communication_style TEXT DEFAULT 'neutral',
-                -- Интересы (топ тем)
+                -- Интересы (топ тем) в этом чате
                 interests JSONB DEFAULT '[]',
                 frequent_words JSONB DEFAULT '[]',
-                -- Социальные связи
+                -- Социальные связи (в этом чате)
                 friends JSONB DEFAULT '[]',
                 frequent_replies_to JSONB DEFAULT '[]',
                 frequent_replies_from JSONB DEFAULT '[]',
                 -- Метаданные
                 profile_version INTEGER DEFAULT 1,
                 created_at BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL
+                updated_at BIGINT NOT NULL,
+                PRIMARY KEY (user_id, chat_id)
             )
         """)
         
@@ -431,17 +463,21 @@ async def init_db():
                 # Колонка уже существует или другая ошибка - пропускаем
                 pass
         
-        # Индексы для профилей
+        # Индексы для профилей (PER-CHAT)
         await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_user_profiles_gender 
-            ON user_profiles(detected_gender)
+            CREATE INDEX IF NOT EXISTS idx_user_profiles_chat 
+            ON user_profiles(chat_id, user_id)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_profiles_gender_chat 
+            ON user_profiles(chat_id, detected_gender)
         """)
         
         # Проверяем наличие колонки activity_level перед созданием индекса
         try:
             await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_user_profiles_activity
-                ON user_profiles(activity_level, last_seen_at DESC)
+                CREATE INDEX IF NOT EXISTS idx_user_profiles_activity_chat
+                ON user_profiles(chat_id, activity_level, last_seen_at DESC)
             """)
         except Exception as e:
             logger.warning(f"Could not create activity index: {e}")
@@ -490,21 +526,47 @@ async def init_db():
             ON user_interactions(chat_id, user_id, target_user_id)
         """)
         
-        # Таблица тематических интересов
+        # ========== МИГРАЦИЯ user_interests на PER-CHAT ==========
+        try:
+            # Проверяем есть ли chat_id в UNIQUE constraint
+            existing_constraint = await conn.fetchval("""
+                SELECT COUNT(*) FROM information_schema.constraint_column_usage
+                WHERE table_name = 'user_interests' 
+                AND constraint_name LIKE '%unique%'
+                AND column_name = 'chat_id'
+            """)
+            
+            if existing_constraint == 0:
+                # Старая структура - пересоздаём
+                logger.info("Миграция: пересоздание user_interests для per-chat архитектуры...")
+                
+                table_exists = await conn.fetchval("""
+                    SELECT EXISTS (SELECT FROM pg_tables WHERE tablename = 'user_interests')
+                """)
+                
+                if table_exists:
+                    await conn.execute("DROP TABLE IF EXISTS user_interests_old CASCADE")
+                    await conn.execute("ALTER TABLE user_interests RENAME TO user_interests_old")
+                    logger.info("Миграция: старая таблица user_interests переименована в user_interests_old")
+        except Exception as e:
+            logger.debug(f"Проверка миграции user_interests: {e}")
+        
+        # Таблица тематических интересов (PER-CHAT!)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_interests (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
+                chat_id BIGINT NOT NULL,
                 topic TEXT NOT NULL,
                 score REAL DEFAULT 1.0,
                 message_count INTEGER DEFAULT 1,
                 last_mentioned_at BIGINT NOT NULL,
-                UNIQUE(user_id, topic)
+                UNIQUE(user_id, chat_id, topic)
             )
         """)
         await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_user_interests_user
-            ON user_interests(user_id, score DESC)
+            CREATE INDEX IF NOT EXISTS idx_user_interests_user_chat
+            ON user_interests(user_id, chat_id, score DESC)
         """)
     
     logger.info("✅ PostgreSQL database initialized!")
@@ -922,9 +984,10 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         """, chat_id, since_time)
         message_types = {row['message_type']: row['count'] for row in msg_types_rows}
         
-        # Reply pairs с username
+        # Reply pairs с username (ИСПРАВЛЕНО: добавлены user_id в SELECT)
         reply_pairs = await conn.fetch("""
-            SELECT first_name, username, reply_to_first_name, reply_to_username, COUNT(*) as replies
+            SELECT user_id, reply_to_user_id, first_name, username, 
+                   reply_to_first_name, reply_to_username, COUNT(*) as replies
             FROM chat_messages 
             WHERE chat_id = $1 AND created_at >= $2 AND reply_to_user_id IS NOT NULL
             GROUP BY user_id, reply_to_user_id, first_name, username, reply_to_first_name, reply_to_username
@@ -943,12 +1006,14 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         """, chat_id, since_time)
         hourly_activity = {row['hour']: row['count'] for row in hourly_rows}
         
-        # Последние сообщения
+        # Последние сообщения (включая voice с транскрипцией)
         recent_messages = await conn.fetch("""
             SELECT first_name, username, message_text, message_type, sticker_emoji,
-                   reply_to_first_name, reply_to_username, image_description, created_at
+                   reply_to_first_name, reply_to_username, image_description, 
+                   voice_transcription, created_at
             FROM chat_messages 
-            WHERE chat_id = $1 AND created_at >= $2 AND message_type IN ('text', 'photo')
+            WHERE chat_id = $1 AND created_at >= $2 
+            AND (message_type IN ('text', 'photo') OR (message_type = 'voice' AND voice_transcription IS NOT NULL))
             ORDER BY created_at DESC
             LIMIT 50
         """, chat_id, since_time)
@@ -2012,9 +2077,9 @@ async def update_user_profile_comprehensive(
         topics = detect_topics(message_text)
         gender_result = analyze_gender_from_text(message_text, first_name)
         
-        # Получаем текущий профиль
+        # Получаем текущий профиль для ЭТОГО ЧАТА (per-chat!)
         profile = await conn.fetchrow(
-            "SELECT * FROM user_profiles WHERE user_id = $1", user_id
+            "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2", user_id, chat_id
         )
         
         if profile:
@@ -2105,36 +2170,36 @@ async def update_user_profile_comprehensive(
                 gender_confidence = profile['gender_confidence']
                 detected_gender = profile['detected_gender']
             
-            # Обновляем профиль
+            # Обновляем профиль (per-chat!)
             await conn.execute("""
                 UPDATE user_profiles SET
-                    first_name = COALESCE($2, first_name),
-                    username = COALESCE($3, username),
-                    detected_gender = $4,
-                    gender_confidence = $5,
-                    gender_female_score = $6,
-                    gender_male_score = $7,
-                    total_messages = $8,
-                    messages_analyzed = $8,
-                    last_seen_at = $9,
-                    last_analysis_at = $9,
-                    active_hours = $10,
-                    peak_hour = $11,
-                    is_night_owl = $12,
-                    is_early_bird = $13,
-                    sentiment_score = $14,
-                    positive_messages = $15,
-                    negative_messages = $16,
-                    neutral_messages = $17,
-                    emoji_usage_rate = $18,
-                    avg_message_length = $19,
-                    toxicity_score = $20,
-                    humor_score = $21,
-                    activity_level = $22,
-                    communication_style = $23,
-                    updated_at = $9
-                WHERE user_id = $1
-            """, user_id, first_name or None, username or None,
+                    first_name = COALESCE($3, first_name),
+                    username = COALESCE($4, username),
+                    detected_gender = $5,
+                    gender_confidence = $6,
+                    gender_female_score = $7,
+                    gender_male_score = $8,
+                    total_messages = $9,
+                    messages_analyzed = $9,
+                    last_seen_at = $10,
+                    last_analysis_at = $10,
+                    active_hours = $11,
+                    peak_hour = $12,
+                    is_night_owl = $13,
+                    is_early_bird = $14,
+                    sentiment_score = $15,
+                    positive_messages = $16,
+                    negative_messages = $17,
+                    neutral_messages = $18,
+                    emoji_usage_rate = $19,
+                    avg_message_length = $20,
+                    toxicity_score = $21,
+                    humor_score = $22,
+                    activity_level = $23,
+                    communication_style = $24,
+                    updated_at = $10
+                WHERE user_id = $1 AND chat_id = $2
+            """, user_id, chat_id, first_name or None, username or None,
                  detected_gender, gender_confidence, new_female_score, new_male_score,
                  total_msgs, now, json.dumps(active_hours), peak_hour,
                  is_night_owl, is_early_bird, new_sentiment, positive, negative, neutral,
@@ -2142,7 +2207,7 @@ async def update_user_profile_comprehensive(
                  activity_level, communication_style)
         
         else:
-            # Создаём новый профиль
+            # Создаём новый профиль для ЭТОГО ЧАТА (per-chat!)
             active_hours = {str(hour): 1}
             
             detected_gender = gender_result['gender']
@@ -2155,7 +2220,7 @@ async def update_user_profile_comprehensive(
             
             await conn.execute("""
                 INSERT INTO user_profiles (
-                    user_id, first_name, username,
+                    user_id, chat_id, first_name, username,
                     detected_gender, gender_confidence, gender_female_score, gender_male_score,
                     total_messages, messages_analyzed, first_seen_at, last_seen_at, last_analysis_at,
                     active_hours, peak_hour, is_night_owl, is_early_bird,
@@ -2163,12 +2228,12 @@ async def update_user_profile_comprehensive(
                     emoji_usage_rate, avg_message_length, toxicity_score, humor_score,
                     activity_level, communication_style, created_at, updated_at
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, 1, 1, $8, $8, $8,
-                    $9, $10, FALSE, FALSE,
-                    $11, $12, $13, $14, $15, $16, $17, $18,
-                    'lurker', 'neutral', $8, $8
+                    $1, $2, $3, $4, $5, $6, $7, $8, 1, 1, $9, $9, $9,
+                    $10, $11, FALSE, FALSE,
+                    $12, $13, $14, $15, $16, $17, $18, $19,
+                    'lurker', 'neutral', $9, $9
                 )
-            """, user_id, first_name or None, username or None,
+            """, user_id, chat_id, first_name or None, username or None,
                  detected_gender, gender_confidence, 
                  gender_result['female_score'], gender_result['male_score'],
                  now, json.dumps(active_hours), hour,
@@ -2178,16 +2243,16 @@ async def update_user_profile_comprehensive(
                  min(sentiment['toxic_count'] / 3, 1.0),
                  min(sentiment['humor_count'] / 2, 1.0))
         
-        # Обновляем темы/интересы
+        # Обновляем темы/интересы (per-chat!)
         for topic in topics:
             await conn.execute("""
-                INSERT INTO user_interests (user_id, topic, score, message_count, last_mentioned_at)
-                VALUES ($1, $2, 1.0, 1, $3)
-                ON CONFLICT (user_id, topic) DO UPDATE SET
+                INSERT INTO user_interests (user_id, chat_id, topic, score, message_count, last_mentioned_at)
+                VALUES ($1, $2, $3, 1.0, 1, $4)
+                ON CONFLICT (user_id, chat_id, topic) DO UPDATE SET
                     score = user_interests.score + 0.1,
                     message_count = user_interests.message_count + 1,
-                    last_mentioned_at = $3
-            """, user_id, topic, now)
+                    last_mentioned_at = $4
+            """, user_id, chat_id, topic, now)
         
         # Обновляем социальные связи (если это реплай)
         if reply_to_user_id and reply_to_user_id != user_id:
@@ -2202,12 +2267,12 @@ async def update_user_profile_comprehensive(
             """, chat_id, user_id, reply_to_user_id, now, sentiment['sentiment'])
 
 
-async def get_user_full_profile(user_id: int) -> Optional[Dict[str, Any]]:
-    """Получить полный профиль пользователя со всеми данными"""
+async def get_user_full_profile(user_id: int, chat_id: int) -> Optional[Dict[str, Any]]:
+    """Получить полный профиль пользователя со всеми данными для конкретного чата (per-chat!)"""
     async with (await get_pool()).acquire() as conn:
-        # Основной профиль
+        # Основной профиль для ЭТОГО ЧАТА
         profile = await conn.fetchrow(
-            "SELECT * FROM user_profiles WHERE user_id = $1", user_id
+            "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2", user_id, chat_id
         )
         
         if not profile:
@@ -2215,24 +2280,24 @@ async def get_user_full_profile(user_id: int) -> Optional[Dict[str, Any]]:
         
         result = dict(profile)
         
-        # Получаем интересы
+        # Получаем интересы для ЭТОГО ЧАТА (per-chat!)
         interests = await conn.fetch("""
             SELECT topic, score, message_count 
             FROM user_interests 
-            WHERE user_id = $1 
+            WHERE user_id = $1 AND chat_id = $2
             ORDER BY score DESC 
             LIMIT 10
-        """, user_id)
+        """, user_id, chat_id)
         result['top_interests'] = [dict(i) for i in interests]
         
-        # Получаем топ собеседников
+        # Получаем топ собеседников для ЭТОГО ЧАТА (per-chat!)
         interactions = await conn.fetch("""
             SELECT target_user_id, interaction_count, sentiment_avg
             FROM user_interactions
-            WHERE user_id = $1 AND interaction_type = 'reply'
+            WHERE user_id = $1 AND chat_id = $2 AND interaction_type = 'reply'
             ORDER BY interaction_count DESC
             LIMIT 10
-        """, user_id)
+        """, user_id, chat_id)
         result['top_interactions'] = [dict(i) for i in interactions]
         
         return result
@@ -2255,9 +2320,9 @@ async def get_chat_social_graph(chat_id: int) -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
-async def get_user_activity_report(user_id: int) -> Dict[str, Any]:
-    """Получить отчёт об активности пользователя"""
-    profile = await get_user_full_profile(user_id)
+async def get_user_activity_report(user_id: int, chat_id: int) -> Dict[str, Any]:
+    """Получить отчёт об активности пользователя в конкретном чате (per-chat!)"""
+    profile = await get_user_full_profile(user_id, chat_id)
     
     if not profile:
         return {'error': 'Profile not found'}
@@ -2297,12 +2362,13 @@ async def get_user_activity_report(user_id: int) -> Dict[str, Any]:
 
 # ==================== ДАННЫЕ ДЛЯ AI-ГЕНЕРАЦИИ ====================
 
-async def get_user_profile_for_ai(user_id: int, first_name: str = "", username: str = "") -> Dict[str, Any]:
+async def get_user_profile_for_ai(user_id: int, chat_id: int, first_name: str = "", username: str = "") -> Dict[str, Any]:
     """
     Получить профиль пользователя в формате, оптимизированном для AI-генерации.
     Возвращает человекочитаемое описание для промптов.
+    Per-chat! Каждый чат имеет свой профиль.
     """
-    profile = await get_user_full_profile(user_id)
+    profile = await get_user_full_profile(user_id, chat_id)
     
     if not profile:
         # Минимальный профиль для новых пользователей
@@ -2475,7 +2541,8 @@ async def get_chat_users_profiles_for_ai(chat_id: int, user_ids: List[int] = Non
     profiles = []
     for row in rows:
         profile = await get_user_profile_for_ai(
-            row['user_id'], 
+            row['user_id'],
+            chat_id,  # per-chat!
             row.get('first_name', ''), 
             row.get('username', '')
         )
@@ -2487,18 +2554,24 @@ async def get_chat_users_profiles_for_ai(chat_id: int, user_ids: List[int] = Non
 async def get_chat_social_data_for_ai(chat_id: int) -> Dict[str, Any]:
     """
     Получить социальные данные чата для AI: кто с кем общается, конфликты, дружба.
+    Per-chat! Профили теперь привязаны к конкретному чату.
     """
     async with (await get_pool()).acquire() as conn:
-        # Топ взаимодействий
+        # Топ взаимодействий (per-chat!)
+        # JOIN с user_profiles теперь по (user_id, chat_id)
         interactions = await conn.fetch("""
             SELECT 
                 ui.user_id, ui.target_user_id, 
                 ui.interaction_count, ui.sentiment_avg,
-                up1.first_name as from_name, up1.username as from_username,
-                up2.first_name as to_name, up2.username as to_username
+                COALESCE(up1.first_name, cu1.first_name) as from_name, 
+                COALESCE(up1.username, cu1.username) as from_username,
+                COALESCE(up2.first_name, cu2.first_name) as to_name, 
+                COALESCE(up2.username, cu2.username) as to_username
             FROM user_interactions ui
-            LEFT JOIN user_profiles up1 ON ui.user_id = up1.user_id
-            LEFT JOIN user_profiles up2 ON ui.target_user_id = up2.user_id
+            LEFT JOIN user_profiles up1 ON ui.user_id = up1.user_id AND ui.chat_id = up1.chat_id
+            LEFT JOIN user_profiles up2 ON ui.target_user_id = up2.user_id AND ui.chat_id = up2.chat_id
+            LEFT JOIN chat_users cu1 ON ui.user_id = cu1.user_id AND ui.chat_id = cu1.chat_id
+            LEFT JOIN chat_users cu2 ON ui.target_user_id = cu2.user_id AND ui.chat_id = cu2.chat_id
             WHERE ui.chat_id = $1
             ORDER BY ui.interaction_count DESC
             LIMIT 15
@@ -2575,11 +2648,12 @@ async def get_enriched_chat_data_for_ai(chat_id: int, hours: int = 5) -> Dict[st
             LIMIT 15
         """, chat_id, since_time)
     
-    # Получаем профили
+    # Получаем профили (per-chat!)
     profiles = []
     for user in users:
         profile = await get_user_profile_for_ai(
             user['user_id'],
+            chat_id,  # per-chat!
             user['first_name'] or '',
             user['username'] or ''
         )
@@ -2600,3 +2674,125 @@ async def get_enriched_chat_data_for_ai(chat_id: int, hours: int = 5) -> Dict[st
         'social': social,
         'social_text': social['description']
     }
+
+
+# ==================== МИГРАЦИЯ ПРОФИЛЕЙ ====================
+
+async def rebuild_profiles_from_messages(chat_id: int, limit: int = 500) -> Dict[str, Any]:
+    """
+    Пересобрать per-chat профили из существующих сообщений.
+    Используется после миграции на новую архитектуру.
+    
+    Args:
+        chat_id: ID чата для пересборки профилей
+        limit: Максимум сообщений на пользователя для анализа
+    
+    Returns:
+        Статистика миграции
+    """
+    stats = {
+        'users_processed': 0,
+        'profiles_created': 0,
+        'messages_analyzed': 0,
+        'errors': []
+    }
+    
+    async with (await get_pool()).acquire() as conn:
+        # Получаем всех уникальных пользователей чата
+        users = await conn.fetch("""
+            SELECT DISTINCT user_id, first_name, username, COUNT(*) as msg_count
+            FROM chat_messages
+            WHERE chat_id = $1 AND message_text IS NOT NULL AND message_text != ''
+            GROUP BY user_id, first_name, username
+            ORDER BY msg_count DESC
+        """, chat_id)
+        
+        for user in users:
+            user_id = user['user_id']
+            first_name = user['first_name'] or ''
+            username = user['username'] or ''
+            
+            try:
+                # Получаем последние сообщения пользователя
+                messages = await conn.fetch("""
+                    SELECT message_text, created_at, reply_to_user_id
+                    FROM chat_messages
+                    WHERE chat_id = $1 AND user_id = $2 
+                    AND message_text IS NOT NULL AND message_text != ''
+                    ORDER BY created_at DESC
+                    LIMIT $3
+                """, chat_id, user_id, limit)
+                
+                if not messages:
+                    continue
+                
+                stats['users_processed'] += 1
+                
+                # Анализируем каждое сообщение и обновляем профиль
+                for msg in messages:
+                    try:
+                        await update_user_profile_comprehensive(
+                            user_id=user_id,
+                            chat_id=chat_id,
+                            message_text=msg['message_text'],
+                            timestamp=msg['created_at'],
+                            first_name=first_name,
+                            username=username,
+                            reply_to_user_id=msg.get('reply_to_user_id')
+                        )
+                        stats['messages_analyzed'] += 1
+                    except Exception as e:
+                        pass  # Продолжаем при ошибках отдельных сообщений
+                
+                stats['profiles_created'] += 1
+                
+            except Exception as e:
+                stats['errors'].append(f"User {user_id}: {str(e)}")
+    
+    return stats
+
+
+async def rebuild_all_profiles(limit_per_user: int = 200) -> Dict[str, Any]:
+    """
+    Пересобрать профили для ВСЕХ чатов.
+    
+    Args:
+        limit_per_user: Максимум сообщений на пользователя
+    
+    Returns:
+        Статистика по всем чатам
+    """
+    global_stats = {
+        'chats_processed': 0,
+        'total_users': 0,
+        'total_profiles': 0,
+        'total_messages': 0,
+        'errors': []
+    }
+    
+    async with (await get_pool()).acquire() as conn:
+        # Получаем все уникальные чаты
+        chats = await conn.fetch("""
+            SELECT DISTINCT chat_id, COUNT(*) as msg_count
+            FROM chat_messages
+            WHERE message_text IS NOT NULL AND message_text != ''
+            GROUP BY chat_id
+            ORDER BY msg_count DESC
+        """)
+        
+        for chat in chats:
+            chat_id = chat['chat_id']
+            try:
+                stats = await rebuild_profiles_from_messages(chat_id, limit_per_user)
+                
+                global_stats['chats_processed'] += 1
+                global_stats['total_users'] += stats['users_processed']
+                global_stats['total_profiles'] += stats['profiles_created']
+                global_stats['total_messages'] += stats['messages_analyzed']
+                global_stats['errors'].extend(stats['errors'])
+                
+                logger.info(f"Миграция чата {chat_id}: {stats['profiles_created']} профилей")
+            except Exception as e:
+                global_stats['errors'].append(f"Chat {chat_id}: {str(e)}")
+    
+    return global_stats
