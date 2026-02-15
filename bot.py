@@ -5098,7 +5098,7 @@ async def check_bot_mention(message: Message) -> bool:
 
 @router.message(F.sticker)
 async def collect_stickers(message: Message):
-    """Сбор стикеров + сохранение в коллекцию мемов"""
+    """Сбор стикеров + сохранение в коллекцию мемов + обновление профиля"""
     if message.chat.type == "private":
         return
     
@@ -5109,6 +5109,9 @@ async def collect_stickers(message: Message):
             await handle_bot_mention_or_reply(message)
     
     sticker = message.sticker
+    reply_to_user_id = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        reply_to_user_id = message.reply_to_message.from_user.id
     
     await save_chat_message(
         chat_id=message.chat.id,
@@ -5121,6 +5124,23 @@ async def collect_stickers(message: Message):
         file_id=sticker.file_id if sticker else None,
         file_unique_id=sticker.file_unique_id if sticker else None
     )
+    
+    # ОБНОВЛЯЕМ ПРОФИЛЬ (per-chat)
+    if USE_POSTGRES:
+        try:
+            await update_user_profile_comprehensive(
+                user_id=message.from_user.id,
+                chat_id=message.chat.id,
+                message_text=sticker.emoji if sticker and sticker.emoji else "",
+                timestamp=int(time.time()),
+                first_name=message.from_user.first_name or "",
+                username=message.from_user.username or "",
+                reply_to_user_id=reply_to_user_id,
+                message_type="sticker",
+                sticker_emoji=sticker.emoji if sticker else None
+            )
+        except Exception as e:
+            logger.debug(f"Profile update error (sticker): {e}")
     
     # Сохраняем стикер в коллекцию (если это не анимированный/видео стикер)
     if sticker and not sticker.is_video and not sticker.is_animated:
@@ -5190,6 +5210,9 @@ async def collect_photos(message: Message):
             image_description = None
     
     photo = message.photo[-1]  # Самое большое разрешение
+    reply_to_user_id = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        reply_to_user_id = message.reply_to_message.from_user.id
     
     await save_chat_message(
         chat_id=message.chat.id,
@@ -5202,6 +5225,27 @@ async def collect_photos(message: Message):
         file_id=photo.file_id,
         file_unique_id=photo.file_unique_id
     )
+    
+    # ОБНОВЛЯЕМ ПРОФИЛЬ (per-chat) — используем caption + описание картинки
+    if USE_POSTGRES:
+        try:
+            # Объединяем caption и описание картинки для профилирования
+            profile_text = caption
+            if image_description:
+                profile_text = f"{caption} [фото: {image_description}]" if caption else f"[фото: {image_description}]"
+            
+            await update_user_profile_comprehensive(
+                user_id=message.from_user.id,
+                chat_id=message.chat.id,
+                message_text=profile_text,
+                timestamp=int(time.time()),
+                first_name=message.from_user.first_name or "",
+                username=message.from_user.username or "",
+                reply_to_user_id=reply_to_user_id,
+                message_type="photo"
+            )
+        except Exception as e:
+            logger.debug(f"Profile update error (photo): {e}")
     
     # Сохраняем фото в коллекцию мемов
     await save_media(
@@ -5224,7 +5268,7 @@ async def collect_photos(message: Message):
 
 @router.message(F.animation)
 async def collect_animations(message: Message):
-    """Сбор GIF/анимаций + сохранение в коллекцию"""
+    """Сбор GIF/анимаций + сохранение в коллекцию + обновление профиля"""
     if message.chat.type == "private":
         return
     
@@ -5236,6 +5280,9 @@ async def collect_animations(message: Message):
     
     animation = message.animation
     caption = message.caption[:200] if message.caption else ""
+    reply_to_user_id = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        reply_to_user_id = message.reply_to_message.from_user.id
     
     await save_chat_message(
         chat_id=message.chat.id,
@@ -5247,6 +5294,22 @@ async def collect_animations(message: Message):
         file_id=animation.file_id if animation else None,
         file_unique_id=animation.file_unique_id if animation else None
     )
+    
+    # ОБНОВЛЯЕМ ПРОФИЛЬ (per-chat)
+    if USE_POSTGRES:
+        try:
+            await update_user_profile_comprehensive(
+                user_id=message.from_user.id,
+                chat_id=message.chat.id,
+                message_text=caption if caption else "[GIF]",
+                timestamp=int(time.time()),
+                first_name=message.from_user.first_name or "",
+                username=message.from_user.username or "",
+                reply_to_user_id=reply_to_user_id,
+                message_type="animation"
+            )
+        except Exception as e:
+            logger.debug(f"Profile update error (animation): {e}")
     
     # Сохраняем GIF в коллекцию
     if animation:
@@ -5269,7 +5332,7 @@ async def collect_animations(message: Message):
 
 @router.message(F.voice | F.video_note)
 async def collect_voice(message: Message):
-    """Сбор голосовых и кружочков + сохранение в коллекцию"""
+    """Сбор голосовых и кружочков + сохранение в коллекцию + ТРАНСКРИПЦИЯ В ПРОФИЛЬ"""
     if message.chat.type == "private":
         return
     
@@ -5281,6 +5344,9 @@ async def collect_voice(message: Message):
     
     msg_type = "voice" if message.voice else "video_note"
     media_obj = message.voice or message.video_note
+    reply_to_user_id = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        reply_to_user_id = message.reply_to_message.from_user.id
     
     await save_chat_message(
         chat_id=message.chat.id,
@@ -5293,17 +5359,47 @@ async def collect_voice(message: Message):
         file_unique_id=media_obj.file_unique_id if media_obj else None
     )
     
+    # ФОНОВАЯ ТРАНСКРИПЦИЯ + ОБНОВЛЕНИЕ ПРОФИЛЯ
+    transcription = ""
+    if USE_POSTGRES:
+        try:
+            # Пробуем транскрибировать голосовое/кружочек
+            transcription = await transcribe_voice_message(message)
+            
+            # Обновляем профиль с транскрипцией (или без если не удалось)
+            profile_text = transcription if transcription else f"[{msg_type}]"
+            
+            await update_user_profile_comprehensive(
+                user_id=message.from_user.id,
+                chat_id=message.chat.id,
+                message_text=profile_text,
+                timestamp=int(time.time()),
+                first_name=message.from_user.first_name or "",
+                username=message.from_user.username or "",
+                reply_to_user_id=reply_to_user_id,
+                message_type=msg_type
+            )
+            
+            if transcription:
+                logger.info(f"Voice transcribed and added to profile: {transcription[:50]}...")
+        except Exception as e:
+            logger.debug(f"Profile update error (voice): {e}")
+    
     # Сохраняем голосовое/кружочек в коллекцию
     if message.voice:
         voice = message.voice
         sender_name = message.from_user.first_name or "Аноним"
+        # Добавляем транскрипцию в описание если есть
+        description = f"Голосовое от {sender_name} ({voice.duration} сек)"
+        if transcription:
+            description += f": {transcription[:100]}"
         await save_media(
             chat_id=message.chat.id,
             user_id=message.from_user.id,
             file_id=voice.file_id,
             file_type="voice",
             file_unique_id=voice.file_unique_id,
-            description=f"Голосовое от {sender_name} ({voice.duration} сек)"
+            description=description
         )
         # Шанс 15% для теста (потом вернуть на 3%)
         if random.random() < 0.15:
@@ -5315,13 +5411,17 @@ async def collect_voice(message: Message):
     elif message.video_note:
         video_note = message.video_note
         sender_name = message.from_user.first_name or "Аноним"
+        # Добавляем транскрипцию в описание если есть
+        description = f"Кружочек от {sender_name} ({video_note.duration} сек)"
+        if transcription:
+            description += f": {transcription[:100]}"
         await save_media(
             chat_id=message.chat.id,
             user_id=message.from_user.id,
             file_id=video_note.file_id,
             file_type="video_note",
             file_unique_id=video_note.file_unique_id,
-            description=f"Кружочек от {sender_name} ({video_note.duration} сек)"
+            description=description
         )
         # Шанс 15% для теста (потом вернуть на 3%)
         if random.random() < 0.15:
@@ -5333,7 +5433,7 @@ async def collect_voice(message: Message):
 
 @router.message(F.video)
 async def collect_videos(message: Message):
-    """Сбор видео + сохранение в коллекцию"""
+    """Сбор видео + сохранение в коллекцию + обновление профиля"""
     if message.chat.type == "private":
         return
     
@@ -5345,6 +5445,9 @@ async def collect_videos(message: Message):
     
     video = message.video
     caption = message.caption[:200] if message.caption else ""
+    reply_to_user_id = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        reply_to_user_id = message.reply_to_message.from_user.id
     
     await save_chat_message(
         chat_id=message.chat.id,
@@ -5356,6 +5459,22 @@ async def collect_videos(message: Message):
         file_id=video.file_id if video else None,
         file_unique_id=video.file_unique_id if video else None
     )
+    
+    # ОБНОВЛЯЕМ ПРОФИЛЬ (per-chat)
+    if USE_POSTGRES:
+        try:
+            await update_user_profile_comprehensive(
+                user_id=message.from_user.id,
+                chat_id=message.chat.id,
+                message_text=caption if caption else "[video]",
+                timestamp=int(time.time()),
+                first_name=message.from_user.first_name or "",
+                username=message.from_user.username or "",
+                reply_to_user_id=reply_to_user_id,
+                message_type="video"
+            )
+        except Exception as e:
+            logger.debug(f"Profile update error (video): {e}")
     
     # Сохраняем видео в коллекцию
     if video:
@@ -5381,7 +5500,7 @@ async def collect_videos(message: Message):
 
 @router.message(F.audio)
 async def collect_audio(message: Message):
-    """Сбор аудио/музыки + сохранение в коллекцию"""
+    """Сбор аудио/музыки + сохранение в коллекцию + обновление профиля"""
     if message.chat.type == "private":
         return
     
@@ -5393,6 +5512,9 @@ async def collect_audio(message: Message):
     
     audio = message.audio
     caption = message.caption[:200] if message.caption else ""
+    reply_to_user_id = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        reply_to_user_id = message.reply_to_message.from_user.id
     
     await save_chat_message(
         chat_id=message.chat.id,
@@ -5404,6 +5526,28 @@ async def collect_audio(message: Message):
         file_id=audio.file_id if audio else None,
         file_unique_id=audio.file_unique_id if audio else None
     )
+    
+    # ОБНОВЛЯЕМ ПРОФИЛЬ (per-chat) — записываем музыкальные предпочтения
+    if USE_POSTGRES:
+        try:
+            # Формируем текст с информацией о треке для профилирования
+            profile_text = caption
+            if audio:
+                track_info = f"{audio.performer or 'Unknown'} - {audio.title or 'Unknown'}"
+                profile_text = f"[музыка: {track_info}] {caption}".strip()
+            
+            await update_user_profile_comprehensive(
+                user_id=message.from_user.id,
+                chat_id=message.chat.id,
+                message_text=profile_text if profile_text else "[audio]",
+                timestamp=int(time.time()),
+                first_name=message.from_user.first_name or "",
+                username=message.from_user.username or "",
+                reply_to_user_id=reply_to_user_id,
+                message_type="audio"
+            )
+        except Exception as e:
+            logger.debug(f"Profile update error (audio): {e}")
     
     # Сохраняем аудио в коллекцию
     if audio:
