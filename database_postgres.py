@@ -428,8 +428,72 @@ async def init_db():
                 friends JSONB DEFAULT '[]',
                 frequent_replies_to JSONB DEFAULT '[]',
                 frequent_replies_from JSONB DEFAULT '[]',
+                
+                -- ========== НОВЫЕ ПОЛЯ ДЛЯ ГЛУБОКОЙ ПЕРСОНАЛИЗАЦИИ ==========
+                
+                -- Любимые фразы и словечки
+                favorite_phrases JSONB DEFAULT '[]',
+                vocabulary_richness REAL DEFAULT 0.0,
+                unique_words_count INTEGER DEFAULT 0,
+                
+                -- Паттерны ответов
+                avg_reply_time_seconds INTEGER DEFAULT 0,
+                reply_rate REAL DEFAULT 0.0,
+                initiates_conversations BOOLEAN DEFAULT FALSE,
+                messages_as_reply INTEGER DEFAULT 0,
+                conversations_started INTEGER DEFAULT 0,
+                
+                -- Языковой стиль
+                caps_rate REAL DEFAULT 0.0,
+                mat_rate REAL DEFAULT 0.0,
+                slang_rate REAL DEFAULT 0.0,
+                typo_rate REAL DEFAULT 0.0,
+                question_rate REAL DEFAULT 0.0,
+                exclamation_rate REAL DEFAULT 0.0,
+                
+                -- Настроение по времени
+                mood_by_day JSONB DEFAULT '{}',
+                mood_by_hour JSONB DEFAULT '{}',
+                worst_mood_day TEXT,
+                best_mood_day TEXT,
+                worst_mood_hour INTEGER,
+                best_mood_hour INTEGER,
+                
+                -- Медиа предпочтения
+                favorite_stickers JSONB DEFAULT '[]',
+                favorite_emojis JSONB DEFAULT '[]',
+                meme_style TEXT DEFAULT 'unknown',
+                voice_messages_rate REAL DEFAULT 0.0,
+                photo_rate REAL DEFAULT 0.0,
+                sticker_rate REAL DEFAULT 0.0,
+                video_rate REAL DEFAULT 0.0,
+                
+                -- Эмоциональные триггеры и связи
+                trigger_topics JSONB DEFAULT '[]',
+                emotional_triggers JSONB DEFAULT '[]',
+                enemies JSONB DEFAULT '[]',
+                crushes JSONB DEFAULT '[]',
+                admirers JSONB DEFAULT '[]',
+                
+                -- Цитаты и мемы
+                memorable_quotes JSONB DEFAULT '[]',
+                catchphrases JSONB DEFAULT '[]',
+                
+                -- Поведенческие паттерны
+                avg_messages_per_day REAL DEFAULT 0.0,
+                longest_streak_days INTEGER DEFAULT 0,
+                current_streak_days INTEGER DEFAULT 0,
+                last_streak_date TEXT,
+                lurk_periods JSONB DEFAULT '[]',
+                burst_periods JSONB DEFAULT '[]',
+                
+                -- Социальный статус в чате
+                influence_score REAL DEFAULT 0.0,
+                popularity_score REAL DEFAULT 0.0,
+                controversy_score REAL DEFAULT 0.0,
+                
                 -- Метаданные
-                profile_version INTEGER DEFAULT 1,
+                profile_version INTEGER DEFAULT 2,
                 created_at BIGINT NOT NULL,
                 updated_at BIGINT NOT NULL,
                 PRIMARY KEY (user_id, chat_id)
@@ -439,6 +503,7 @@ async def init_db():
         # Добавляем недостающие колонки если таблица уже существует
         # (для миграции старых баз данных)
         migration_columns = [
+            # Базовые поля v1
             ("activity_level", "TEXT DEFAULT 'normal'"),
             ("communication_style", "TEXT DEFAULT 'neutral'"),
             ("toxicity_score", "REAL DEFAULT 0.0"),
@@ -458,7 +523,72 @@ async def init_db():
             ("friends", "JSONB DEFAULT '[]'"),
             ("frequent_replies_to", "JSONB DEFAULT '[]'"),
             ("frequent_replies_from", "JSONB DEFAULT '[]'"),
-            ("profile_version", "INTEGER DEFAULT 1"),
+            
+            # ========== НОВЫЕ ПОЛЯ v2 - Глубокая персонализация ==========
+            
+            # Любимые фразы и словечки
+            ("favorite_phrases", "JSONB DEFAULT '[]'"),
+            ("vocabulary_richness", "REAL DEFAULT 0.0"),
+            ("unique_words_count", "INTEGER DEFAULT 0"),
+            
+            # Паттерны ответов
+            ("avg_reply_time_seconds", "INTEGER DEFAULT 0"),
+            ("reply_rate", "REAL DEFAULT 0.0"),
+            ("initiates_conversations", "BOOLEAN DEFAULT FALSE"),
+            ("messages_as_reply", "INTEGER DEFAULT 0"),
+            ("conversations_started", "INTEGER DEFAULT 0"),
+            
+            # Языковой стиль
+            ("caps_rate", "REAL DEFAULT 0.0"),
+            ("mat_rate", "REAL DEFAULT 0.0"),
+            ("slang_rate", "REAL DEFAULT 0.0"),
+            ("typo_rate", "REAL DEFAULT 0.0"),
+            ("question_rate", "REAL DEFAULT 0.0"),
+            ("exclamation_rate", "REAL DEFAULT 0.0"),
+            
+            # Настроение по времени
+            ("mood_by_day", "JSONB DEFAULT '{}'"),
+            ("mood_by_hour", "JSONB DEFAULT '{}'"),
+            ("worst_mood_day", "TEXT"),
+            ("best_mood_day", "TEXT"),
+            ("worst_mood_hour", "INTEGER"),
+            ("best_mood_hour", "INTEGER"),
+            
+            # Медиа предпочтения
+            ("favorite_stickers", "JSONB DEFAULT '[]'"),
+            ("favorite_emojis", "JSONB DEFAULT '[]'"),
+            ("meme_style", "TEXT DEFAULT 'unknown'"),
+            ("voice_messages_rate", "REAL DEFAULT 0.0"),
+            ("photo_rate", "REAL DEFAULT 0.0"),
+            ("sticker_rate", "REAL DEFAULT 0.0"),
+            ("video_rate", "REAL DEFAULT 0.0"),
+            
+            # Эмоциональные триггеры и связи
+            ("trigger_topics", "JSONB DEFAULT '[]'"),
+            ("emotional_triggers", "JSONB DEFAULT '[]'"),
+            ("enemies", "JSONB DEFAULT '[]'"),
+            ("crushes", "JSONB DEFAULT '[]'"),
+            ("admirers", "JSONB DEFAULT '[]'"),
+            
+            # Цитаты и мемы
+            ("memorable_quotes", "JSONB DEFAULT '[]'"),
+            ("catchphrases", "JSONB DEFAULT '[]'"),
+            
+            # Поведенческие паттерны
+            ("avg_messages_per_day", "REAL DEFAULT 0.0"),
+            ("longest_streak_days", "INTEGER DEFAULT 0"),
+            ("current_streak_days", "INTEGER DEFAULT 0"),
+            ("last_streak_date", "TEXT"),
+            ("lurk_periods", "JSONB DEFAULT '[]'"),
+            ("burst_periods", "JSONB DEFAULT '[]'"),
+            
+            # Социальный статус в чате
+            ("influence_score", "REAL DEFAULT 0.0"),
+            ("popularity_score", "REAL DEFAULT 0.0"),
+            ("controversy_score", "REAL DEFAULT 0.0"),
+            
+            # Версия профиля
+            ("profile_version", "INTEGER DEFAULT 2"),
         ]
         
         for col_name, col_type in migration_columns:
@@ -489,6 +619,27 @@ async def init_db():
             """)
         except Exception as e:
             logger.warning(f"Could not create activity index: {e}")
+        
+        # ========== GIN ИНДЕКСЫ для быстрого поиска по JSONB полям ==========
+        gin_indexes = [
+            ("idx_profiles_interests_gin", "interests"),
+            ("idx_profiles_friends_gin", "friends"),
+            ("idx_profiles_active_hours_gin", "active_hours"),
+            ("idx_profiles_favorite_phrases_gin", "favorite_phrases"),
+            ("idx_profiles_trigger_topics_gin", "trigger_topics"),
+            ("idx_profiles_crushes_gin", "crushes"),
+            ("idx_profiles_enemies_gin", "enemies"),
+            ("idx_profiles_catchphrases_gin", "catchphrases"),
+            ("idx_profiles_favorite_emojis_gin", "favorite_emojis"),
+        ]
+        for idx_name, col_name in gin_indexes:
+            try:
+                await conn.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {idx_name}
+                    ON user_profiles USING GIN ({col_name})
+                """)
+            except Exception as e:
+                logger.debug(f"Could not create GIN index {idx_name}: {e}")
         
         # Таблица пользователей чата (для быстрого поиска по имени/username)
         await conn.execute("""
@@ -2063,6 +2214,203 @@ def get_hour_from_timestamp(timestamp: int) -> int:
     return datetime.fromtimestamp(timestamp).hour
 
 
+def get_day_of_week(timestamp: int) -> str:
+    """Получить день недели из timestamp"""
+    from datetime import datetime
+    days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+    return days[datetime.fromtimestamp(timestamp).weekday()]
+
+
+# ========== РАСШИРЕННЫЙ АНАЛИЗ СООБЩЕНИЙ v2 ==========
+
+# Слова молодёжного сленга
+SLANG_WORDS = [
+    'кринж', 'краш', 'рофл', 'лол', 'кек', 'чел', 'чилить', 'вайб', 'рил', 'факт',
+    'изи', 'хард', 'имба', 'нуб', 'пруф', 'чекать', 'юзать', 'агриться', 'хейтить',
+    'флексить', 'шипперить', 'стримить', 'донатить', 'бустить', 'нерфить', 'баффить',
+    'гоу', 'го', 'норм', 'оки', 'лан', 'спс', 'пж', 'плс', 'пжлст', 'хз', 'кст',
+    'бро', 'сис', 'чувак', 'чувиха', 'тян', 'кун', 'сенпай', 'вайфу',
+    'база', 'базово', 'на базе', 'жиза', 'факап', 'зашквар', 'душнила', 'токсик',
+    'сигма', 'альфа', 'бета', 'омега', 'грайндсет', 'скуф', 'скибиди',
+    'войс', 'репост', 'шерить', 'лайкать', 'хайп', 'вайрал', 'трендовый',
+]
+
+# Матерные слова/корни
+MAT_PATTERNS = [
+    r'бля', r'хуй', r'хуя', r'хуе', r'пизд', r'ебат', r'ебан', r'ёбан', r'еба', r'ёба',
+    r'сука', r'сучк', r'мудак', r'мудил', r'пидор', r'пидар', r'гандон', r'залуп',
+    r'шлюх', r'блядь', r'блять', r'нахуй', r'нахуя', r'похуй', r'охуе', r'охуи',
+    r'заеб', r'заёб', r'уёб', r'долбо', r'ёбарь', r'ебарь', r'хуёв', r'хуев',
+    r'пиздец', r'пиздат', r'пиздос', r'распизд', r'выеб', r'въеб', r'отъеб',
+    r'ёбтв', r'ебтв', r'сцук', r'ссук', r'хер[^а-я]', r'херов', r'херн',
+]
+
+# Распространённые опечатки и паттерны торопливого набора
+TYPO_PATTERNS = [
+    r'\b(\w)\1{3,}\b',  # буквы повторяются 3+ раза (привееет, даааа)
+    r'\b[а-яa-z]{1,2}\b',  # очень короткие слова могут быть опечатками
+    r'[,.!?]{2,}',  # повторяющиеся знаки препинания
+]
+
+# Эмоциональные триггер-темы
+EMOTIONAL_TRIGGER_TOPICS = {
+    'политика': ['политика', 'путин', 'навальный', 'выборы', 'правительство', 'депутат', 'госдума', 'кремль'],
+    'деньги': ['зарплата', 'деньги', 'кредит', 'ипотека', 'долг', 'бедность', 'богатый'],
+    'работа': ['начальник', 'работа', 'увольнение', 'собеседование', 'зп', 'оклад'],
+    'отношения': ['бывший', 'бывшая', 'развод', 'измена', 'изменил', 'изменила', 'расстались'],
+    'семья': ['родители', 'мать', 'отец', 'брат', 'сестра', 'семья', 'дети'],
+    'здоровье': ['болезнь', 'врач', 'больница', 'лечение', 'операция', 'диагноз'],
+    'внешность': ['толстый', 'худой', 'некрасив', 'уродл', 'внешность', 'фигура'],
+    'возраст': ['старый', 'молодой', 'возраст', 'лет', 'годы'],
+}
+
+
+def analyze_language_style(text: str) -> dict:
+    """
+    Анализ языкового стиля сообщения.
+    Возвращает метрики: капс, мат, сленг, опечатки, вопросы, восклицания.
+    """
+    import re
+    
+    if not text or len(text) < 2:
+        return {
+            'caps_ratio': 0.0,
+            'mat_count': 0,
+            'slang_count': 0,
+            'typo_score': 0.0,
+            'question_count': 0,
+            'exclamation_count': 0,
+            'word_count': 0,
+            'unique_words': [],
+        }
+    
+    text_lower = text.lower()
+    
+    # Подсчёт слов
+    words = re.findall(r'[а-яёa-z]+', text_lower)
+    word_count = len(words)
+    unique_words = list(set(words))
+    
+    # Капс (только для слов длиннее 2 символов)
+    alpha_chars = [c for c in text if c.isalpha()]
+    upper_chars = [c for c in alpha_chars if c.isupper()]
+    caps_ratio = len(upper_chars) / max(len(alpha_chars), 1)
+    
+    # Мат
+    mat_count = 0
+    for pattern in MAT_PATTERNS:
+        mat_count += len(re.findall(pattern, text_lower))
+    
+    # Сленг
+    slang_count = sum(1 for word in SLANG_WORDS if word in text_lower)
+    
+    # Опечатки (упрощённая эвристика)
+    typo_score = 0.0
+    for pattern in TYPO_PATTERNS:
+        typo_score += len(re.findall(pattern, text)) * 0.1
+    typo_score = min(typo_score, 1.0)
+    
+    # Вопросы и восклицания
+    question_count = text.count('?')
+    exclamation_count = text.count('!')
+    
+    return {
+        'caps_ratio': round(caps_ratio, 3),
+        'mat_count': mat_count,
+        'slang_count': slang_count,
+        'typo_score': round(typo_score, 3),
+        'question_count': question_count,
+        'exclamation_count': exclamation_count,
+        'word_count': word_count,
+        'unique_words': unique_words[:50],  # ограничиваем для экономии памяти
+    }
+
+
+def detect_emotional_triggers(text: str, sentiment_score: float) -> List[str]:
+    """
+    Определить эмоциональные триггеры в сообщении.
+    Триггер засчитывается если тема упомянута И сообщение эмоциональное (не нейтральное).
+    """
+    if abs(sentiment_score) < 0.2:  # слишком нейтральное сообщение
+        return []
+    
+    text_lower = text.lower()
+    triggers = []
+    
+    for topic, keywords in EMOTIONAL_TRIGGER_TOPICS.items():
+        for keyword in keywords:
+            if keyword in text_lower:
+                triggers.append(topic)
+                break
+    
+    return triggers
+
+
+def extract_catchphrases(text: str, min_length: int = 5) -> List[str]:
+    """
+    Извлечь потенциальные коронные фразы из сообщения.
+    Ищем фразы с характерным началом или эмоциональной окраской.
+    """
+    import re
+    
+    phrases = []
+    text_lower = text.lower().strip()
+    
+    # Фразы начинающиеся с характерных слов
+    catchphrase_starters = [
+        r'^(короче|ну|типа|вообще|честно|реально|серьёзно|кстати|между прочим|слушай|знаешь)',
+        r'^(я думаю|я считаю|мне кажется|по-моему|имхо)',
+        r'^(а вот|но вот|зато|однако)',
+    ]
+    
+    for pattern in catchphrase_starters:
+        if re.match(pattern, text_lower):
+            # Берём первые слова как потенциальную фразу
+            words = text.split()[:7]  # макс 7 слов
+            phrase = ' '.join(words)
+            if len(phrase) >= min_length and len(phrase) <= 100:
+                phrases.append(phrase)
+    
+    # Фразы с восклицаниями или многоточиями
+    if '!' in text or '...' in text:
+        sentences = re.split(r'[.!?]+', text)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if min_length <= len(sentence) <= 80:
+                phrases.append(sentence)
+    
+    return phrases[:3]  # максимум 3 фразы за сообщение
+
+
+def extract_emojis(text: str) -> List[str]:
+    """Извлечь все эмодзи из текста"""
+    import re
+    emoji_pattern = re.compile(
+        r'[\U0001F300-\U0001F9FF'  # Symbols & Pictographs
+        r'\U0001FA00-\U0001FA6F'   # Chess Symbols
+        r'\U0001FA70-\U0001FAFF'   # Symbols Extended-A
+        r'\U00002702-\U000027B0'   # Dingbats
+        r'\U0001F600-\U0001F64F'   # Emoticons
+        r']+', 
+        flags=re.UNICODE
+    )
+    return emoji_pattern.findall(text)
+
+
+def calculate_vocabulary_richness(unique_words_count: int, total_words: int) -> float:
+    """
+    Рассчитать богатство словарного запаса (Type-Token Ratio).
+    0.0 = очень бедный, 1.0 = очень богатый
+    """
+    if total_words == 0:
+        return 0.0
+    # Модифицированный TTR для длинных текстов
+    ttr = unique_words_count / total_words
+    # Нормализуем (обычно TTR падает с увеличением текста)
+    normalized = min(ttr * 2, 1.0)  # умножаем на 2 и ограничиваем 1.0
+    return round(normalized, 3)
+
+
 async def update_user_profile_comprehensive(
     user_id: int,
     chat_id: int,
@@ -2070,20 +2418,30 @@ async def update_user_profile_comprehensive(
     timestamp: int,
     first_name: str = "",
     username: str = "",
-    reply_to_user_id: int = None
+    reply_to_user_id: int = None,
+    message_type: str = "text",
+    sticker_emoji: str = None
 ):
     """
-    Комплексное обновление профиля пользователя.
+    Комплексное обновление профиля пользователя v2.
     Вызывается при каждом сообщении для инкрементального обучения.
+    Собирает расширенные метрики для глубокой персонализации.
     """
     async with (await get_pool()).acquire() as conn:
         now = int(time.time())
         hour = get_hour_from_timestamp(timestamp)
+        day_of_week = get_day_of_week(timestamp)
         
-        # Анализируем сообщение
+        # ========== БАЗОВЫЙ АНАЛИЗ ==========
         sentiment = analyze_message_sentiment(message_text)
         topics = detect_topics(message_text)
         gender_result = analyze_gender_from_text(message_text, first_name)
+        
+        # ========== РАСШИРЕННЫЙ АНАЛИЗ v2 ==========
+        lang_style = analyze_language_style(message_text)
+        emotional_triggers = detect_emotional_triggers(message_text, sentiment['sentiment'])
+        catchphrases = extract_catchphrases(message_text)
+        emojis_in_message = extract_emojis(message_text)
         
         # Получаем текущий профиль для ЭТОГО ЧАТА (per-chat!)
         profile = await conn.fetchrow(
@@ -2091,52 +2449,141 @@ async def update_user_profile_comprehensive(
         )
         
         if profile:
-            # Обновляем существующий профиль
-            # Обновляем часы активности
+            # ========== ОБНОВЛЯЕМ СУЩЕСТВУЮЩИЙ ПРОФИЛЬ ==========
+            total_msgs = profile['total_messages'] + 1
+            
+            # --- Часы активности ---
             active_hours = dict(profile.get('active_hours') or {})
             hour_str = str(hour)
             active_hours[hour_str] = active_hours.get(hour_str, 0) + 1
-            
-            # Определяем пиковый час
             peak_hour = int(max(active_hours, key=active_hours.get)) if active_hours else hour
             
-            # Определяем паттерн активности
+            # Паттерн активности
             night_hours = sum(active_hours.get(str(h), 0) for h in [0, 1, 2, 3, 4, 5])
             morning_hours = sum(active_hours.get(str(h), 0) for h in [6, 7, 8, 9])
             total_hours = sum(active_hours.values()) or 1
             is_night_owl = night_hours / total_hours > 0.3
             is_early_bird = morning_hours / total_hours > 0.3
             
-            # Обновляем счётчики тональности
+            # --- Настроение по дням/часам ---
+            mood_by_day = dict(profile.get('mood_by_day') or {})
+            old_day_mood = mood_by_day.get(day_of_week, 0)
+            day_count = mood_by_day.get(f'{day_of_week}_count', 0) + 1
+            mood_by_day[day_of_week] = (old_day_mood * (day_count - 1) + sentiment['sentiment']) / day_count
+            mood_by_day[f'{day_of_week}_count'] = day_count
+            
+            mood_by_hour = dict(profile.get('mood_by_hour') or {})
+            old_hour_mood = mood_by_hour.get(hour_str, 0)
+            hour_count = mood_by_hour.get(f'{hour_str}_count', 0) + 1
+            mood_by_hour[hour_str] = (old_hour_mood * (hour_count - 1) + sentiment['sentiment']) / hour_count
+            mood_by_hour[f'{hour_str}_count'] = hour_count
+            
+            # Лучший/худший день
+            day_moods = {k: v for k, v in mood_by_day.items() if not k.endswith('_count')}
+            best_mood_day = max(day_moods, key=day_moods.get) if day_moods else None
+            worst_mood_day = min(day_moods, key=day_moods.get) if day_moods else None
+            
+            # Лучший/худший час
+            hour_moods = {k: v for k, v in mood_by_hour.items() if not k.endswith('_count')}
+            best_mood_hour = int(max(hour_moods, key=hour_moods.get)) if hour_moods else None
+            worst_mood_hour = int(min(hour_moods, key=hour_moods.get)) if hour_moods else None
+            
+            # --- Счётчики тональности ---
             positive = profile['positive_messages'] + (1 if sentiment['sentiment_label'] == 'positive' else 0)
             negative = profile['negative_messages'] + (1 if sentiment['sentiment_label'] == 'negative' else 0)
             neutral = profile['neutral_messages'] + (1 if sentiment['sentiment_label'] == 'neutral' else 0)
-            total_msgs = profile['total_messages'] + 1
             
-            # Средняя тональность (скользящее среднее)
+            # Средние значения (скользящее среднее)
             old_sentiment = profile['sentiment_score'] or 0
             new_sentiment = (old_sentiment * (total_msgs - 1) + sentiment['sentiment']) / total_msgs
             
-            # Средняя токсичность
             old_toxicity = profile['toxicity_score'] or 0
-            msg_toxicity = min(sentiment['toxic_count'] / 3, 1.0)  # нормализуем до 1
+            msg_toxicity = min(sentiment['toxic_count'] / 3, 1.0)
             new_toxicity = (old_toxicity * (total_msgs - 1) + msg_toxicity) / total_msgs
             
-            # Средний юмор
             old_humor = profile['humor_score'] or 0
             msg_humor = min(sentiment['humor_count'] / 2, 1.0)
             new_humor = (old_humor * (total_msgs - 1) + msg_humor) / total_msgs
             
-            # Средняя длина сообщения
             old_avg_len = profile['avg_message_length'] or 0
             new_avg_len = (old_avg_len * (total_msgs - 1) + len(message_text)) / total_msgs
             
-            # Частота эмодзи
             old_emoji_rate = profile['emoji_usage_rate'] or 0
             msg_emoji_rate = sentiment['emoji_count'] / max(len(message_text), 1) * 100
             new_emoji_rate = (old_emoji_rate * (total_msgs - 1) + msg_emoji_rate) / total_msgs
             
-            # Определяем уровень активности
+            # --- НОВОЕ v2: Языковой стиль ---
+            old_caps = profile.get('caps_rate') or 0
+            new_caps = (old_caps * (total_msgs - 1) + lang_style['caps_ratio']) / total_msgs
+            
+            old_mat = profile.get('mat_rate') or 0
+            msg_mat = min(lang_style['mat_count'] / 3, 1.0)
+            new_mat = (old_mat * (total_msgs - 1) + msg_mat) / total_msgs
+            
+            old_slang = profile.get('slang_rate') or 0
+            msg_slang = min(lang_style['slang_count'] / 5, 1.0)
+            new_slang = (old_slang * (total_msgs - 1) + msg_slang) / total_msgs
+            
+            old_typo = profile.get('typo_rate') or 0
+            new_typo = (old_typo * (total_msgs - 1) + lang_style['typo_score']) / total_msgs
+            
+            old_question = profile.get('question_rate') or 0
+            msg_question = min(lang_style['question_count'], 1.0)
+            new_question = (old_question * (total_msgs - 1) + msg_question) / total_msgs
+            
+            old_exclaim = profile.get('exclamation_rate') or 0
+            msg_exclaim = min(lang_style['exclamation_count'], 1.0)
+            new_exclaim = (old_exclaim * (total_msgs - 1) + msg_exclaim) / total_msgs
+            
+            # --- НОВОЕ v2: Уникальные слова ---
+            old_unique_count = profile.get('unique_words_count') or 0
+            new_unique_count = old_unique_count + len(set(lang_style['unique_words']))
+            # Богатство словаря (примерная оценка)
+            vocabulary_richness = calculate_vocabulary_richness(new_unique_count, total_msgs * 10)  # примерно 10 слов на сообщение
+            
+            # --- НОВОЕ v2: Любимые фразы ---
+            favorite_phrases = list(profile.get('favorite_phrases') or [])
+            for phrase in catchphrases:
+                if phrase not in favorite_phrases:
+                    favorite_phrases.append(phrase)
+            favorite_phrases = favorite_phrases[-50:]  # храним последние 50
+            
+            # --- НОВОЕ v2: Любимые эмодзи ---
+            favorite_emojis = list(profile.get('favorite_emojis') or [])
+            for emoji in emojis_in_message:
+                if emoji not in favorite_emojis:
+                    favorite_emojis.append(emoji)
+            favorite_emojis = favorite_emojis[-30:]  # храним последние 30
+            
+            # --- НОВОЕ v2: Эмоциональные триггеры ---
+            trigger_topics = list(profile.get('trigger_topics') or [])
+            for trigger in emotional_triggers:
+                if trigger not in trigger_topics:
+                    trigger_topics.append(trigger)
+            trigger_topics = trigger_topics[-20:]
+            
+            # --- НОВОЕ v2: Паттерны ответов ---
+            messages_as_reply = (profile.get('messages_as_reply') or 0) + (1 if reply_to_user_id else 0)
+            reply_rate = messages_as_reply / total_msgs
+            
+            # --- НОВОЕ v2: Медиа предпочтения ---
+            old_voice_rate = profile.get('voice_messages_rate') or 0
+            is_voice = 1 if message_type == 'voice' else 0
+            new_voice_rate = (old_voice_rate * (total_msgs - 1) + is_voice) / total_msgs
+            
+            old_photo_rate = profile.get('photo_rate') or 0
+            is_photo = 1 if message_type == 'photo' else 0
+            new_photo_rate = (old_photo_rate * (total_msgs - 1) + is_photo) / total_msgs
+            
+            old_sticker_rate = profile.get('sticker_rate') or 0
+            is_sticker = 1 if message_type == 'sticker' else 0
+            new_sticker_rate = (old_sticker_rate * (total_msgs - 1) + is_sticker) / total_msgs
+            
+            old_video_rate = profile.get('video_rate') or 0
+            is_video = 1 if message_type in ('video', 'video_note') else 0
+            new_video_rate = (old_video_rate * (total_msgs - 1) + is_video) / total_msgs
+            
+            # --- Уровень активности ---
             if total_msgs > 1000:
                 activity_level = 'hyperactive'
             elif total_msgs > 500:
@@ -2148,19 +2595,25 @@ async def update_user_profile_comprehensive(
             else:
                 activity_level = 'lurker'
             
-            # Определяем стиль общения
-            if new_toxicity > 0.3:
-                communication_style = 'toxic'
+            # --- Стиль общения (расширенный) ---
+            if new_mat > 0.3:
+                communication_style = 'матершинник'
+            elif new_toxicity > 0.3:
+                communication_style = 'токсик'
             elif new_humor > 0.3:
-                communication_style = 'humorous'
+                communication_style = 'шутник'
+            elif new_caps > 0.3:
+                communication_style = 'крикун'
+            elif new_slang > 0.3:
+                communication_style = 'молодёжный'
             elif new_sentiment > 0.3:
-                communication_style = 'positive'
+                communication_style = 'позитивный'
             elif new_sentiment < -0.3:
-                communication_style = 'negative'
+                communication_style = 'негативный'
             else:
-                communication_style = 'neutral'
+                communication_style = 'нейтральный'
             
-            # Обновляем гендерные счётчики
+            # --- Гендер ---
             new_female_score = profile['gender_female_score'] + gender_result['female_score']
             new_male_score = profile['gender_male_score'] + gender_result['male_score']
             gender_total = new_female_score + new_male_score
@@ -2178,7 +2631,7 @@ async def update_user_profile_comprehensive(
                 gender_confidence = profile['gender_confidence']
                 detected_gender = profile['detected_gender']
             
-            # Обновляем профиль (per-chat!)
+            # ========== ОБНОВЛЯЕМ ПРОФИЛЬ (per-chat!) ==========
             await conn.execute("""
                 UPDATE user_profiles SET
                     first_name = COALESCE($3, first_name),
@@ -2205,6 +2658,31 @@ async def update_user_profile_comprehensive(
                     humor_score = $22,
                     activity_level = $23,
                     communication_style = $24,
+                    -- НОВЫЕ ПОЛЯ v2
+                    caps_rate = $25,
+                    mat_rate = $26,
+                    slang_rate = $27,
+                    typo_rate = $28,
+                    question_rate = $29,
+                    exclamation_rate = $30,
+                    mood_by_day = $31,
+                    mood_by_hour = $32,
+                    best_mood_day = $33,
+                    worst_mood_day = $34,
+                    best_mood_hour = $35,
+                    worst_mood_hour = $36,
+                    favorite_phrases = $37,
+                    favorite_emojis = $38,
+                    trigger_topics = $39,
+                    messages_as_reply = $40,
+                    reply_rate = $41,
+                    voice_messages_rate = $42,
+                    photo_rate = $43,
+                    sticker_rate = $44,
+                    video_rate = $45,
+                    unique_words_count = $46,
+                    vocabulary_richness = $47,
+                    profile_version = 2,
                     updated_at = $10
                 WHERE user_id = $1 AND chat_id = $2
             """, user_id, chat_id, first_name or None, username or None,
@@ -2212,11 +2690,22 @@ async def update_user_profile_comprehensive(
                  total_msgs, now, json.dumps(active_hours), peak_hour,
                  is_night_owl, is_early_bird, new_sentiment, positive, negative, neutral,
                  new_emoji_rate, new_avg_len, new_toxicity, new_humor,
-                 activity_level, communication_style)
+                 activity_level, communication_style,
+                 # Новые поля v2
+                 new_caps, new_mat, new_slang, new_typo, new_question, new_exclaim,
+                 json.dumps(mood_by_day), json.dumps(mood_by_hour),
+                 best_mood_day, worst_mood_day, best_mood_hour, worst_mood_hour,
+                 json.dumps(favorite_phrases), json.dumps(favorite_emojis),
+                 json.dumps(trigger_topics),
+                 messages_as_reply, reply_rate,
+                 new_voice_rate, new_photo_rate, new_sticker_rate, new_video_rate,
+                 new_unique_count, vocabulary_richness)
         
         else:
-            # Создаём новый профиль для ЭТОГО ЧАТА (per-chat!)
+            # ========== СОЗДАЁМ НОВЫЙ ПРОФИЛЬ (per-chat!) ==========
             active_hours = {str(hour): 1}
+            mood_by_day = {day_of_week: sentiment['sentiment'], f'{day_of_week}_count': 1}
+            mood_by_hour = {str(hour): sentiment['sentiment'], f'{str(hour)}_count': 1}
             
             detected_gender = gender_result['gender']
             gender_confidence = gender_result['confidence']
@@ -2226,6 +2715,22 @@ async def update_user_profile_comprehensive(
             negative = 1 if sentiment_label == 'negative' else 0
             neutral = 1 if sentiment_label == 'neutral' else 0
             
+            # Начальные значения для новых полей
+            initial_caps = lang_style['caps_ratio']
+            initial_mat = min(lang_style['mat_count'] / 3, 1.0)
+            initial_slang = min(lang_style['slang_count'] / 5, 1.0)
+            initial_typo = lang_style['typo_score']
+            initial_question = min(lang_style['question_count'], 1.0)
+            initial_exclaim = min(lang_style['exclamation_count'], 1.0)
+            
+            is_reply = 1 if reply_to_user_id else 0
+            is_voice = 1 if message_type == 'voice' else 0
+            is_photo = 1 if message_type == 'photo' else 0
+            is_sticker = 1 if message_type == 'sticker' else 0
+            is_video = 1 if message_type in ('video', 'video_note') else 0
+            
+            initial_vocab_richness = calculate_vocabulary_richness(len(lang_style['unique_words']), lang_style['word_count'])
+            
             await conn.execute("""
                 INSERT INTO user_profiles (
                     user_id, chat_id, first_name, username,
@@ -2234,12 +2739,28 @@ async def update_user_profile_comprehensive(
                     active_hours, peak_hour, is_night_owl, is_early_bird,
                     sentiment_score, positive_messages, negative_messages, neutral_messages,
                     emoji_usage_rate, avg_message_length, toxicity_score, humor_score,
-                    activity_level, communication_style, created_at, updated_at
+                    activity_level, communication_style,
+                    -- НОВЫЕ ПОЛЯ v2
+                    caps_rate, mat_rate, slang_rate, typo_rate, question_rate, exclamation_rate,
+                    mood_by_day, mood_by_hour, best_mood_day, worst_mood_day, best_mood_hour, worst_mood_hour,
+                    favorite_phrases, favorite_emojis, trigger_topics,
+                    messages_as_reply, reply_rate,
+                    voice_messages_rate, photo_rate, sticker_rate, video_rate,
+                    unique_words_count, vocabulary_richness,
+                    profile_version, created_at, updated_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, 1, 1, $9, $9, $9,
                     $10, $11, FALSE, FALSE,
                     $12, $13, $14, $15, $16, $17, $18, $19,
-                    'lurker', 'neutral', $9, $9
+                    'lurker', 'нейтральный',
+                    -- Новые значения
+                    $20, $21, $22, $23, $24, $25,
+                    $26, $27, $28, $28, $11, $11,
+                    $29, $30, $31,
+                    $32, $33,
+                    $34, $35, $36, $37,
+                    $38, $39,
+                    2, $9, $9
                 )
             """, user_id, chat_id, first_name or None, username or None,
                  detected_gender, gender_confidence, 
@@ -2249,7 +2770,14 @@ async def update_user_profile_comprehensive(
                  sentiment['emoji_count'] / max(len(message_text), 1) * 100,
                  len(message_text),
                  min(sentiment['toxic_count'] / 3, 1.0),
-                 min(sentiment['humor_count'] / 2, 1.0))
+                 min(sentiment['humor_count'] / 2, 1.0),
+                 # Новые поля v2
+                 initial_caps, initial_mat, initial_slang, initial_typo, initial_question, initial_exclaim,
+                 json.dumps(mood_by_day), json.dumps(mood_by_hour), day_of_week,
+                 json.dumps(catchphrases[:10]), json.dumps(emojis_in_message[:10]), json.dumps(emotional_triggers),
+                 is_reply, float(is_reply),
+                 float(is_voice), float(is_photo), float(is_sticker), float(is_video),
+                 len(lang_style['unique_words']), initial_vocab_richness)
         
         # Обновляем темы/интересы (per-chat!)
         for topic in topics:
@@ -2473,12 +3001,92 @@ async def get_user_profile_for_ai(user_id: int, chat_id: int, first_name: str = 
     }
     interests_readable = [interests_map.get(i, i) for i in interests]
     
+    # ========== НОВЫЕ ДАННЫЕ v2 ==========
+    
+    # Языковой стиль
+    mat_rate = profile.get('mat_rate', 0)
+    if mat_rate > 0.4:
+        traits.append('матерится как сапожник')
+    elif mat_rate > 0.2:
+        traits.append('любит крепкое словцо')
+    
+    caps_rate = profile.get('caps_rate', 0)
+    if caps_rate > 0.3:
+        traits.append('ОРЁТ КАПСОМ')
+    
+    slang_rate = profile.get('slang_rate', 0)
+    if slang_rate > 0.3:
+        traits.append('говорит на молодёжном сленге')
+    
+    question_rate = profile.get('question_rate', 0)
+    if question_rate > 0.4:
+        traits.append('вечно задаёт вопросы')
+    
+    # Настроение по времени
+    best_mood_day = profile.get('best_mood_day')
+    worst_mood_day = profile.get('worst_mood_day')
+    mood_patterns = []
+    if best_mood_day:
+        day_names = {'monday': 'понедельник', 'tuesday': 'вторник', 'wednesday': 'среда',
+                     'thursday': 'четверг', 'friday': 'пятница', 'saturday': 'суббота', 'sunday': 'воскресенье'}
+        mood_patterns.append(f"в {day_names.get(best_mood_day, best_mood_day)} в хорошем настроении")
+    if worst_mood_day:
+        day_names = {'monday': 'понедельник', 'tuesday': 'вторник', 'wednesday': 'среда',
+                     'thursday': 'четверг', 'friday': 'пятница', 'saturday': 'суббота', 'sunday': 'воскресенье'}
+        mood_patterns.append(f"в {day_names.get(worst_mood_day, worst_mood_day)} бывает мрачен")
+    
+    best_mood_hour = profile.get('best_mood_hour')
+    worst_mood_hour = profile.get('worst_mood_hour')
+    if worst_mood_hour is not None and 0 <= worst_mood_hour <= 5:
+        mood_patterns.append("ночью бывает подавлен")
+    
+    # Любимые фразы (коронные выражения)
+    favorite_phrases = profile.get('favorite_phrases') or []
+    catchphrases = favorite_phrases[:5] if favorite_phrases else []
+    
+    # Любимые эмодзи
+    favorite_emojis = profile.get('favorite_emojis') or []
+    top_emojis = favorite_emojis[:5] if favorite_emojis else []
+    
+    # Эмоциональные триггеры
+    trigger_topics = profile.get('trigger_topics') or []
+    triggers_text = ', '.join(trigger_topics[:3]) if trigger_topics else None
+    if triggers_text:
+        traits.append(f"бурно реагирует на темы: {triggers_text}")
+    
+    # Медиа предпочтения
+    voice_rate = profile.get('voice_messages_rate', 0)
+    if voice_rate > 0.2:
+        traits.append('часто записывает голосовые')
+    
+    sticker_rate = profile.get('sticker_rate', 0)
+    if sticker_rate > 0.3:
+        traits.append('обожает стикеры')
+    
+    # Словарный запас
+    vocabulary = profile.get('vocabulary_richness', 0)
+    if vocabulary > 0.7:
+        traits.append('богатый словарный запас')
+    elif vocabulary < 0.3:
+        traits.append('скудный словарь')
+    
+    # Паттерн реплаев
+    reply_rate = profile.get('reply_rate', 0)
+    if reply_rate > 0.7:
+        traits.append('в основном отвечает другим')
+    elif reply_rate < 0.2:
+        traits.append('редко отвечает, чаще пишет сам')
+    
     # Социальные связи
     top_interactions = profile.get('top_interactions', [])
     social = {
         'frequently_talks_to': [i['target_user_id'] for i in top_interactions[:3]],
         'interaction_count': sum(i['interaction_count'] for i in top_interactions)
     }
+    
+    # Crushes и enemies из профиля (если есть)
+    crushes = profile.get('crushes') or []
+    enemies = profile.get('enemies') or []
     
     # Формируем текстовое описание для AI
     traits_text = ', '.join(traits) if traits else 'обычный пользователь'
@@ -2497,7 +3105,16 @@ async def get_user_profile_for_ai(user_id: int, chat_id: int, first_name: str = 
     else:
         mood = "эмоционально нейтрален"
     
-    description = f"{name} — {traits_text}. Интересы: {interests_text}. {mood}. {peak_text}".strip()
+    # Добавляем паттерны настроения
+    mood_text = ". ".join(mood_patterns) if mood_patterns else ""
+    
+    # Коронные фразы
+    catchphrases_text = f"Коронные фразы: {', '.join(catchphrases[:3])}" if catchphrases else ""
+    
+    description = f"{name} — {traits_text}. Интересы: {interests_text}. {mood}. {peak_text}. {mood_text}. {catchphrases_text}".strip()
+    # Убираем лишние точки и пробелы
+    description = ' '.join(description.split())
+    description = description.replace('. .', '.').replace('..', '.').rstrip('.')
     
     return {
         'user_id': user_id,
@@ -2517,7 +3134,22 @@ async def get_user_profile_for_ai(user_id: int, chat_id: int, first_name: str = 
         'interests': interests,
         'interests_readable': interests_readable,
         'social': social,
-        'description': description  # Готовое описание для промпта
+        'description': description,  # Готовое описание для промпта
+        # ========== НОВЫЕ ПОЛЯ v2 ==========
+        'mat_rate': mat_rate,
+        'caps_rate': caps_rate,
+        'slang_rate': slang_rate,
+        'vocabulary_richness': vocabulary,
+        'favorite_phrases': catchphrases,
+        'favorite_emojis': top_emojis,
+        'trigger_topics': trigger_topics[:5],
+        'mood_patterns': mood_patterns,
+        'best_mood_day': best_mood_day,
+        'worst_mood_day': worst_mood_day,
+        'reply_rate': reply_rate,
+        'voice_rate': voice_rate,
+        'crushes': crushes[:3],
+        'enemies': enemies[:3],
     }
 
 

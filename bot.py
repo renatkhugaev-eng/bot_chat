@@ -98,7 +98,7 @@ else:
     async def get_user_gender(user_id): return 'unknown'
     async def analyze_and_update_user_gender(user_id, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
     async def update_user_gender_incrementally(user_id, new_message, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
-    async def update_user_profile_comprehensive(user_id, chat_id, message_text, timestamp, first_name="", username="", reply_to_user_id=None): pass
+    async def update_user_profile_comprehensive(user_id, chat_id, message_text, timestamp, first_name="", username="", reply_to_user_id=None, message_type="text", sticker_emoji=None): pass
     async def get_user_full_profile(user_id, chat_id): return None
     async def get_user_activity_report(user_id, chat_id): return {'error': 'PostgreSQL required'}
     async def get_chat_social_graph(chat_id): return []
@@ -3364,7 +3364,7 @@ async def _save_text_message(message: Message):
         reply_to_username=reply_to_username
     )
     
-    # Обновляем профиль пользователя
+    # Обновляем профиль пользователя (v2 - с расширенными данными)
     if USE_POSTGRES and message.text:
         try:
             await update_user_profile_comprehensive(
@@ -3374,7 +3374,8 @@ async def _save_text_message(message: Message):
                 timestamp=int(time.time()),
                 first_name=message.from_user.first_name or "",
                 username=message.from_user.username or "",
-                reply_to_user_id=reply_to_user_id
+                reply_to_user_id=reply_to_user_id,
+                message_type="text"
             )
         except Exception as e:
             logger.debug(f"Profile update error: {e}")

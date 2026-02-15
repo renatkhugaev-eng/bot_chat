@@ -755,9 +755,11 @@ async def update_user_profile_comprehensive(
     timestamp: int,
     first_name: str = "",
     username: str = "",
-    reply_to_user_id: int = None
+    reply_to_user_id: int = None,
+    message_type: str = "text",
+    sticker_emoji: str = None
 ):
-    """Stub для SQLite - профилирование не поддерживается"""
+    """Stub для SQLite - профилирование v2 не поддерживается"""
     pass
 
 
