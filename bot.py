@@ -2581,6 +2581,110 @@ async def cmd_say(message: Message):
         await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:50]}")
 
 
+# ==================== ГРЯЗНЫЙ СОН ====================
+
+DREAM_API_URL = os.getenv("DREAM_API_URL", "")
+
+@router.message(Command("сон", "dream", "son"))
+async def cmd_dream(message: Message):
+    """Генерирует грязный извращённый сон про человека"""
+    
+    if message.chat.type == "private":
+        await message.reply("Эта команда только для групповых чатов, одиночка ебаный")
+        return
+    
+    chat_id = message.chat.id
+    
+    # Определяем цель
+    target_user = None
+    target_name = None
+    target_id = None
+    
+    # Если реплай — сон про того на кого реплай
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        target_name = target_user.first_name or target_user.username or "Аноним"
+        target_id = target_user.id
+    else:
+        # Проверяем текст команды на имя/юзернейм
+        command_text = message.text or ""
+        parts = command_text.split(maxsplit=1)
+        if len(parts) > 1:
+            search_term = parts[1].strip()
+            # Ищем пользователя
+            if USE_POSTGRES:
+                found = await find_user_in_chat(chat_id, search_term)
+                if found:
+                    target_name = found.get('first_name') or found.get('username') or search_term
+                    target_id = found.get('user_id')
+                else:
+                    target_name = search_term
+            else:
+                target_name = search_term
+        else:
+            # Сон про автора сообщения
+            target_user = message.from_user
+            target_name = target_user.first_name or target_user.username or "Аноним"
+            target_id = target_user.id
+    
+    if not target_name:
+        await message.reply("Про кого сон-то? Напиши /сон Имя или реплайни на сообщение")
+        return
+    
+    # Получаем профиль для персонализации
+    gender = "unknown"
+    traits = []
+    
+    if USE_POSTGRES and target_id:
+        try:
+            profile = await get_user_profile_for_ai(target_id, chat_id, target_name, "")
+            if profile:
+                gender = profile.get('gender', 'unknown')
+                traits = profile.get('traits', [])
+        except Exception as e:
+            logger.debug(f"Could not get profile for dream: {e}")
+    
+    # Показываем что думаем
+    processing_msg = await message.reply("💤 Вспоминаю что приснилось...")
+    
+    try:
+        # Вызываем API
+        dream_url = DREAM_API_URL or VERCEL_API_URL.replace("/summary", "/dream")
+        
+        session = await get_http_session()
+        async with session.post(
+            dream_url,
+            json={
+                "name": target_name,
+                "gender": gender,
+                "traits": traits[:10]
+            },
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                await processing_msg.edit_text(f"Бля, забыла что снилось...")
+                return
+            
+            result = await response.json()
+        
+        dream_text = result.get("dream", "Ничего не помню, память отшибло...")
+        
+        # Удаляем сообщение о процессе и отправляем сон
+        await processing_msg.delete()
+        await message.reply(dream_text)
+        
+        logger.info(f"Dream generated for {target_name}")
+        metrics.track_command("сон")
+        
+    except asyncio.TimeoutError:
+        await processing_msg.edit_text("Бля, заснула пока вспоминала...")
+    except Exception as e:
+        logger.error(f"Dream error: {e}")
+        metrics.track_error()
+        await processing_msg.edit_text("Хуй там, ничего не помню...")
+
+
 # ==================== ПОИСК КАРТИНОК (SerpAPI - Google Images) ====================
 
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
