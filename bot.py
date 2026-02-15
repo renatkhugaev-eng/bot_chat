@@ -2567,11 +2567,8 @@ async def cmd_say(message: Message):
         # Удаляем сообщение о процессе
         await processing_msg.delete()
         
-        # Отправляем голосовое
-        await message.reply_voice(
-            voice=audio_file,
-            caption=f"🎤 Тётя Роза говорит..."
-        )
+        # Отправляем голосовое (без подписи)
+        await message.reply_voice(voice=audio_file)
         
         logger.info(f"TTS generated for user {message.from_user.id}: '{text[:30]}...'")
         metrics.track_command("скажи")
