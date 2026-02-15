@@ -3630,12 +3630,12 @@ CRINGE_KEYWORDS = [
     'чувств', 'эмоци', 'привязан', 'влюблен',
 ]
 
-# Шанс срабатывания (20% при обнаружении паттерна)
-CRINGE_TRIGGER_CHANCE = 0.20
+# Шанс срабатывания (60% при обнаружении паттерна)
+CRINGE_TRIGGER_CHANCE = 0.60
 
-# Кулдаун на чат (минимум 10 минут между реакциями)
+# Кулдаун на чат (минимум 2 минуты между реакциями)
 cringe_cooldowns: Dict[int, float] = {}
-CRINGE_COOLDOWN_SECONDS = 600  # 10 минут
+CRINGE_COOLDOWN_SECONDS = 120  # 2 минуты
 
 
 async def check_cringe_and_react(message: Message) -> bool:
@@ -3653,7 +3653,9 @@ async def check_cringe_and_react(message: Message) -> bool:
     
     # Проверяем кулдаун
     last_reaction = cringe_cooldowns.get(chat_id, 0)
-    if time.time() - last_reaction < CRINGE_COOLDOWN_SECONDS:
+    time_since_last = time.time() - last_reaction
+    if time_since_last < CRINGE_COOLDOWN_SECONDS:
+        logger.debug(f"CRINGE cooldown active: {CRINGE_COOLDOWN_SECONDS - time_since_last:.0f}s remaining")
         return False
     
     # Получаем профиль пользователя для персонализации шанса (per-chat!)
@@ -3705,8 +3707,10 @@ async def check_cringe_and_react(message: Message) -> bool:
     if not is_cringe:
         return False
     
+    logger.info(f"CRINGE detected ({cringe_reason}): '{message.text[:50]}...'")
+    
     # ПЕРСОНАЛИЗИРОВАННЫЙ шанс срабатывания на основе профиля
-    trigger_chance = CRINGE_TRIGGER_CHANCE  # База 20%
+    trigger_chance = CRINGE_TRIGGER_CHANCE  # База 60%
     
     # Увеличиваем шанс для определённых типов личности
     if user_profile:
@@ -3732,12 +3736,16 @@ async def check_cringe_and_react(message: Message) -> bool:
         if user_profile.get('is_night_owl') and 0 <= time.localtime().tm_hour < 6:
             trigger_chance += 0.05
     
-    # Ограничиваем максимум 50%
-    trigger_chance = min(trigger_chance, 0.50)
+    # Ограничиваем максимум 85%
+    trigger_chance = min(trigger_chance, 0.85)
     
     # Проверяем шанс
-    if random.random() > trigger_chance:
+    roll = random.random()
+    if roll > trigger_chance:
+        logger.info(f"CRINGE chance failed: rolled {roll:.2f} > {trigger_chance:.2f}, not reacting")
         return False
+    
+    logger.info(f"CRINGE chance success: rolled {roll:.2f} <= {trigger_chance:.2f}, REACTING!")
     
     # Создаём кликабельное упоминание
     user_mention = make_user_mention(
@@ -4451,7 +4459,7 @@ async def collect_messages_and_exp(message: Message):
     # Проверяем упоминание бота и отвечаем
     await check_bot_mention(message)
     
-    # Проверяем на кринж и реагируем (с шансом 5%)
+    # Проверяем на кринж и реагируем (шанс 60-85% в зависимости от профиля)
     await check_cringe_and_react(message)
     
     # Сохраняем информацию о чате
