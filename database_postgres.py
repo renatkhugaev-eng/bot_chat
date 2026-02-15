@@ -149,6 +149,14 @@ async def init_db():
         except Exception:
             pass  # Колонка уже существует
         
+        # Миграция: добавляем voice_transcription для голосовых
+        try:
+            await conn.execute("""
+                ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS voice_transcription TEXT
+            """)
+        except Exception:
+            pass  # Колонка уже существует
+        
         # Таблица сводок (память между сессиями)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS chat_summaries (
