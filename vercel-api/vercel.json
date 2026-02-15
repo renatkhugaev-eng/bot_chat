@@ -8,6 +8,30 @@
     },
     "api/analyze-image.py": {
       "maxDuration": 60
+    },
+    "api/diagnosis.py": {
+      "maxDuration": 60
+    },
+    "api/burn.py": {
+      "maxDuration": 60
+    },
+    "api/drink.py": {
+      "maxDuration": 60
+    },
+    "api/suck.py": {
+      "maxDuration": 60
+    },
+    "api/ventilate.py": {
+      "maxDuration": 60
+    },
+    "api/dream.py": {
+      "maxDuration": 60
+    },
+    "api/tts.py": {
+      "maxDuration": 60
+    },
+    "api/transcribe.py": {
+      "maxDuration": 60
     }
   }
 }
