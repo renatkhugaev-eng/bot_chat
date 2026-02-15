@@ -5,10 +5,10 @@ import re
 import time
 from typing import Optional, List, Dict
 
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ChatMemberUpdated, BufferedInputFile
+    ChatMemberUpdated, BufferedInputFile, TelegramObject
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
@@ -126,6 +126,73 @@ scheduler = AsyncIOScheduler()
 # Хранение активных событий и кулдаунов
 active_events = {}  # chat_id -> event_data
 cooldowns = {}  # (user_id, chat_id, action) -> timestamp
+
+# ==================== ЗАЩИТА ОТ КОМАНД В РЕПЛАЙ НА БОТА ====================
+
+FUCK_OFF_REPLIES = [
+    "Ты чё, ёбнутый? Нахуя ты меня тегаешь командой?",
+    "Отъебись от меня со своими командами",
+    "Блядина, кого ты тегаешь? Иди нахуй",
+    "Пошёл нахуй со своими командами, не трогай меня",
+    "Ебать ты дурак. Команды мне кидает. Отвали",
+    "Чё те надо, уёбок? Зачем меня тегать командой?",
+    "Иди нахуй, я тебе не собачка на команды реагировать",
+    "Ты кому команды шлёшь, блядь? Отъебись",
+    "Нахуй иди со своими командами, долбоёб",
+    "Ебанько, ты зачем меня тегнул командой? Отвали нахуй",
+    "Сука, ещё раз тегнешь — заблокирую нахуй",
+    "Команды он мне шлёт, пиздец. Иди на хуй",
+    "Ты чё творишь, мразь? Не тегай меня командами",
+    "Блять, ну и дебил. Отъебись со своими командами",
+    "Пиздуй отсюда с командами, не трогай тётю Розу",
+    "Ебать ты наглый. Команды мне. В пизду иди",
+    "Чё за хуйня? Зачем меня тегать командой, уёбище?",
+    "Нет блять, ты серьёзно? Команды мне кидаешь? Нахуй",
+    "Слышь, ты, ёбаный рот. Не тегай меня командами",
+    "Ахуеть ты дерзкий. Пошёл нахуй с командами",
+    "Мне похуй на твои команды, отъебись",
+    "Ебанутый? Зачем команду на меня? Иди нахуй",
+    "Тётя Роза не отвечает на команды в реплай. Отъебись.",
+    "Команды свои себе в жопу засунь, уёбок",
+    "Нахуя ты меня тегнул командой, дебил?",
+]
+
+# ID бота (кэшируем после первого запроса)
+_cached_bot_id: Optional[int] = None
+
+
+async def get_bot_id() -> int:
+    """Получить ID бота (кэшируется)"""
+    global _cached_bot_id
+    if _cached_bot_id is None:
+        bot_info = await bot.get_me()
+        _cached_bot_id = bot_info.id
+    return _cached_bot_id
+
+
+async def check_command_reply_to_bot(message: Message) -> bool:
+    """
+    Проверяет, является ли сообщение командой в реплай на бота.
+    Если да — отправляет нахуй и возвращает True (команду выполнять не надо).
+    """
+    # Проверяем что это команда
+    if not message.text or not message.text.startswith("/"):
+        return False
+    
+    # Проверяем что это реплай
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return False
+    
+    # Проверяем что реплай на бота
+    bot_id = await get_bot_id()
+    if message.reply_to_message.from_user.id != bot_id:
+        return False
+    
+    # Это реплай на бота с командой — посылаем нахуй
+    response = random.choice(FUCK_OFF_REPLIES)
+    await message.reply(response)
+    logger.info(f"Blocked command reply to bot from user {message.from_user.id}: {message.text[:30]}")
+    return True
 
 
 def check_cooldown(user_id: int, chat_id: int, action: str, cooldown_seconds: int) -> tuple[bool, int]:
@@ -6481,10 +6548,27 @@ async def on_shutdown():
     logger.info("✅ Бот остановлен корректно")
 
 
+class CommandReplyInterceptMiddleware(BaseMiddleware):
+    """Middleware для перехвата команд в реплай на бота"""
+    
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        # Проверяем только Message
+        if isinstance(event, Message):
+            # Если это команда в реплай на бота — блокируем
+            if await check_command_reply_to_bot(event):
+                return  # Не вызываем handler — команда заблокирована
+        
+        # Иначе — выполняем обычную обработку
+        return await handler(event, data)
+
+
 async def main():
     """Главная функция запуска бота"""
     # Инициализация БД
     await init_db()
+    
+    # Регистрируем middleware для перехвата команд в реплай на бота
+    dp.message.outer_middleware(CommandReplyInterceptMiddleware())
     
     # Подключаем роутер
     dp.include_router(router)
