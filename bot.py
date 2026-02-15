@@ -2484,6 +2484,106 @@ async def cmd_ventilate(message: Message):
         await processing_msg.edit_text(f"🪟 Форточка сломалась: {str(e)[:50]}")
 
 
+# ==================== ГОЛОСОВЫЕ СООБЩЕНИЯ (ElevenLabs TTS) ====================
+
+TTS_API_URL = os.getenv("TTS_API_URL", "")
+
+# Голоса ElevenLabs (можно менять)
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+
+
+@router.message(Command("скажи", "say", "voice", "голос"))
+async def cmd_say(message: Message):
+    """Тётя Роза говорит голосом! /скажи <текст>"""
+    
+    # Извлекаем текст после команды
+    command_text = message.text or ""
+    
+    # Убираем команду из текста
+    for cmd in ["/скажи", "/say", "/voice", "/голос"]:
+        if command_text.lower().startswith(cmd):
+            text = command_text[len(cmd):].strip()
+            break
+    else:
+        text = ""
+    
+    # Если нет текста, проверяем реплай
+    if not text and message.reply_to_message and message.reply_to_message.text:
+        text = message.reply_to_message.text[:500]
+    
+    if not text:
+        await message.reply(
+            "🎤 <b>Использование:</b>\n"
+            "<code>/скажи текст</code> — тётя Роза скажет это голосом\n\n"
+            "Или ответь на сообщение командой /скажи",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    # Лимит текста
+    if len(text) > 500:
+        text = text[:500]
+        await message.reply("⚠️ Текст обрезан до 500 символов")
+    
+    # Проверяем API URL
+    tts_url = TTS_API_URL or VERCEL_API_URL.replace("/summary", "/tts")
+    if not tts_url or "your-vercel" in tts_url:
+        await message.reply("❌ TTS API не настроен")
+        return
+    
+    processing_msg = await message.reply("🎤 Записываю голосовое...")
+    
+    try:
+        session = await get_http_session()
+        
+        async with session.post(
+            tts_url,
+            json={
+                "text": text,
+                "voice_id": ELEVENLABS_VOICE_ID
+            },
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"TTS API error: {response.status} - {error_text}")
+                await processing_msg.edit_text(f"❌ Ошибка генерации: {response.status}")
+                return
+            
+            result = await response.json()
+        
+        audio_base64 = result.get("audio")
+        if not audio_base64:
+            await processing_msg.edit_text("❌ Не удалось сгенерировать аудио")
+            return
+        
+        # Декодируем base64 в bytes
+        import base64
+        audio_bytes = base64.b64decode(audio_base64)
+        
+        # Создаём файл для отправки
+        audio_file = BufferedInputFile(audio_bytes, filename="teta_roza.mp3")
+        
+        # Удаляем сообщение о процессе
+        await processing_msg.delete()
+        
+        # Отправляем голосовое
+        await message.reply_voice(
+            voice=audio_file,
+            caption=f"🎤 Тётя Роза говорит..."
+        )
+        
+        logger.info(f"TTS generated for user {message.from_user.id}: '{text[:30]}...'")
+        metrics.track_command("скажи")
+        
+    except asyncio.TimeoutError:
+        await processing_msg.edit_text("⏱️ Тётя Роза задумалась слишком надолго...")
+    except Exception as e:
+        logger.error(f"TTS error: {e}")
+        metrics.track_error()
+        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:50]}")
+
+
 # ==================== ПОИСК КАРТИНОК (SerpAPI - Google Images) ====================
 
 SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
