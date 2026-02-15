@@ -1,6 +1,7 @@
 """
 Генератор извращённых снов для команды /сон
 Грязно, грубо, без цензуры
+Использует Vercel AI Gateway
 """
 
 from http.server import BaseHTTPRequestHandler
@@ -9,7 +10,7 @@ import urllib.request
 import urllib.error
 import os
 
-ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
 
 SYSTEM_PROMPT = """Ты — грязный рассказчик снов. Пьяная баба которая рассказывает что ей приснилось про человека.
 
@@ -37,50 +38,6 @@ SYSTEM_PROMPT = """Ты — грязный рассказчик снов. Пья
 
 НАЧИНАЙ СРАЗУ с фразы типа "Бля, слушай..." или "Ебать, мне такое приснилось..." """
 
-def generate_dream(name: str, gender: str = "unknown", traits: list = None) -> str:
-    """Генерирует грязный сон про человека"""
-    
-    traits_text = ""
-    if traits:
-        traits_text = f"Особенности этого человека: {', '.join(traits[:5])}"
-    
-    gender_text = ""
-    if gender == "мужской":
-        gender_text = "Это мужик."
-    elif gender == "женский":
-        gender_text = "Это баба."
-    
-    user_prompt = f"""Расскажи грязный сон про {name}. {gender_text} {traits_text}
-
-Просто расскажи историю сна — пошлую, с матом, смешную. Как будто подруге рассказываешь."""
-
-    request_body = json.dumps({
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 500,
-        "messages": [
-            {"role": "user", "content": user_prompt}
-        ],
-        "system": SYSTEM_PROMPT
-    }).encode('utf-8')
-    
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=request_body,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01"
-        },
-        method="POST"
-    )
-    
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            return result['content'][0]['text']
-    except Exception as e:
-        return f"Бля, забыла что снилось... Память отшибло нахуй. ({str(e)[:50]})"
-
 
 class handler(BaseHTTPRequestHandler):
     def _send_json(self, data, status=200):
@@ -101,8 +58,9 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
     
     def do_POST(self):
-        if not ANTHROPIC_API_KEY:
-            self._send_error("API key not configured", 500)
+        api_key = os.environ.get('VERCEL_AI_GATEWAY_KEY', '').strip()
+        if not api_key:
+            self._send_error("VERCEL_AI_GATEWAY_KEY not configured", 500)
             return
         
         try:
@@ -121,9 +79,55 @@ class handler(BaseHTTPRequestHandler):
             self._send_error("Name is required")
             return
         
-        dream = generate_dream(name, gender, traits)
+        # Формируем промпт
+        traits_text = ""
+        if traits:
+            traits_text = f"Особенности этого человека: {', '.join(traits[:5])}"
         
-        self._send_json({
-            "dream": dream,
-            "name": name
-        })
+        gender_text = ""
+        if gender == "мужской":
+            gender_text = "Это мужик."
+        elif gender == "женский":
+            gender_text = "Это баба."
+        
+        user_prompt = f"""Расскажи грязный сон про {name}. {gender_text} {traits_text}
+
+Просто расскажи историю сна — пошлую, с матом, смешную. Как будто подруге рассказываешь."""
+
+        try:
+            request_body = json.dumps({
+                "model": "anthropic/claude-sonnet-4-20250514",
+                "max_tokens": 500,
+                "temperature": 1.0,
+                "system": SYSTEM_PROMPT,
+                "messages": [
+                    {"role": "user", "content": user_prompt}
+                ]
+            }).encode('utf-8')
+            
+            req = urllib.request.Request(
+                AI_GATEWAY_URL,
+                data=request_body,
+                headers={
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {api_key}',
+                    'anthropic-version': '2023-06-01'
+                },
+                method='POST'
+            )
+            
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode('utf-8'))
+            
+            dream_text = result.get("content", [{}])[0].get("text", "Бля, забыла что снилось...")
+            
+            self._send_json({
+                "dream": dream_text,
+                "name": name
+            })
+            
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8') if e.fp else str(e)
+            self._send_error(f"AI Gateway error: {e.code}", 500)
+        except Exception as e:
+            self._send_error(f"Error: {str(e)[:100]}", 500)
