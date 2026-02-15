@@ -3714,6 +3714,9 @@ async def check_cringe_and_react(message: Message) -> bool:
     if not message.text or len(message.text) < 10:
         return False
     
+    # DEBUG: Логируем что функция вызывается
+    logger.info(f"CRINGE_CHECK: Checking message '{message.text[:40]}...' from user {message.from_user.id}")
+    
     chat_id = message.chat.id
     user_id = message.from_user.id
     text_lower = message.text.lower()
@@ -3722,7 +3725,9 @@ async def check_cringe_and_react(message: Message) -> bool:
     last_reaction = cringe_cooldowns.get(chat_id, 0)
     time_since_last = time.time() - last_reaction
     if time_since_last < CRINGE_COOLDOWN_SECONDS:
-        logger.debug(f"CRINGE cooldown active: {CRINGE_COOLDOWN_SECONDS - time_since_last:.0f}s remaining")
+        # Логируем только если текст похож на кринж (чтобы не спамить)
+        if len(message.text) > 15:
+            logger.info(f"CRINGE cooldown active: {CRINGE_COOLDOWN_SECONDS - time_since_last:.0f}s remaining for chat {chat_id}")
         return False
     
     # Получаем профиль пользователя для персонализации шанса (per-chat!)
@@ -4522,6 +4527,9 @@ async def collect_messages_and_exp(message: Message):
     
     user_id = message.from_user.id
     chat_id = message.chat.id
+    
+    # DEBUG: Логируем что хэндлер вызывается
+    logger.info(f"MSG_HANDLER: Got text message from {user_id} in chat {chat_id}: '{message.text[:30] if message.text else 'None'}...'")
     
     # Проверяем упоминание бота и отвечаем
     await check_bot_mention(message)
