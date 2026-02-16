@@ -69,7 +69,8 @@ if USE_POSTGRES:
         update_user_gender_incrementally, update_user_profile_comprehensive,
         get_user_full_profile, get_user_activity_report, get_chat_social_graph,
         get_user_profile_for_ai, get_enriched_chat_data_for_ai, get_chat_social_data_for_ai,
-        find_user_in_chat, get_all_chat_profiles
+        find_user_in_chat, get_all_chat_profiles, get_user_memories,
+        get_active_chats_for_auto_summary
     )
 else:
     from database import (
@@ -108,6 +109,8 @@ else:
     async def get_enriched_chat_data_for_ai(chat_id, hours=5): return {'profiles': [], 'profiles_text': '', 'social': {}, 'social_text': ''}
     async def get_chat_social_data_for_ai(chat_id): return {'relationships': [], 'conflicts': [], 'friendships': [], 'description': ''}
     async def get_all_chat_profiles(chat_id, limit=50): return []
+    async def get_user_memories(chat_id, user_id, limit=10): return []
+    async def get_active_chats_for_auto_summary(min_messages=50, hours=12): return []
     async def find_user_in_chat(chat_id, search_term): return None
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
@@ -286,6 +289,69 @@ async def gather_user_context(chat_id: int, user_id: int, limit: int = 1000) -> 
         return "\n".join(context_parts), messages_found
     else:
         return "Сообщений нет — молчит как партизан", 0
+
+
+async def gather_user_memory(chat_id: int, user_id: int, user_name: str = "") -> str:
+    """
+    Собирает ВСЮ память о пользователе для AI-команд:
+    - Профиль (пол, стиль, токсичность, юмор, интересы)
+    - Воспоминания (факты, активность, отношения)
+    - Социальные связи (друзья, враги)
+    
+    Возвращает форматированную строку для контекста AI.
+    """
+    if not USE_POSTGRES:
+        return ""
+    
+    memory_parts = []
+    
+    try:
+        # 1. Профиль пользователя
+        profile = await get_user_profile_for_ai(user_id, chat_id, user_name, "")
+        if profile:
+            gender = profile.get('gender', 'неизвестно')
+            style = profile.get('communication_style', '')
+            activity = profile.get('activity_level', '')
+            traits = profile.get('traits', [])
+            interests = profile.get('interests', [])
+            
+            profile_lines = []
+            if gender != 'unknown':
+                profile_lines.append(f"Пол: {gender}")
+            if style:
+                profile_lines.append(f"Стиль: {style}")
+            if activity:
+                profile_lines.append(f"Активность: {activity}")
+            if traits:
+                profile_lines.append(f"Черты: {', '.join(traits[:5])}")
+            if interests:
+                profile_lines.append(f"Интересы: {', '.join(interests[:5])}")
+            
+            # Социальные связи
+            social = profile.get('social', {})
+            if social.get('friends'):
+                profile_lines.append(f"Друзья: {', '.join(social['friends'][:3])}")
+            if social.get('enemies'):
+                profile_lines.append(f"Конфликты с: {', '.join(social['enemies'][:3])}")
+            
+            if profile_lines:
+                memory_parts.append("=== ПРОФИЛЬ ===")
+                memory_parts.extend(profile_lines)
+        
+        # 2. Воспоминания о пользователе
+        memories = await get_user_memories(chat_id, user_id, limit=10)
+        if memories:
+            memory_parts.append("\n=== ВОСПОМИНАНИЯ ===")
+            for m in memories:
+                memory_type = m.get('memory_type', '')
+                memory_text = m.get('memory_text', '')
+                if memory_text:
+                    memory_parts.append(f"• [{memory_type}] {memory_text[:150]}")
+        
+    except Exception as e:
+        logger.warning(f"Could not gather user memory: {e}")
+    
+    return "\n".join(memory_parts) if memory_parts else ""
 
 
 # ==================== RATE LIMITER ДЛЯ API ====================
@@ -1737,22 +1803,27 @@ async def cmd_poem(message: Message):
     metrics.track_command("poem")
     
     try:
-        # Собираем контекст (используем новую функцию)
+        # Собираем ПОЛНЫЙ контекст: сообщения + память + профиль
         context_parts = []
         if target_user:
             context_parts.append(f"Ник: @{target_user.username}" if target_user.username else "Ник: нет")
         
+        # Память о пользователе (профиль, воспоминания, связи)
         if target_user_id:
+            user_memory = await gather_user_memory(chat_id, target_user_id, target_name)
+            if user_memory:
+                context_parts.append(user_memory)
+            
             user_context, messages_found = await gather_user_context(chat_id, target_user_id)
             if messages_found > 0:
                 context_parts.append(f"\n=== СООБЩЕНИЯ ({messages_found} шт) ===")
                 context_parts.append(user_context)
-                context_parts.append("=== ИСПОЛЬЗУЙ ЭТО ДЛЯ УНИЖЕНИЯ! ===")
+                context_parts.append("=== ИСПОЛЬЗУЙ ВСЁ ВЫШЕ ДЛЯ УНИЖЕНИЯ! ===")
         else:
             messages_found = 0
         
         context = "\n".join(context_parts) if context_parts else "Обычный участник чата"
-        logger.info(f"Poem: {target_name}, {messages_found} msgs")
+        logger.info(f"Poem: {target_name}, {messages_found} msgs, memory: {bool(target_user_id)}")
         
         metrics.track_api_call("poem")
         session = await get_http_session()
@@ -1841,17 +1912,22 @@ async def cmd_diagnosis(message: Message):
     metrics.track_command("diagnosis")
     
     try:
-        # Собираем контекст
+        # Собираем ПОЛНЫЙ контекст: сообщения + память
         context, messages_found = await gather_user_context(chat_id, target_user_id) if target_user_id else ("Пациент молчалив — это симптом", 0)
-        logger.info(f"Diagnosis: {target_name}, {messages_found} msgs")
         
-        # Получаем профиль пользователя для персонализации (per-chat!)
+        # Добавляем память о пользователе
+        user_memory = ""
         user_profile = {}
         if USE_POSTGRES and target_user_id:
             try:
+                user_memory = await gather_user_memory(chat_id, target_user_id, target_name)
                 user_profile = await get_user_profile_for_ai(target_user_id, message.chat.id, target_name, target_username or "")
             except Exception as e:
-                logger.debug(f"Could not get profile for diagnosis: {e}")
+                logger.debug(f"Could not get memory/profile for diagnosis: {e}")
+        
+        # Объединяем память и сообщения
+        full_context = f"{user_memory}\n\n=== СООБЩЕНИЯ ===\n{context}" if user_memory else context
+        logger.info(f"Diagnosis: {target_name}, {messages_found} msgs, memory: {bool(user_memory)}")
         
         metrics.track_api_call("diagnosis")
         session = await get_http_session()
@@ -1860,8 +1936,8 @@ async def cmd_diagnosis(message: Message):
                 json={
                     "name": target_name, 
                     "username": target_username or "", 
-                    "context": context,
-                    "profile": user_profile  # Передаём профиль для персонализации
+                    "context": full_context,
+                    "profile": user_profile
                 }
             ) as response:
                 if response.status == 200:
@@ -1941,15 +2017,20 @@ async def cmd_burn(message: Message):
     metrics.track_command("burn")
     
     try:
-        # Собираем контекст
+        # Собираем ПОЛНЫЙ контекст: память + сообщения
+        user_memory = ""
+        if target_user_id:
+            user_memory = await gather_user_memory(chat_id, target_user_id, target_name)
+        
         context, messages_found = await gather_user_context(chat_id, target_user_id) if target_user_id else ("Горел молча, как и жил", 0)
-        logger.info(f"Burn: {target_name}, {messages_found} msgs")
+        full_context = f"{user_memory}\n\n=== СООБЩЕНИЯ ===\n{context}" if user_memory else context
+        logger.info(f"Burn: {target_name}, {messages_found} msgs, memory: {bool(user_memory)}")
         
         metrics.track_api_call("burn")
         session = await get_http_session()
         async with session.post(
                 burn_api_url,
-                json={"name": target_name, "username": target_username or "", "context": context}
+                json={"name": target_name, "username": target_username or "", "context": full_context}
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -2028,15 +2109,20 @@ async def cmd_drink(message: Message):
     metrics.track_command("drink")
     
     try:
-        # Собираем контекст
+        # Собираем ПОЛНЫЙ контекст: память + сообщения
+        user_memory = ""
+        if target_user_id:
+            user_memory = await gather_user_memory(chat_id, target_user_id, target_name)
+        
         context, messages_found = await gather_user_context(chat_id, target_user_id) if target_user_id else ("Молчал как партизан", 0)
-        logger.info(f"Drink: {target_name}, {messages_found} msgs")
+        full_context = f"{user_memory}\n\n=== СООБЩЕНИЯ ===\n{context}" if user_memory else context
+        logger.info(f"Drink: {target_name}, {messages_found} msgs, memory: {bool(user_memory)}")
         
         metrics.track_api_call("drink")
         session = await get_http_session()
         async with session.post(
                 drink_api_url,
-                json={"name": target_name, "username": target_username or "", "context": context}
+                json={"name": target_name, "username": target_username or "", "context": full_context}
             ) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -2070,6 +2156,7 @@ async def cmd_suck(message: Message):
         await message.answer("❌ Сосать только публично!")
         return
     
+    chat_id = message.chat.id
     target_name = None
     target_id = None
     target_username = None
@@ -2156,11 +2243,17 @@ async def cmd_suck(message: Message):
     metrics.track_command("suck")
     
     try:
+        # Собираем память для персонализации
+        user_memory = ""
+        if target_id:
+            user_memory = await gather_user_memory(chat_id, target_id, target_name)
+        
         metrics.track_api_call("suck")
         session = await get_http_session()
         async with session.post(SUCK_API_URL, json={
-            "name": target_name,  # Для API отправляем просто имя
-            "profile": target_profile
+            "name": target_name,
+            "profile": target_profile,
+            "memory": user_memory
         }) as response:
                 if response.status == 200:
                     result = await response.json()
@@ -2673,9 +2766,10 @@ async def cmd_dream(message: Message):
         await message.reply("Про кого сон-то? Напиши /сон Имя или реплайни на сообщение")
         return
     
-    # Получаем профиль для персонализации
+    # Получаем профиль И память для персонализации
     gender = "unknown"
     traits = []
+    user_memory = ""
     
     if USE_POSTGRES and target_id:
         try:
@@ -2683,8 +2777,11 @@ async def cmd_dream(message: Message):
             if profile:
                 gender = profile.get('gender', 'unknown')
                 traits = profile.get('traits', [])
+            
+            # Собираем память для более персонализированного сна
+            user_memory = await gather_user_memory(chat_id, target_id, target_name)
         except Exception as e:
-            logger.debug(f"Could not get profile for dream: {e}")
+            logger.debug(f"Could not get profile/memory for dream: {e}")
     
     # Показываем что думаем
     processing_msg = await message.reply("💤 Вспоминаю что приснилось...")
@@ -2704,7 +2801,8 @@ async def cmd_dream(message: Message):
             json={
                 "name": target_name,
                 "gender": gender,
-                "traits": traits[:10]
+                "traits": traits[:10],
+                "memory": user_memory  # Передаём память для персонализации
             },
             timeout=aiohttp.ClientTimeout(total=30)
         ) as response:
@@ -5938,6 +6036,128 @@ async def log_database_stats():
         logger.error(f"❌ Ошибка статистики БД: {e}")
 
 
+async def scheduled_auto_summaries():
+    """
+    Автоматическая генерация сводок для активных чатов (каждые 6 часов).
+    Сводки НЕ отправляются в чат — только сохраняются в память для обучения.
+    """
+    if not USE_POSTGRES:
+        return
+    
+    try:
+        # Получаем активные чаты (50+ сообщений за 12 часов)
+        active_chats = await get_active_chats_for_auto_summary(min_messages=50, hours=12)
+        
+        if not active_chats:
+            logger.info("🧠 Авто-сводки: нет активных чатов")
+            return
+        
+        logger.info(f"🧠 Авто-сводки: найдено {len(active_chats)} активных чатов")
+        
+        summaries_created = 0
+        memories_created = 0
+        
+        for chat_info in active_chats:
+            chat_id = chat_info['chat_id']
+            message_count = chat_info['message_count']
+            
+            try:
+                # Получаем статистику чата
+                stats = await get_chat_statistics(chat_id, hours=12)
+                if not stats or stats.get('total_messages', 0) < 30:
+                    continue
+                
+                # Получаем предыдущие сводки и память
+                previous_summaries = await get_previous_summaries(chat_id, limit=2)
+                memories = await get_memories(chat_id, limit=15)
+                
+                # Получаем профили для персонализации
+                enriched = await get_enriched_chat_data_for_ai(chat_id, hours=12)
+                user_profiles = enriched.get('profiles', [])
+                
+                # Генерируем сводку через API
+                session = await get_http_session()
+                try:
+                    async with session.post(
+                        VERCEL_API_URL,
+                        json={
+                            "messages": stats.get('sample_messages', [])[:100],
+                            "stats": {
+                                "total_messages": stats.get('total_messages', 0),
+                                "unique_users": stats.get('unique_users', 0),
+                                "top_authors": stats.get('top_authors', [])[:10],
+                                "reply_pairs": stats.get('reply_pairs', [])[:5]
+                            },
+                            "chat_title": f"Чат {chat_id}",
+                            "hours": 12,
+                            "previous_summaries": previous_summaries,
+                            "memories": memories,
+                            "user_profiles": user_profiles,
+                            "auto_mode": True  # Флаг для API — более краткая сводка
+                        },
+                        timeout=aiohttp.ClientTimeout(total=60)
+                    ) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            summary = result.get("summary", "")
+                            
+                            if summary and len(summary) > 50:
+                                # Сохраняем сводку
+                                top_author = stats.get('top_authors', [{}])[0]
+                                await save_summary(
+                                    chat_id=chat_id,
+                                    summary_text=summary[:2000],
+                                    top_talker_username=top_author.get('username'),
+                                    top_talker_name=top_author.get('first_name'),
+                                    top_talker_count=top_author.get('msg_count'),
+                                )
+                                summaries_created += 1
+                                
+                                # Сохраняем воспоминания об активных участниках
+                                for author in stats.get('top_authors', [])[:5]:
+                                    if author.get('msg_count', 0) >= 10:
+                                        await save_memory(
+                                            chat_id=chat_id,
+                                            user_id=author.get('user_id', 0),
+                                            username=author.get('username'),
+                                            first_name=author.get('first_name'),
+                                            memory_type="activity",
+                                            memory_text=f"Был активен: {author.get('msg_count')} сообщений за 12ч",
+                                            relevance_score=min(author.get('msg_count', 0) // 10, 10)
+                                        )
+                                        memories_created += 1
+                                
+                                # Сохраняем воспоминания о взаимодействиях
+                                for pair in stats.get('reply_pairs', [])[:3]:
+                                    if pair.get('replies', 0) >= 5:
+                                        await save_memory(
+                                            chat_id=chat_id,
+                                            user_id=pair.get('user_id', 0),
+                                            username=pair.get('username'),
+                                            first_name=pair.get('first_name'),
+                                            memory_type="relationship",
+                                            memory_text=f"Общался с {pair.get('target_name', '???')}: {pair.get('replies')} реплаев",
+                                            relevance_score=min(pair.get('replies', 0) // 5, 10)
+                                        )
+                                        memories_created += 1
+                                
+                except asyncio.TimeoutError:
+                    logger.warning(f"⏰ Авто-сводка для чата {chat_id}: таймаут")
+                except Exception as e:
+                    logger.warning(f"❌ Авто-сводка для чата {chat_id}: {e}")
+                
+                # Небольшая пауза между чатами
+                await asyncio.sleep(2)
+                
+            except Exception as e:
+                logger.warning(f"❌ Ошибка авто-сводки чата {chat_id}: {e}")
+        
+        logger.info(f"🧠 Авто-сводки завершены: {summaries_created} сводок, {memories_created} воспоминаний")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка авто-сводок: {e}")
+
+
 async def cleanup_memory():
     """Очистка памяти (cooldowns и api_calls) — запускается каждые 10 минут"""
     try:
@@ -7479,13 +7699,14 @@ async def main():
     if USE_POSTGRES:
         scheduler.add_job(scheduled_cleanup, 'interval', hours=6, id='cleanup')
         scheduler.add_job(log_database_stats, 'interval', hours=1, id='stats')
+        scheduler.add_job(scheduled_auto_summaries, 'interval', hours=6, id='auto_summaries')
     
     # Очистка памяти (cooldowns и api_calls) каждые 10 минут
     scheduler.add_job(cleanup_memory, 'interval', minutes=10, id='memory_cleanup')
     scheduler.start()
     
     if USE_POSTGRES:
-        logger.info("⏰ Планировщик запущен: очистка БД (6ч), статистика (1ч), память (10м)")
+        logger.info("⏰ Планировщик запущен: очистка БД (6ч), статистика (1ч), авто-сводки (6ч), память (10м)")
     else:
         logger.info("⏰ Планировщик запущен: очистка памяти (10м)")
     

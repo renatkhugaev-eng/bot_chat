@@ -1288,6 +1288,42 @@ async def get_memories(chat_id: int, limit: int = 20) -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+async def get_user_memories(chat_id: int, user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    """Получить воспоминания о конкретном пользователе в чате"""
+    current_time = int(time.time())
+    
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT memory_type, memory_text, relevance_score, created_at
+            FROM chat_memories 
+            WHERE chat_id = $1 AND user_id = $2
+              AND (expires_at IS NULL OR expires_at > $3)
+            ORDER BY relevance_score DESC, created_at DESC
+            LIMIT $4
+        """, chat_id, user_id, current_time, limit)
+        return [dict(row) for row in rows]
+
+
+async def get_active_chats_for_auto_summary(min_messages: int = 50, hours: int = 12) -> List[Dict[str, Any]]:
+    """Получить активные чаты для автоматической генерации сводок"""
+    since_time = int(time.time()) - (hours * 3600)
+    
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT 
+                chat_id,
+                COUNT(*) as message_count,
+                COUNT(DISTINCT user_id) as unique_users
+            FROM chat_messages 
+            WHERE created_at >= $1
+            GROUP BY chat_id
+            HAVING COUNT(*) >= $2
+            ORDER BY COUNT(*) DESC
+            LIMIT 50
+        """, since_time, min_messages)
+        return [dict(row) for row in rows]
+
+
 async def get_user_memories(chat_id: int, user_id: int) -> List[Dict[str, Any]]:
     """Получить воспоминания о конкретном участнике"""
     current_time = int(time.time())
