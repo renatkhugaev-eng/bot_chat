@@ -6,6 +6,8 @@ from http.server import BaseHTTPRequestHandler
 import json
 import random
 
+MAX_CONTENT_LENGTH = 100 * 1024  # 100 KB - защита от DoS
+
 # УЛЬТРА-ГРЯЗНЫЕ ответы
 DIRTY_RESPONSES = [
     # Спермо-тема
@@ -148,9 +150,20 @@ def get_profile_addition(profile: dict) -> str:
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
-            content_length = int(self.headers['Content-Length'])
+            content_length = int(self.headers.get('Content-Length', 0))
+            
+            # Защита от слишком больших запросов
+            if content_length > MAX_CONTENT_LENGTH:
+                self._send_error(413, "Request body too large")
+                return
+            
             post_data = self.rfile.read(content_length)
-            data = json.loads(post_data.decode('utf-8'))
+            
+            try:
+                data = json.loads(post_data.decode('utf-8')) if post_data else {}
+            except json.JSONDecodeError as e:
+                self._send_error(400, f"Invalid JSON: {str(e)}")
+                return
             
             name = data.get('name', 'Эй ты')
             profile = data.get('profile', {})

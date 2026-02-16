@@ -12,6 +12,9 @@ import os
 
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
 
+# Максимальный размер запроса (защита от DoS)
+MAX_CONTENT_LENGTH = 100 * 1024  # 100 KB
+
 SYSTEM_PROMPT = """<persona>
 Ты — подруга-алкашка. Пьяная баба которая вечно рассказывает ебанутые сны. Тебе приснился тупой сон про человека и ты его пересказываешь — грубо, по-русски, с матом и сленгом.
 </persona>
@@ -59,15 +62,15 @@ SYSTEM_PROMPT = """<persona>
 
 
 class handler(BaseHTTPRequestHandler):
-    def _send_json(self, data, status=200):
+    def _send_json(self, status: int, data: dict):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
     
-    def _send_error(self, message, status=400):
-        self._send_json({"error": message}, status)
+    def _send_error(self, status: int, message: str):
+        self._send_json(status, {"error": message})
     
     def do_OPTIONS(self):
         self.send_response(200)
@@ -79,23 +82,32 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         api_key = os.environ.get('VERCEL_AI_GATEWAY_KEY', '').strip()
         if not api_key:
-            self._send_error("VERCEL_AI_GATEWAY_KEY not configured", 500)
+            self._send_error(500, "VERCEL_AI_GATEWAY_KEY not configured")
             return
         
         try:
+            # Проверяем размер запроса (защита от DoS)
             content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > MAX_CONTENT_LENGTH:
+                self._send_error(413, "Request too large")
+                return
+            
             body = self.rfile.read(content_length).decode('utf-8')
             data = json.loads(body) if body else {}
-        except:
-            self._send_error("Invalid JSON")
+        except json.JSONDecodeError:
+            self._send_error(400, "Invalid JSON")
+            return
+        except Exception as e:
+            self._send_error(400, f"Request error: {str(e)[:100]}")
             return
         
         name = data.get('name', 'Аноним')
         gender = data.get('gender', 'unknown')
         traits = data.get('traits', [])
+        memory = data.get('memory', '')  # Память о пользователе для персонализации
         
         if not name or name == 'Аноним':
-            self._send_error("Name is required")
+            self._send_error(400, "Name is required")
             return
         
         # Формируем промпт
@@ -109,9 +121,14 @@ class handler(BaseHTTPRequestHandler):
         elif gender == "женский":
             gender_text = "Это баба."
         
-        user_prompt = f"""Расскажи грязный сон про {name}. {gender_text} {traits_text}
+        # Добавляем память если есть
+        memory_text = ""
+        if memory and len(memory) > 10:
+            memory_text = f"\n\nЧто известно о {name}:\n{memory[:500]}"
+        
+        user_prompt = f"""Расскажи грязный сон про {name}. {gender_text} {traits_text}{memory_text}
 
-Просто расскажи историю сна — пошлую, с матом, смешную. Как будто подруге рассказываешь."""
+Просто расскажи историю сна — пошлую, с матом, смешную. Как будто подруге рассказываешь. ИСПОЛЬЗУЙ ИНФОРМАЦИЮ О ЧЕЛОВЕКЕ чтобы сон был персонализированный!"""
 
         try:
             request_body = json.dumps({
@@ -140,13 +157,13 @@ class handler(BaseHTTPRequestHandler):
             
             dream_text = result.get("content", [{}])[0].get("text", "Бля, забыла что снилось...")
             
-            self._send_json({
+            self._send_json(200, {
                 "dream": dream_text,
                 "name": name
             })
             
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8') if e.fp else str(e)
-            self._send_error(f"AI Gateway error: {e.code}", 500)
+            self._send_error(502, f"AI Gateway error: {e.code}")
         except Exception as e:
-            self._send_error(f"Error: {str(e)[:100]}", 500)
+            self._send_error(500, f"Error: {str(e)[:100]}")

@@ -13,6 +13,7 @@ from datetime import datetime
 
 
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
+MAX_CONTENT_LENGTH = 100 * 1024  # 100 KB - защита от DoS
 
 # Категории событий для разнообразия — РАСШИРЕННЫЕ
 EVENT_CATEGORIES = [
@@ -303,7 +304,7 @@ def fetch_news_headlines() -> str:
             # Извлекаем заголовки если получилось
             if 'headline' in data.lower():
                 return data[:500]
-    except:
+    except Exception:
         pass
     
     # Fallback — генерируем "новости" из актуальных тем
@@ -509,8 +510,19 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
+            
+            # Защита от слишком больших запросов
+            if content_length > MAX_CONTENT_LENGTH:
+                self._send_error(413, "Request body too large")
+                return
+            
             body = self.rfile.read(content_length).decode('utf-8')
-            data = json.loads(body) if body else {}
+            
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError as e:
+                self._send_error(400, f"Invalid JSON: {str(e)}")
+                return
             
             victim_name = data.get("victim_name", "Кто-то")
             victim_username = data.get("victim_username", "")

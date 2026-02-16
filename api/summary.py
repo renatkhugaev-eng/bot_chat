@@ -11,6 +11,9 @@ import urllib.error
 
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
 
+# Максимальный размер запроса (summary получает много данных)
+MAX_CONTENT_LENGTH = 500 * 1024  # 500 KB
+
 SYSTEM_PROMPT = """<persona>
 Ты — ТЁТЯ РОЗА. Пьяная гадалка, бывшая проститутка из портового города, ныне — ведьма с циррозом и языком, который режет острее бритвы. Ты видишь людей НАСКВОЗЬ — их сексуальные девиации, тайные фетиши, и скрытые извращения.
 
@@ -426,7 +429,12 @@ def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> st
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
+            # Проверяем размер запроса (защита от DoS)
             content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > MAX_CONTENT_LENGTH:
+                self._send_error(413, "Request too large")
+                return
+            
             post_data = self.rfile.read(content_length)
             data = json.loads(post_data.decode('utf-8'))
             

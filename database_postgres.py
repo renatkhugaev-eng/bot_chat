@@ -953,7 +953,8 @@ async def save_chat_message(
     sticker_emoji: str = None,
     image_description: str = None,
     file_id: str = None,
-    file_unique_id: str = None
+    file_unique_id: str = None,
+    voice_transcription: str = None
 ):
     """Сохранить сообщение чата для аналитики"""
     now = int(time.time())
@@ -962,11 +963,11 @@ async def save_chat_message(
             INSERT INTO chat_messages 
             (chat_id, user_id, username, first_name, message_text, message_type,
              reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, 
-             image_description, file_id, file_unique_id, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             image_description, file_id, file_unique_id, voice_transcription, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         """, chat_id, user_id, username, first_name, message_text, message_type,
              reply_to_user_id, reply_to_first_name, reply_to_username, sticker_emoji, 
-             image_description, file_id, file_unique_id, now)
+             image_description, file_id, file_unique_id, voice_transcription, now)
         
         # Обновляем реестр пользователей чата для быстрого поиска
         await conn.execute("""
@@ -1321,22 +1322,6 @@ async def get_active_chats_for_auto_summary(min_messages: int = 50, hours: int =
             ORDER BY COUNT(*) DESC
             LIMIT 50
         """, since_time, min_messages)
-        return [dict(row) for row in rows]
-
-
-async def get_user_memories(chat_id: int, user_id: int) -> List[Dict[str, Any]]:
-    """Получить воспоминания о конкретном участнике"""
-    current_time = int(time.time())
-    
-    async with (await get_pool()).acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT memory_type, memory_text, relevance_score, created_at
-            FROM chat_memories 
-            WHERE chat_id = $1 AND user_id = $2
-              AND (expires_at IS NULL OR expires_at > $3)
-            ORDER BY relevance_score DESC
-            LIMIT 10
-        """, chat_id, user_id, current_time)
         return [dict(row) for row in rows]
 
 
@@ -1982,37 +1967,46 @@ def analyze_gender_from_text(text: str, name: str = "") -> dict:
     }
 
 
-async def get_user_profile(user_id: int) -> Optional[Dict[str, Any]]:
-    """Получить профиль пользователя с определённым полом"""
+async def get_user_profile(user_id: int, chat_id: int = None) -> Optional[Dict[str, Any]]:
+    """Получить профиль пользователя с определённым полом
+    Если chat_id не указан, ищет любой профиль пользователя (для совместимости)
+    """
     async with (await get_pool()).acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT * FROM user_profiles WHERE user_id = $1",
-            user_id
-        )
+        if chat_id:
+            row = await conn.fetchrow(
+                "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
+                user_id, chat_id
+            )
+        else:
+            # Fallback - получаем любой профиль пользователя (первый найденный)
+            row = await conn.fetchrow(
+                "SELECT * FROM user_profiles WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1",
+                user_id
+            )
         return dict(row) if row else None
 
 
-async def get_user_gender(user_id: int) -> str:
+async def get_user_gender(user_id: int, chat_id: int = None) -> str:
     """Быстро получить пол пользователя (или 'unknown')"""
-    profile = await get_user_profile(user_id)
+    profile = await get_user_profile(user_id, chat_id)
     if profile and profile.get('detected_gender') and profile['detected_gender'] != 'unknown':
         return profile['detected_gender']
     return 'unknown'
 
 
-async def analyze_and_update_user_gender(user_id: int, first_name: str = "", username: str = "") -> dict:
+async def analyze_and_update_user_gender(user_id: int, chat_id: int, first_name: str = "", username: str = "") -> dict:
     """
-    Проанализировать все сообщения пользователя и обновить его пол в профиле.
+    Проанализировать все сообщения пользователя в чате и обновить его пол в профиле.
     Возвращает результат анализа.
     """
     async with (await get_pool()).acquire() as conn:
-        # Получаем все сообщения пользователя
+        # Получаем все сообщения пользователя в этом чате
         rows = await conn.fetch("""
             SELECT message_text FROM chat_messages 
-            WHERE user_id = $1 AND message_text IS NOT NULL AND message_text != ''
+            WHERE user_id = $1 AND chat_id = $2 AND message_text IS NOT NULL AND message_text != ''
             ORDER BY created_at DESC
             LIMIT 1000
-        """, user_id)
+        """, user_id, chat_id)
         
         messages_count = len(rows)
         
@@ -2029,21 +2023,21 @@ async def analyze_and_update_user_gender(user_id: int, first_name: str = "", use
         # Обновляем или создаём профиль
         await conn.execute("""
             INSERT INTO user_profiles 
-            (user_id, detected_gender, gender_confidence, gender_female_score, 
+            (user_id, chat_id, detected_gender, gender_confidence, gender_female_score, 
              gender_male_score, messages_analyzed, last_analysis_at, 
              first_name, username, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
-            ON CONFLICT (user_id) DO UPDATE SET
-                detected_gender = $2,
-                gender_confidence = $3,
-                gender_female_score = $4,
-                gender_male_score = $5,
-                messages_analyzed = $6,
-                last_analysis_at = $7,
-                first_name = COALESCE($8, user_profiles.first_name),
-                username = COALESCE($9, user_profiles.username),
-                updated_at = $10
-        """, user_id, result['gender'], result['confidence'], 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+            ON CONFLICT (user_id, chat_id) DO UPDATE SET
+                detected_gender = $3,
+                gender_confidence = $4,
+                gender_female_score = $5,
+                gender_male_score = $6,
+                messages_analyzed = $7,
+                last_analysis_at = $8,
+                first_name = COALESCE($9, user_profiles.first_name),
+                username = COALESCE($10, user_profiles.username),
+                updated_at = $11
+        """, user_id, chat_id, result['gender'], result['confidence'], 
              result['female_score'], result['male_score'], messages_count,
              now, first_name or None, username or None, now)
         
@@ -2051,7 +2045,7 @@ async def analyze_and_update_user_gender(user_id: int, first_name: str = "", use
         return result
 
 
-async def update_user_gender_incrementally(user_id: int, new_message: str, first_name: str = "", username: str = "") -> dict:
+async def update_user_gender_incrementally(user_id: int, chat_id: int, new_message: str, first_name: str = "", username: str = "") -> dict:
     """
     Инкрементально обновить пол пользователя на основе нового сообщения.
     Более эффективно чем полный анализ.
@@ -2059,7 +2053,7 @@ async def update_user_gender_incrementally(user_id: int, new_message: str, first
     async with (await get_pool()).acquire() as conn:
         # Получаем текущий профиль
         profile = await conn.fetchrow(
-            "SELECT * FROM user_profiles WHERE user_id = $1", user_id
+            "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2", user_id, chat_id
         )
         
         # Анализируем новое сообщение
@@ -2091,17 +2085,17 @@ async def update_user_gender_incrementally(user_id: int, new_message: str, first
             
             await conn.execute("""
                 UPDATE user_profiles SET
-                    detected_gender = $2,
-                    gender_confidence = $3,
-                    gender_female_score = $4,
-                    gender_male_score = $5,
-                    messages_analyzed = $6,
-                    last_analysis_at = $7,
-                    first_name = COALESCE($8, first_name),
-                    username = COALESCE($9, username),
-                    updated_at = $7
-                WHERE user_id = $1
-            """, user_id, gender, confidence, new_female, new_male,
+                    detected_gender = $3,
+                    gender_confidence = $4,
+                    gender_female_score = $5,
+                    gender_male_score = $6,
+                    messages_analyzed = $7,
+                    last_analysis_at = $8,
+                    first_name = COALESCE($9, first_name),
+                    username = COALESCE($10, username),
+                    updated_at = $8
+                WHERE user_id = $1 AND chat_id = $2
+            """, user_id, chat_id, gender, confidence, new_female, new_male,
                  messages_count, now, first_name or None, username or None)
             
             return {
@@ -2118,11 +2112,11 @@ async def update_user_gender_incrementally(user_id: int, new_message: str, first
             
             await conn.execute("""
                 INSERT INTO user_profiles 
-                (user_id, detected_gender, gender_confidence, gender_female_score,
+                (user_id, chat_id, detected_gender, gender_confidence, gender_female_score,
                  gender_male_score, messages_analyzed, last_analysis_at,
                  first_name, username, first_seen_at, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $6, $6, $6)
-            """, user_id, gender, confidence, new_result['female_score'],
+                VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $8, $9, $7, $7, $7)
+            """, user_id, chat_id, gender, confidence, new_result['female_score'],
                  new_result['male_score'], now, first_name or None, username or None)
             
             return {

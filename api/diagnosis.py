@@ -12,6 +12,7 @@ from datetime import datetime
 
 
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
+MAX_CONTENT_LENGTH = 200 * 1024  # 200 KB - защита от DoS
 
 # Разные "клиники" для разнообразия
 CLINICS = [
@@ -206,8 +207,19 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
+            
+            # Защита от слишком больших запросов
+            if content_length > MAX_CONTENT_LENGTH:
+                self._send_error(413, "Request body too large")
+                return
+            
             body = self.rfile.read(content_length).decode('utf-8')
-            data = json.loads(body) if body else {}
+            
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError as e:
+                self._send_error(400, f"Invalid JSON: {str(e)}")
+                return
             
             name = data.get("name", "Аноним")
             username = data.get("username", "")

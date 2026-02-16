@@ -38,7 +38,7 @@ async def init_db():
         for col_name in ['file_id', 'file_unique_id', 'voice_transcription']:
             try:
                 await db.execute(f"ALTER TABLE chat_messages ADD COLUMN {col_name} TEXT")
-            except:
+            except Exception:
                 pass  # Колонка уже существует
         
         # Индекс для быстрого поиска по времени
@@ -371,21 +371,21 @@ async def log_event(chat_id: int, event_type: str, user_id: int = None,
         await db.commit()
 
 
-async def add_achievement(user_id: int, achievement_name: str, chat_id: int = 0) -> bool:
+async def add_achievement(user_id: int, achievement_name: str) -> bool:
     """Добавить достижение игроку. Возвращает True если это новое достижение"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         try:
             await db.execute("""
-                INSERT INTO achievements (user_id, chat_id, achievement_name, achieved_at)
-                VALUES (?, ?, ?, ?)
-            """, (user_id, chat_id, achievement_name, int(time.time())))
+                INSERT INTO achievements (user_id, achievement_name, achieved_at)
+                VALUES (?, ?, ?)
+            """, (user_id, achievement_name, int(time.time())))
             await db.commit()
             return True
         except aiosqlite.IntegrityError:
             return False
 
 
-async def get_player_achievements(user_id: int, chat_id: int = 0) -> List[str]:
+async def get_player_achievements(user_id: int) -> List[str]:
     """Получить все достижения игрока"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         async with db.execute(
@@ -642,7 +642,7 @@ async def get_memories(chat_id: int, limit: int = 20) -> List[Dict[str, Any]]:
             return [dict(row) for row in rows]
 
 
-async def get_user_memories(chat_id: int, user_id: int) -> List[Dict[str, Any]]:
+async def get_user_memories(chat_id: int, user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
     """Получить воспоминания о конкретном участнике"""
     current_time = int(time.time())
     
@@ -654,8 +654,8 @@ async def get_user_memories(chat_id: int, user_id: int) -> List[Dict[str, Any]]:
             WHERE chat_id = ? AND user_id = ?
               AND (expires_at IS NULL OR expires_at > ?)
             ORDER BY relevance_score DESC
-            LIMIT 10
-        """, (chat_id, user_id, current_time)) as cursor:
+            LIMIT ?
+        """, (chat_id, user_id, current_time, limit)) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
@@ -729,6 +729,19 @@ async def get_database_stats() -> Dict[str, Any]:
         return stats
 
 
+async def cleanup_old_events(days: int = 30) -> int:
+    """Очистка старых записей из event_log"""
+    threshold = int(time.time()) - (days * 24 * 60 * 60)
+    db = await get_db()
+    async with db.execute(
+        "DELETE FROM event_log WHERE created_at < ?",
+        (threshold,)
+    ) as cursor:
+        deleted = cursor.rowcount
+    await db.commit()
+    return deleted
+
+
 async def full_cleanup() -> Dict[str, int]:
     """Полная очистка устаревших данных"""
     results = {}
@@ -741,6 +754,9 @@ async def full_cleanup() -> Dict[str, int]:
     
     # Очистка истёкших воспоминаний
     results['memories_deleted'] = await cleanup_expired_memories()
+    
+    # Очистка старых событий (30 дней)
+    results['events_deleted'] = await cleanup_old_events(days=30)
     
     return results
 
@@ -822,3 +838,13 @@ async def update_or_create_chat_user(
 async def find_user_in_chat(chat_id: int, search_term: str) -> Optional[Dict[str, Any]]:
     """Stub для SQLite - возвращает None"""
     return None
+
+
+async def get_all_chat_profiles(chat_id: int) -> List[Dict[str, Any]]:
+    """Stub для SQLite - профилирование не поддерживается"""
+    return []
+
+
+async def get_active_chats_for_auto_summary() -> List[Dict[str, Any]]:
+    """Stub для SQLite - автосводки не поддерживаются"""
+    return []

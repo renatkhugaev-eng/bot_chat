@@ -1,9 +1,16 @@
 import os
+import sys
 from dotenv import load_dotenv
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# Проверка критических переменных окружения
+if not BOT_TOKEN:
+    print("❌ ОШИБКА: BOT_TOKEN не установлен в .env файле!")
+    print("   Создайте файл .env и добавьте: BOT_TOKEN=ваш_токен_от_BotFather")
+    sys.exit(1)
 
 # Классы персонажей с их бонусами
 CLASSES = {

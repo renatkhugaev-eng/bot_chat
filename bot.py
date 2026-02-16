@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import logging
 import random
 import re
@@ -14,6 +15,7 @@ from aiogram.types import (
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import BOT_TOKEN, CLASSES, CRIMES, RANDOM_EVENTS, WELCOME_MESSAGES, JAIL_PHRASES
@@ -29,17 +31,21 @@ load_dotenv()
 # Переиспользуем одну сессию для всех API запросов — +30% скорость
 
 _http_session: Optional[aiohttp.ClientSession] = None
+_http_session_lock = asyncio.Lock()
 
 
 async def get_http_session() -> aiohttp.ClientSession:
-    """Получить глобальную HTTP сессию (создаёт если нет)"""
+    """Получить глобальную HTTP сессию (создаёт если нет, потокобезопасно)"""
     global _http_session
     if _http_session is None or _http_session.closed:
-        timeout = aiohttp.ClientTimeout(total=60, connect=10)
-        _http_session = aiohttp.ClientSession(
-            timeout=timeout,
-            headers={"User-Agent": "TetaRozaBot/1.0"}
-        )
+        async with _http_session_lock:
+            # Double-check после получения блокировки
+            if _http_session is None or _http_session.closed:
+                timeout = aiohttp.ClientTimeout(total=60, connect=10)
+                _http_session = aiohttp.ClientSession(
+                    timeout=timeout,
+                    headers={"User-Agent": "TetaRozaBot/1.0"}
+                )
     return _http_session
 
 
@@ -79,7 +85,8 @@ else:
         add_to_treasury, get_treasury, log_event, add_achievement,
         save_chat_message, get_chat_statistics, get_player_achievements,
         save_summary, get_previous_summaries, save_memory, get_memories,
-        get_user_messages
+        get_user_messages, get_user_memories, find_user_in_chat,
+        get_all_chat_profiles, get_active_chats_for_auto_summary
     )
     close_db = None
     # Заглушки для SQLite
@@ -97,10 +104,10 @@ else:
     async def increment_media_usage(media_id): pass
     async def migrate_media_from_messages(): return {'migrated': 0, 'skipped': 0, 'errors': 0}
     # Заглушки для профилирования пользователей (только PostgreSQL)
-    async def get_user_profile(user_id): return None
-    async def get_user_gender(user_id): return 'unknown'
-    async def analyze_and_update_user_gender(user_id, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
-    async def update_user_gender_incrementally(user_id, new_message, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
+    async def get_user_profile(user_id, chat_id=None): return None
+    async def get_user_gender(user_id, chat_id=None): return 'unknown'
+    async def analyze_and_update_user_gender(user_id, chat_id, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
+    async def update_user_gender_incrementally(user_id, chat_id, new_message, first_name="", username=""): return {'gender': 'unknown', 'confidence': 0.0, 'female_score': 0, 'male_score': 0, 'messages_analyzed': 0}
     async def update_user_profile_comprehensive(user_id, chat_id, message_text, timestamp, first_name="", username="", reply_to_user_id=None, message_type="text", sticker_emoji=None): pass
     async def get_user_full_profile(user_id, chat_id): return None
     async def get_user_activity_report(user_id, chat_id): return {'error': 'PostgreSQL required'}
@@ -163,17 +170,41 @@ FUCK_OFF_REPLIES = [
     "Нахуя ты меня тегнул командой, дебил?",
 ]
 
-# ID бота (кэшируем после первого запроса)
+# Кэш информации о боте (ID и username)
 _cached_bot_id: Optional[int] = None
+_cached_bot_username: Optional[str] = None
+_bot_info_lock = asyncio.Lock()
+
+
+async def _ensure_bot_info_cached():
+    """Загрузить и кэшировать информацию о боте (потокобезопасно)"""
+    global _cached_bot_id, _cached_bot_username
+    if _cached_bot_id is None or _cached_bot_username is None:
+        async with _bot_info_lock:
+            if _cached_bot_id is None or _cached_bot_username is None:
+                bot_info = await bot.get_me()
+                _cached_bot_id = bot_info.id
+                _cached_bot_username = bot_info.username
 
 
 async def get_bot_id() -> int:
     """Получить ID бота (кэшируется)"""
-    global _cached_bot_id
-    if _cached_bot_id is None:
-        bot_info = await bot.get_me()
-        _cached_bot_id = bot_info.id
+    await _ensure_bot_info_cached()
     return _cached_bot_id
+
+
+async def get_bot_username() -> str:
+    """Получить username бота (кэшируется)"""
+    await _ensure_bot_info_cached()
+    return _cached_bot_username
+
+
+async def is_reply_to_bot(message: Message) -> bool:
+    """Проверить, является ли сообщение реплаем на бота"""
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return False
+    bot_id = await get_bot_id()
+    return message.reply_to_message.from_user.id == bot_id
 
 
 async def check_command_reply_to_bot(message: Message) -> bool:
@@ -238,6 +269,64 @@ def cleanup_api_calls():
             # Если список пустой — удаляем ключ
             if not api_calls[key]:
                 del api_calls[key]
+
+
+# ==================== УТИЛИТЫ ====================
+
+def split_long_message(text: str, max_length: int = 4000) -> list[str]:
+    """
+    Безопасно разбивает длинный текст на части.
+    Разрезает по границам абзацев или предложений, не посередине слов/HTML-тегов.
+    """
+    if len(text) <= max_length:
+        return [text]
+    
+    parts = []
+    current = ""
+    
+    # Сначала пробуем разбить по абзацам
+    paragraphs = text.split('\n\n')
+    
+    for para in paragraphs:
+        if len(current) + len(para) + 2 <= max_length:
+            current = current + "\n\n" + para if current else para
+        else:
+            # Если абзац слишком длинный, разбиваем по предложениям
+            if len(para) > max_length:
+                if current:
+                    parts.append(current.strip())
+                    current = ""
+                
+                # Разбиваем абзац по предложениям
+                sentences = para.replace('. ', '.|').replace('! ', '!|').replace('? ', '?|').split('|')
+                for sent in sentences:
+                    if len(current) + len(sent) + 1 <= max_length:
+                        current = current + " " + sent if current else sent
+                    else:
+                        if current:
+                            parts.append(current.strip())
+                        # Если предложение слишком длинное, режем по словам
+                        if len(sent) > max_length:
+                            words = sent.split(' ')
+                            current = ""
+                            for word in words:
+                                if len(current) + len(word) + 1 <= max_length:
+                                    current = current + " " + word if current else word
+                                else:
+                                    if current:
+                                        parts.append(current.strip())
+                                    current = word
+                        else:
+                            current = sent
+            else:
+                if current:
+                    parts.append(current.strip())
+                current = para
+    
+    if current:
+        parts.append(current.strip())
+    
+    return parts if parts else [text[:max_length]]
 
 
 # ==================== СБОР КОНТЕКСТА (DRY) ====================
@@ -506,9 +595,9 @@ async def choose_class(callback: CallbackQuery):
     class_data = CLASSES[class_id]
     await set_player_class(user_id, chat_id, class_id, class_data)
     
-    welcome = random.choice(WELCOME_MESSAGES).format(name=callback.from_user.first_name)
+    welcome = random.choice(WELCOME_MESSAGES).format(name=callback.from_user.first_name or "Братан")
     
-    await callback.message.edit_text(
+    result_text = (
         f"🎉 *ПОЗДРАВЛЯЕМ!*\n\n"
         f"{welcome}\n\n"
         f"Твой класс: {class_data['emoji']} *{class_data['name']}*\n"
@@ -520,9 +609,14 @@ async def choose_class(callback: CallbackQuery):
         f"• /profile — глянуть досье\n"
         f"• /top — топ авторитетов\n"
         f"• /casino — испытать удачу\n\n"
-        f"Да начнётся беспредел! 😈",
-        parse_mode=ParseMode.MARKDOWN
+        f"Да начнётся беспредел! 😈"
     )
+    
+    try:
+        await callback.message.edit_text(result_text, parse_mode=ParseMode.MARKDOWN)
+    except TelegramBadRequest:
+        # Сообщение удалено или слишком старое — отправляем новое
+        await callback.message.answer(result_text, parse_mode=ParseMode.MARKDOWN)
     await callback.answer()
 
 
@@ -537,7 +631,7 @@ async def cmd_profile(message: Message):
     chat_id = message.chat.id
     
     # Если упомянут другой пользователь
-    if message.reply_to_message:
+    if message.reply_to_message and message.reply_to_message.from_user:
         user_id = message.reply_to_message.from_user.id
     
     player = await get_player(user_id, chat_id)
@@ -602,7 +696,10 @@ async def show_top(callback: CallbackQuery):
     players = await get_top_players(chat_id, limit=10, sort_by=sort_by)
     text = format_top_players(players, sort_by)
     
-    await callback.message.edit_text(text, reply_markup=keyboard)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except TelegramBadRequest:
+        await callback.message.answer(text, reply_markup=keyboard)
     await callback.answer()
 
 
@@ -660,9 +757,13 @@ async def cmd_crime(message: Message):
 @router.callback_query(F.data.startswith("crime_"))
 async def do_crime(callback: CallbackQuery):
     """Выполнить преступление"""
-    crime_index = int(callback.data.replace("crime_", ""))
+    try:
+        crime_index = int(callback.data.replace("crime_", ""))
+    except ValueError:
+        await callback.answer("❌ Некорректные данные!", show_alert=True)
+        return
     
-    if crime_index >= len(CRIMES):
+    if crime_index < 0 or crime_index >= len(CRIMES):
         await callback.answer("❌ Такого дела не существует!", show_alert=True)
         return
     
@@ -757,7 +858,10 @@ async def do_crime(callback: CallbackQuery):
             f"⭐ +{exp_gain} опыта (за попытку)"
         )
     
-    await callback.message.edit_text(result_text, parse_mode=ParseMode.MARKDOWN)
+    try:
+        await callback.message.edit_text(result_text, parse_mode=ParseMode.MARKDOWN)
+    except TelegramBadRequest:
+        await callback.message.answer(result_text, parse_mode=ParseMode.MARKDOWN)
     await callback.answer()
 
 
@@ -792,7 +896,7 @@ async def cmd_attack(message: Message):
     # Определяем жертву
     victim_user = None
     
-    if message.reply_to_message:
+    if message.reply_to_message and message.reply_to_message.from_user:
         victim_user = message.reply_to_message.from_user
     elif message.entities:
         for entity in message.entities:
@@ -945,6 +1049,10 @@ async def cmd_casino(message: Message):
 async def casino_game(callback: CallbackQuery):
     """Игра в казино"""
     data = callback.data.split("_")
+    if len(data) < 3:
+        await callback.answer("❌ Некорректные данные!", show_alert=True)
+        return
+    
     game_type = data[1]
     bet = data[2]
     
@@ -1049,7 +1157,10 @@ async def casino_game(callback: CallbackQuery):
         treasury_cut = int(bet_amount * 0.1)
         await add_to_treasury(chat_id, treasury_cut)
     
-    await callback.message.edit_text(result_text)
+    try:
+        await callback.message.edit_text(result_text)
+    except TelegramBadRequest:
+        await callback.message.answer(result_text)
     await callback.answer()
 
 
@@ -1118,7 +1229,7 @@ async def cmd_ai_profile(message: Message):
         target_name = target_user.first_name or target_user.username or "Аноним"
     
     try:
-        report = await get_user_activity_report(target_user.id)
+        report = await get_user_activity_report(target_user.id, message.chat.id)
         
         if report.get('error'):
             await message.answer(f"🔍 Досье на *{target_name}* пока не собрано. Пусть побольше болтает!", parse_mode=ParseMode.MARKDOWN)
@@ -1396,7 +1507,7 @@ async def cmd_social_graph(message: Message):
             try:
                 member = await message.bot.get_chat_member(chat_id, uid)
                 user_names[uid] = member.user.first_name or member.user.username or str(uid)
-            except:
+            except Exception:
                 user_names[uid] = f"User_{uid}"
         
         text = "🕸️ *СОЦИАЛЬНЫЙ ГРАФ ЧАТА*\n\n"
@@ -1692,6 +1803,18 @@ async def cmd_describe_photo(message: Message):
         await message.answer("❌ Vision API не настроен!")
         return
     
+    # Проверка кулдауна
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    if not check_cooldown(user_id, chat_id, "describe", 15):
+        await message.answer("⏳ Подожди немного, глаза устали!")
+        return
+    
+    # Rate limit для Vision API
+    if not check_api_rate_limit(chat_id, "vision"):
+        await message.answer("⏳ Слишком много запросов. Подожди минутку!")
+        return
+    
     # Показываем что работаем
     processing_msg = await message.answer("🔮 Тётя Роза смотрит в хрустальный шар... ⏳")
     
@@ -1736,7 +1859,7 @@ async def cmd_describe_photo(message: Message):
         await processing_msg.edit_text("⏰ Слишком долго смотрела в шар, устала. Попробуй ещё раз!")
     except Exception as e:
         logger.error(f"Error in describe command: {e}")
-        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        await processing_msg.edit_text("❌ Что-то пошло не так. Попробуй ещё раз!")
 
 
 # ==================== СТИХИ-УНИЖЕНИЯ ====================
@@ -1850,7 +1973,7 @@ async def cmd_poem(message: Message):
         await processing_msg.edit_text("⏰ Муза задумалась слишком надолго...")
     except Exception as e:
         logger.error(f"Error in poem command: {e}")
-        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        await processing_msg.edit_text("❌ Муза отказала. Попробуй позже!")
 
 
 # ==================== ДИАГНОЗ ОТ ТЁТИ РОЗЫ ====================
@@ -1958,7 +2081,7 @@ async def cmd_diagnosis(message: Message):
         await processing_msg.edit_text("⏰ Тётя Роза слишком долго искала очки...")
     except Exception as e:
         logger.error(f"Error in diagnosis command: {e}")
-        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        await processing_msg.edit_text("❌ Диспансер закрыт. Приходи позже!")
 
 
 # ==================== СЖЕЧЬ ЧЕЛОВЕКА ====================
@@ -2050,7 +2173,7 @@ async def cmd_burn(message: Message):
         await processing_msg.edit_text("⏰ Долго горит... слишком много пиздежа было")
     except Exception as e:
         logger.error(f"Error in burn command: {e}")
-        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        await processing_msg.edit_text("❌ Дрова кончились. Попробуй позже!")
 
 
 # ==================== БУХНУТЬ С ЧЕЛОВЕКОМ ====================
@@ -2142,7 +2265,7 @@ async def cmd_drink(message: Message):
         await processing_msg.edit_text("⏰ Слишком долго бухали... оба вырубились")
     except Exception as e:
         logger.error(f"Error in drink command: {e}")
-        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        await processing_msg.edit_text("❌ Бар закрыт. Приходи позже!")
 
 
 # ==================== ПОСОСИ ====================
@@ -2156,7 +2279,14 @@ async def cmd_suck(message: Message):
         await message.answer("❌ Сосать только публично!")
         return
     
+    user_id = message.from_user.id
     chat_id = message.chat.id
+    
+    # Проверка кулдауна
+    if not check_cooldown(user_id, chat_id, "suck", 10):
+        await message.answer("⏳ Рот занят. Подожди!")
+        return
+    
     target_name = None
     target_id = None
     target_username = None
@@ -2262,7 +2392,6 @@ async def cmd_suck(message: Message):
                     # Заменяем имя на кликабельное упоминание в ответе
                     if target_id:
                         # Заменяем все вхождения имени (регистронезависимо)
-                        import re
                         # Экранируем спецсимволы в имени для regex
                         escaped_name = re.escape(target_name)
                         # Заменяем с сохранением регистра
@@ -2587,10 +2716,11 @@ async def cmd_ventilate(message: Message):
                     error_text = await response.text()
                     logger.error(f"Ventilate API error: {response.status} - {error_text}")
                     # Fallback с кликабельным упоминанием и склонением
+                    # Используем gender (не api_gender), т.к. api_gender определён только при успехе
                     fallback_events = [
                         f"🪟 Тётя Роза открыла форточку в чате.\n\nЗалетел голубь. Насрал на {mentions['acc']}. Улетел.\n\nПроветрено.",
                         f"🪟 Тётя Роза открыла форточку в чате.\n\nСквозняком сдуло {mentions['acc']} куда-то в угол чата. {mentions['nom']} там теперь сидит.\n\nСвежо.",
-                        f"🪟 Тётя Роза открыла форточку в чате.\n\nВорвался холод. {mentions['nom']} {'замёрзла' if api_gender == 'женский' else 'замёрз'} нахуй.\n\nЗакрываю."
+                        f"🪟 Тётя Роза открыла форточку в чате.\n\nВорвался холод. {mentions['nom']} {'замёрзла' if gender == 'женский' else 'замёрз'} нахуй.\n\nЗакрываю."
                     ]
                     await processing_msg.edit_text(random.choice(fallback_events), parse_mode=ParseMode.HTML)
     
@@ -2599,7 +2729,7 @@ async def cmd_ventilate(message: Message):
     except Exception as e:
         logger.error(f"Error in ventilate command: {e}")
         metrics.track_error()
-        await processing_msg.edit_text(f"🪟 Форточка сломалась: {str(e)[:50]}")
+        await processing_msg.edit_text("🪟 Форточка заклинила. Попробуй позже!")
 
 
 # ==================== ГОЛОСОВЫЕ СООБЩЕНИЯ (ElevenLabs TTS) ====================
@@ -2613,6 +2743,18 @@ ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
 @router.message(Command("скажи", "say", "voice", "голос"))
 async def cmd_say(message: Message):
     """Тётя Роза говорит голосом! /скажи <текст>"""
+    
+    # Проверка кулдауна (TTS дорогой)
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    if not check_cooldown(user_id, chat_id, "say", 20):
+        await message.reply("⏳ Голосовые связки отдыхают. Подожди!")
+        return
+    
+    # Rate limit для TTS API
+    if not check_api_rate_limit(chat_id, "tts"):
+        await message.reply("⏳ Слишком много голосовых запросов!")
+        return
     
     # Извлекаем текст после команды
     command_text = message.text or ""
@@ -2696,7 +2838,7 @@ async def cmd_say(message: Message):
     except Exception as e:
         logger.error(f"TTS error: {e}")
         metrics.track_error()
-        await processing_msg.edit_text(f"❌ Ошибка: {str(e)[:50]}")
+        await processing_msg.edit_text("❌ Голос сел. Попробуй позже!")
 
 
 # ==================== ГРЯЗНЫЙ СОН ====================
@@ -2852,19 +2994,19 @@ async def search_images_serpapi(query: str, num_results: int = 20) -> list:
             "gl": "ru",
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://serpapi.com/search",
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get("images_results", [])
-                else:
-                    error = await response.text()
-                    logger.error(f"SerpAPI error: {response.status} - {error}")
-                    return []
+        session = await get_http_session()
+        async with session.get(
+            "https://serpapi.com/search",
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=20)
+        ) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data.get("images_results", [])
+            else:
+                error = await response.text()
+                logger.error(f"SerpAPI error: {response.status} - {error}")
+                return []
     except Exception as e:
         logger.error(f"SerpAPI search error: {e}")
         return []
@@ -2874,7 +3016,8 @@ async def search_images_serpapi(query: str, num_results: int = 20) -> list:
 async def cmd_find_pic(message: Message):
     """Найти и отправить картинку по запросу через Google Images"""
     # Получаем текст запроса
-    query = message.text.split(maxsplit=1)
+    text = message.text or message.caption or ""
+    query = text.split(maxsplit=1)
     
     if len(query) < 2:
         await message.answer(
@@ -2926,6 +3069,11 @@ async def cmd_find_pic(message: Message):
         
         # Пробуем отправить картинку (перебираем результаты, если первая не загрузится)
         sent = False
+        session = await get_http_session()
+        download_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        
         for result in top_results:
             image_url = result.get('original') or result.get('thumbnail')
             if not image_url:
@@ -2933,49 +3081,45 @@ async def cmd_find_pic(message: Message):
             
             try:
                 # Скачиваем картинку
-                async with aiohttp.ClientSession() as session:
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                    }
-                    async with session.get(
-                        image_url, 
-                        timeout=aiohttp.ClientTimeout(total=15),
-                        headers=headers
-                    ) as response:
-                        if response.status != 200:
-                            continue
-                        
-                        content_type = response.headers.get('Content-Type', '')
-                        if not content_type.startswith('image/'):
-                            continue
-                        
-                        image_data = await response.read()
-                        
-                        # Проверяем размер (не больше 10 МБ)
-                        if len(image_data) > 10 * 1024 * 1024:
-                            continue
-                        
-                        # Минимальный размер (не меньше 5 КБ - иначе битая)
-                        if len(image_data) < 5 * 1024:
-                            continue
-                        
-                        # Определяем расширение
-                        if 'png' in content_type:
-                            ext = 'png'
-                        elif 'gif' in content_type:
-                            ext = 'gif'
-                        elif 'webp' in content_type:
-                            ext = 'webp'
-                        else:
-                            ext = 'jpg'
-                        
-                        # Отправляем без подписи
-                        photo = BufferedInputFile(image_data, filename=f"image.{ext}")
-                        
-                        await processing_msg.delete()
-                        await message.answer_photo(photo)
-                        sent = True
-                        break
+                async with session.get(
+                    image_url, 
+                    timeout=aiohttp.ClientTimeout(total=15),
+                    headers=download_headers
+                ) as response:
+                    if response.status != 200:
+                        continue
+                    
+                    content_type = response.headers.get('Content-Type', '')
+                    if not content_type.startswith('image/'):
+                        continue
+                    
+                    image_data = await response.read()
+                    
+                    # Проверяем размер (не больше 10 МБ)
+                    if len(image_data) > 10 * 1024 * 1024:
+                        continue
+                    
+                    # Минимальный размер (не меньше 5 КБ - иначе битая)
+                    if len(image_data) < 5 * 1024:
+                        continue
+                    
+                    # Определяем расширение
+                    if 'png' in content_type:
+                        ext = 'png'
+                    elif 'gif' in content_type:
+                        ext = 'gif'
+                    elif 'webp' in content_type:
+                        ext = 'webp'
+                    else:
+                        ext = 'jpg'
+                    
+                    # Отправляем без подписи
+                    photo = BufferedInputFile(image_data, filename=f"image.{ext}")
+                    
+                    await processing_msg.delete()
+                    await message.answer_photo(photo)
+                    sent = True
+                    break
             
             except Exception as e:
                 logger.warning(f"Failed to download image {image_url}: {e}")
@@ -2990,7 +3134,7 @@ async def cmd_find_pic(message: Message):
     
     except Exception as e:
         logger.error(f"Error in pic search: {e}")
-        await processing_msg.edit_text(f"❌ Ошибка поиска: {str(e)[:100]}")
+        await processing_msg.edit_text("❌ Поиск сломался. Попробуй позже!")
 
 
 @router.message(Command("svodka", "summary", "digest"))
@@ -3104,13 +3248,10 @@ async def cmd_svodka(message: Message):
                                 relevance_score=min(pair['replies'], 10)
                             )
                     
-                    # Разбиваем на части если слишком длинное
-                    if len(summary) > 4000:
-                        parts = [summary[i:i+4000] for i in range(0, len(summary), 4000)]
-                        for part in parts:
-                            await message.answer(part)
-                    else:
-                        await message.answer(summary)
+                    # Разбиваем на части если слишком длинное (безопасно по границам слов)
+                    parts = split_long_message(summary, max_length=4000)
+                    for part in parts:
+                        await message.answer(part)
                 else:
                     error_text = await response.text()
                     logger.error(f"Vercel API error: {response.status} - {error_text}")
@@ -3125,7 +3266,7 @@ async def cmd_svodka(message: Message):
         cooldowns.pop((user_id, chat_id, "svodka"), None)
     except Exception as e:
         logger.error(f"Error generating summary: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)}")
+        await message.answer("❌ Не удалось сгенерировать сводку. Попробуй позже!")
         cooldowns.pop((user_id, chat_id, "svodka"), None)
 
 
@@ -3708,12 +3849,12 @@ async def who_is_this_handler(message: Message):
                 gender = target_profile['gender']
             else:
                 # Fallback на анализ
-                db_gender = await get_user_gender(target_id)
+                db_gender = await get_user_gender(target_id, message.chat.id)
                 if db_gender and db_gender != 'unknown':
                     gender = db_gender
                 else:
                     result = await analyze_and_update_user_gender(
-                        target_id, target_name, target_username or ""
+                        target_id, message.chat.id, target_name, target_username or ""
                     )
                     if result['gender'] != 'unknown':
                         gender = result['gender']
@@ -4941,21 +5082,21 @@ async def transcribe_voice_message(message: Message) -> str:
         file_format = "ogg" if message.voice else "mp4"
         
         # Отправляем на транскрипцию
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                transcribe_api_url,
-                json={
-                    "audio_base64": audio_base64,
-                    "format": file_format
-                },
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    text = result.get("text", "")
-                    if text:
-                        logger.info(f"Voice transcribed: {text[:50]}...")
-                        return text
+        session = await get_http_session()
+        async with session.post(
+            transcribe_api_url,
+            json={
+                "audio_base64": audio_base64,
+                "format": file_format
+            },
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status == 200:
+                result = await response.json()
+                text = result.get("text", "")
+                if text:
+                    logger.info(f"Voice transcribed: {text[:50]}...")
+                    return text
     except Exception as e:
         logger.warning(f"Failed to transcribe voice: {e}")
     
@@ -5001,22 +5142,22 @@ async def analyze_photo_for_reply(message: Message) -> str:
         image_base64 = base64.b64encode(photo_bytes.read()).decode('utf-8')
         
         # Получаем описание фото
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                vision_api_url,
-                json={
-                    "image_base64": image_base64,
-                    "media_type": "image/jpeg",
-                    "custom_prompt": "Опиши что на фото ОЧЕНЬ кратко, в 5-10 слов. Без формальностей."
-                },
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    description = result.get("description", "")
-                    if description:
-                        # Генерируем грубый ответ на основе описания
-                        return await generate_rude_response_to_content("фото", description)
+        session = await get_http_session()
+        async with session.post(
+            vision_api_url,
+            json={
+                "image_base64": image_base64,
+                "media_type": "image/jpeg",
+                "custom_prompt": "Опиши что на фото ОЧЕНЬ кратко, в 5-10 слов. Без формальностей."
+            },
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as response:
+            if response.status == 200:
+                result = await response.json()
+                description = result.get("description", "")
+                if description:
+                    # Генерируем грубый ответ на основе описания
+                    return await generate_rude_response_to_content("фото", description)
     except Exception as e:
         logger.warning(f"Failed to analyze photo for reply: {e}")
     
@@ -5096,25 +5237,25 @@ async def generate_rude_response_to_content(content_type: str, description: str)
     
     try:
         # Используем API для генерации грубого ответа
-        async with aiohttp.ClientSession() as session:
-            # Формируем запрос на генерацию грубого ответа
-            prompt = f"""Ты тётя Роза - грубая тётка из чата. Тебе прислали {content_type}. 
+        session = await get_http_session()
+        # Формируем запрос на генерацию грубого ответа
+        prompt = f"""Ты тётя Роза - грубая тётка из чата. Тебе прислали {content_type}. 
 Описание: {description}
 
 Напиши ОЧЕНЬ короткий (1 предложение, максимум 15 слов) грубый, хамский ответ по существу того, что на {content_type}.
 Используй мат. Покажи что тебе не интересно, но прокомментируй по существу.
 НЕ используй кавычки. Пиши как в чате."""
 
-            async with session.post(
-                api_url.replace("/suck", "/ventilate") if "/suck" in api_url else api_url,
-                json={"victim_name": "контент", "custom_prompt": prompt},
-                timeout=aiohttp.ClientTimeout(total=8)
-            ) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    text = result.get("text", "")
-                    if text and len(text) < 200:
-                        return text
+        async with session.post(
+            api_url.replace("/suck", "/ventilate") if "/suck" in api_url else api_url,
+            json={"victim_name": "контент", "custom_prompt": prompt},
+            timeout=aiohttp.ClientTimeout(total=8)
+        ) as response:
+            if response.status == 200:
+                result = await response.json()
+                text = result.get("text", "")
+                if text and len(text) < 200:
+                    return text
     except Exception as e:
         logger.warning(f"Failed to generate rude response: {e}")
     
@@ -5206,12 +5347,9 @@ async def handle_reply_to_bot(message: Message):
     if message.chat.type == "private":
         return
     
-    # Проверяем, что реплай на сообщение бота
-    if message.reply_to_message and message.reply_to_message.from_user:
-        # Получаем ID бота
-        bot_info = await bot.get_me()
-        if message.reply_to_message.from_user.id == bot_info.id:
-            await handle_bot_mention_or_reply(message)
+    # Проверяем, что реплай на сообщение бота (используем кэш)
+    if await is_reply_to_bot(message):
+        await handle_bot_mention_or_reply(message)
 
 
 async def check_bot_mention(message: Message) -> bool:
@@ -5221,9 +5359,8 @@ async def check_bot_mention(message: Message) -> bool:
     
     text = message.text or message.caption or ""
     
-    # Получаем username бота
-    bot_info = await bot.get_me()
-    bot_username = bot_info.username
+    # Получаем username бота (кэшировано)
+    bot_username = await get_bot_username()
     
     if not bot_username:
         return False
@@ -5247,11 +5384,9 @@ async def collect_stickers(message: Message):
     if message.chat.type == "private":
         return
     
-    # Проверяем реплай на бота
-    if message.reply_to_message and message.reply_to_message.from_user:
-        bot_info = await bot.get_me()
-        if message.reply_to_message.from_user.id == bot_info.id:
-            await handle_bot_mention_or_reply(message)
+    # Проверяем реплай на бота (кэшировано)
+    if await is_reply_to_bot(message):
+        await handle_bot_mention_or_reply(message)
     
     sticker = message.sticker
     reply_to_user_id = None
@@ -5305,11 +5440,9 @@ async def collect_photos(message: Message):
     if message.chat.type == "private":
         return
     
-    # Проверяем реплай на бота
-    if message.reply_to_message and message.reply_to_message.from_user:
-        bot_info = await bot.get_me()
-        if message.reply_to_message.from_user.id == bot_info.id:
-            await handle_bot_mention_or_reply(message)
+    # Проверяем реплай на бота (кэшировано)
+    if await is_reply_to_bot(message):
+        await handle_bot_mention_or_reply(message)
     
     caption = message.caption[:200] if message.caption else ""
     image_description = None
@@ -5337,19 +5470,19 @@ async def collect_photos(message: Message):
             image_base64 = base64.b64encode(photo_data).decode('utf-8')
             
             # Отправляем на анализ
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    vision_api_url,
-                    json={
-                        "image_base64": image_base64,
-                        "media_type": "image/jpeg"
-                    },
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        image_description = result.get("description", "")[:300]
-                        logger.info(f"Image analyzed: {image_description[:50]}...")
+            session = await get_http_session()
+            async with session.post(
+                vision_api_url,
+                json={
+                    "image_base64": image_base64,
+                    "media_type": "image/jpeg"
+                },
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    image_description = result.get("description", "")[:300]
+                    logger.info(f"Image analyzed: {image_description[:50]}...")
         except Exception as e:
             logger.error(f"Error analyzing image: {e}")
             image_description = None
@@ -5417,11 +5550,9 @@ async def collect_animations(message: Message):
     if message.chat.type == "private":
         return
     
-    # Проверяем реплай на бота
-    if message.reply_to_message and message.reply_to_message.from_user:
-        bot_info = await bot.get_me()
-        if message.reply_to_message.from_user.id == bot_info.id:
-            await handle_bot_mention_or_reply(message)
+    # Проверяем реплай на бота (кэшировано)
+    if await is_reply_to_bot(message):
+        await handle_bot_mention_or_reply(message)
     
     animation = message.animation
     caption = message.caption[:200] if message.caption else ""
@@ -5481,11 +5612,9 @@ async def collect_voice(message: Message):
     if message.chat.type == "private":
         return
     
-    # Проверяем реплай на бота
-    if message.reply_to_message and message.reply_to_message.from_user:
-        bot_info = await bot.get_me()
-        if message.reply_to_message.from_user.id == bot_info.id:
-            await handle_bot_mention_or_reply(message)
+    # Проверяем реплай на бота (кэшировано)
+    if await is_reply_to_bot(message):
+        await handle_bot_mention_or_reply(message)
     
     msg_type = "voice" if message.voice else "video_note"
     media_obj = message.voice or message.video_note
@@ -5582,11 +5711,9 @@ async def collect_videos(message: Message):
     if message.chat.type == "private":
         return
     
-    # Проверяем реплай на бота
-    if message.reply_to_message and message.reply_to_message.from_user:
-        bot_info = await bot.get_me()
-        if message.reply_to_message.from_user.id == bot_info.id:
-            await handle_bot_mention_or_reply(message)
+    # Проверяем реплай на бота (кэшировано)
+    if await is_reply_to_bot(message):
+        await handle_bot_mention_or_reply(message)
     
     video = message.video
     caption = message.caption[:200] if message.caption else ""
@@ -5649,11 +5776,9 @@ async def collect_audio(message: Message):
     if message.chat.type == "private":
         return
     
-    # Проверяем реплай на бота
-    if message.reply_to_message and message.reply_to_message.from_user:
-        bot_info = await bot.get_me()
-        if message.reply_to_message.from_user.id == bot_info.id:
-            await handle_bot_mention_or_reply(message)
+    # Проверяем реплай на бота (кэшировано)
+    if await is_reply_to_bot(message):
+        await handle_bot_mention_or_reply(message)
     
     audio = message.audio
     caption = message.caption[:200] if message.caption else ""
@@ -5793,12 +5918,6 @@ AUDIO_COMMENTS = [
     "🎵 Аудиокультура чата. Наслаждайтесь.",
     "🎵 Трек дня. Или ночи. Зависит от настроения.",
     "🎵 Музыкальный архив открыт. Держите.",
-    "🔵 Тётя Роза делится видеокомпроматом.",
-    "🔵 Кружочек позора. Наслаждайтесь.",
-    "🔵 Это записывали добровольно. Вдумайтесь.",
-    "🔵 Лицо из архива. Возможно, ваше. Возможно, нет.",
-    "🔵 Видеопривет из прошлого. Кринж обеспечен.",
-    "🔵 Рандомный кружок. Рандомное ебало.",
 ]
 
 
@@ -5822,7 +5941,7 @@ async def maybe_send_random_meme(chat_id: int, trigger: str = "random", target_u
         if target_user_id:
             try:
                 user_profile = await get_user_profile_for_ai(target_user_id, chat_id, "", "")
-            except:
+            except Exception:
                 pass
         
         # Выбираем комментарий в зависимости от типа
@@ -5965,10 +6084,29 @@ async def cmd_random_meme(message: Message):
         elif media_type == "video_note":
             await message.answer(comment)
             await message.answer_video_note(file_id)
+        elif media_type == "video":
+            await message.answer_video(file_id, caption=comment)
+        elif media_type == "audio":
+            await message.answer(comment)
+            await message.answer_audio(file_id)
+        else:
+            # Неизвестный тип — просто логируем
+            logger.warning(f"Unknown media type: {media_type}")
+            await message.answer("❓ Странный мем — не знаю как отправить.")
+            return
         
         await increment_media_usage(media_id)
         metrics.track_command("meme")
         
+    except TelegramBadRequest as e:
+        # Обрабатываем устаревшие file_id или другие ошибки Telegram
+        error_msg = str(e).lower()
+        if "file" in error_msg or "invalid" in error_msg or "not found" in error_msg:
+            logger.warning(f"Invalid/expired file_id for media {media_id}: {e}")
+            await message.answer("❌ Этот мем протух. Попробуй ещё раз — выдам другой!")
+        else:
+            logger.error(f"Telegram error sending meme: {e}")
+            await message.answer("❌ Telegram не принял мем. Попробуй позже.")
     except Exception as e:
         logger.error(f"Error sending meme: {e}")
         await message.answer("❌ Мем сломался. Попробуй ещё раз.")
@@ -6115,12 +6253,13 @@ async def scheduled_auto_summaries():
                                 
                                 # Сохраняем воспоминания об активных участниках
                                 for author in stats.get('top_authors', [])[:5]:
-                                    if author.get('msg_count', 0) >= 10:
+                                    author_user_id = author.get('user_id')
+                                    if author_user_id and author.get('msg_count', 0) >= 10:
                                         await save_memory(
                                             chat_id=chat_id,
-                                            user_id=author.get('user_id', 0),
-                                            username=author.get('username'),
-                                            first_name=author.get('first_name'),
+                                            user_id=author_user_id,
+                                            username=author.get('username') or '',
+                                            first_name=author.get('first_name') or '',
                                             memory_type="activity",
                                             memory_text=f"Был активен: {author.get('msg_count')} сообщений за 12ч",
                                             relevance_score=min(author.get('msg_count', 0) // 10, 10)
@@ -6129,12 +6268,13 @@ async def scheduled_auto_summaries():
                                 
                                 # Сохраняем воспоминания о взаимодействиях
                                 for pair in stats.get('reply_pairs', [])[:3]:
-                                    if pair.get('replies', 0) >= 5:
+                                    pair_user_id = pair.get('user_id')
+                                    if pair_user_id and pair.get('replies', 0) >= 5:
                                         await save_memory(
                                             chat_id=chat_id,
-                                            user_id=pair.get('user_id', 0),
-                                            username=pair.get('username'),
-                                            first_name=pair.get('first_name'),
+                                            user_id=pair_user_id,
+                                            username=pair.get('username') or '',
+                                            first_name=pair.get('first_name') or '',
                                             memory_type="relationship",
                                             memory_text=f"Общался с {pair.get('target_name', '???')}: {pair.get('replies')} реплаев",
                                             relevance_score=min(pair.get('replies', 0) // 5, 10)
@@ -6187,6 +6327,7 @@ ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().
 
 def admin_only(func):
     """Декоратор для админских команд"""
+    @functools.wraps(func)
     async def wrapper(message: Message, *args, **kwargs):
         if message.chat.type != "private":
             return
@@ -6198,6 +6339,7 @@ def admin_only(func):
 
 def admin_postgres_only(func):
     """Декоратор для админских команд, требующих PostgreSQL"""
+    @functools.wraps(func)
     async def wrapper(message: Message, *args, **kwargs):
         if message.chat.type != "private":
             return
@@ -6212,9 +6354,10 @@ def admin_postgres_only(func):
 
 def is_admin(user_id: int) -> bool:
     """Проверить, является ли пользователь админом"""
-    # Если ADMIN_IDS не настроен — разрешаем всем в приватке
+    # Если ADMIN_IDS не настроен — запрещаем всем (безопасность)
     if not ADMIN_IDS:
-        return True
+        logger.warning(f"ADMIN_IDS не настроен! Пользователь {user_id} пытался использовать админку.")
+        return False
     return user_id in ADMIN_IDS
 
 
@@ -6283,7 +6426,7 @@ async def cmd_dbstats(message: Message):
                 unique_users_in_messages = await conn.fetchval(
                     "SELECT COUNT(DISTINCT (chat_id, user_id)) FROM chat_messages"
                 ) or 0
-        except:
+        except Exception:
             pass
         
         text = f"""📊 *ПОЛНАЯ СТАТИСТИКА БОТА*
@@ -6623,7 +6766,7 @@ async def cmd_metrics(message: Message):
     stats = metrics.get_stats()
     
     top_cmds = "\n".join([f"  • {cmd}: {count}" for cmd, count in stats['top_commands']]) or "  Нет данных"
-    api_calls = "\n".join([f"  • {api}: {count}" for api, count in stats['api_calls'].items()]) or "  Нет данных"
+    api_calls_text = "\n".join([f"  • {api}: {count}" for api, count in stats['api_calls'].items()]) or "  Нет данных"
     
     text = f"""📈 МЕТРИКИ БОТА
 
@@ -6633,7 +6776,7 @@ async def cmd_metrics(message: Message):
 {top_cmds}
 
 🌐 API вызовы ({stats['total_api_calls']} всего):
-{api_calls}
+{api_calls_text}
 
 ❌ Ошибок: {stats['errors']}
 📦 Cooldowns в памяти: {len(cooldowns)}

@@ -12,6 +12,9 @@ import urllib.error
 # Vercel AI Gateway endpoint
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
 
+# Максимальный размер запроса (защита от DoS)
+MAX_CONTENT_LENGTH = 100 * 1024  # 100 KB
+
 POETS = {
     "pushkin": {
         "name": "А.С. Пушкин",
@@ -231,8 +234,13 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         """Генерация стиха"""
         try:
-            # Читаем тело запроса
+            # Проверяем размер запроса (защита от DoS)
             content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > MAX_CONTENT_LENGTH:
+                self._send_error(413, "Request too large")
+                return
+            
+            # Читаем тело запроса
             body = self.rfile.read(content_length).decode('utf-8')
             data = json.loads(body) if body else {}
             

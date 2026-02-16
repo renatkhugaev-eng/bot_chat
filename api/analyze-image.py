@@ -12,6 +12,8 @@ import urllib.error
 
 # Vercel AI Gateway endpoint
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
+# 10 MB для изображений в base64 (может быть большим)
+MAX_CONTENT_LENGTH = 10 * 1024 * 1024
 
 # МАКСИМАЛЬНО ЖЁСТКИЙ промпт для анализа изображений
 IMAGE_ANALYSIS_PROMPT = """<persona>
@@ -74,8 +76,23 @@ class handler(BaseHTTPRequestHandler):
         try:
             # Читаем тело запроса
             content_length = int(self.headers.get('Content-Length', 0))
+            
+            # Защита от слишком больших запросов
+            if content_length > MAX_CONTENT_LENGTH:
+                self._send_error(413, "Request body too large (max 10MB)")
+                return
+            
+            if content_length == 0:
+                self._send_error(400, "Empty request body")
+                return
+            
             post_data = self.rfile.read(content_length)
-            data = json.loads(post_data.decode('utf-8'))
+            
+            try:
+                data = json.loads(post_data.decode('utf-8'))
+            except json.JSONDecodeError as e:
+                self._send_error(400, f"Invalid JSON: {str(e)}")
+                return
             
             # Получаем изображение (base64 или URL)
             image_base64 = data.get("image_base64")

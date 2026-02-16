@@ -68,11 +68,14 @@ def format_player_card(player: Dict[str, Any]) -> str:
     total_pvp = player['pvp_wins'] + player['pvp_losses']
     pvp_winrate = (player['pvp_wins'] / total_pvp * 100) if total_pvp > 0 else 0
     
+    # Защита от None в first_name
+    player_name = (player.get('first_name') or 'Аноним')[:20]
+    
     card = f"""
 ╔══════════════════════════════╗
 ║  📋 КРИМИНАЛЬНОЕ ДОСЬЕ       ║
 ╠══════════════════════════════╣
-║ 👤 {player['first_name'][:20]}
+║ 👤 {player_name}
 ║ {class_emoji} {class_name}
 ║ {rank['name']}
 ╠══════════════════════════════╣
@@ -126,8 +129,9 @@ def format_top_players(players: list, sort_by: str = "experience") -> str:
         medal = medals[i] if i < len(medals) else f"{i+1}."
         
         value = player.get(sort_by, 0)
+        player_name = (player.get('first_name') or 'Аноним')[:15]
         
-        text += f"{medal} {class_emoji} {player['first_name'][:15]}\n"
+        text += f"{medal} {class_emoji} {player_name}\n"
         text += f"    {rank['name']} | {value:,} "
         
         if sort_by == "money":
@@ -189,33 +193,54 @@ def calculate_pvp_success(attacker: Dict[str, Any], victim: Dict[str, Any]) -> b
 
 def calculate_pvp_steal_amount(victim: Dict[str, Any]) -> int:
     """Рассчитать сколько можно украсть при наезде"""
-    max_steal = int(victim['money'] * 0.3)  # Максимум 30% от денег жертвы
-    min_steal = int(victim['money'] * 0.1)  # Минимум 10%
+    money = victim.get('money', 0)
+    
+    # Защита от отрицательного и нулевого баланса
+    if money <= 0:
+        return 0
+    
+    max_steal = int(money * 0.3)  # Максимум 30% от денег жертвы
+    min_steal = int(money * 0.1)  # Минимум 10%
     
     if max_steal < 10:
-        return victim['money']  # Если совсем мало — забираем всё
+        return money  # Если совсем мало — забираем всё
+    
+    # Гарантируем min <= max для randint
+    min_steal = max(1, min_steal)
+    max_steal = max(min_steal, max_steal)
     
     return random.randint(min_steal, max_steal)
 
 
 def get_random_crime_message(crime: Dict[str, Any], success: bool, **kwargs) -> str:
     """Получить случайное сообщение о преступлении"""
-    messages = crime['messages']['success'] if success else crime['messages']['fail']
-    message = random.choice(messages)
-    return message.format(**kwargs)
+    try:
+        messages = crime.get('messages', {}).get('success' if success else 'fail', [])
+        if not messages:
+            return "Операция завершена." if success else "Операция провалена."
+        message = random.choice(messages)
+        return message.format(**kwargs)
+    except (KeyError, ValueError) as e:
+        return "Операция завершена." if success else "Операция провалена."
 
 
 def get_random_attack_message(success: bool, has_money: bool = True, **kwargs) -> str:
     """Получить случайное сообщение о наезде"""
-    if not has_money:
-        messages = ATTACK_MESSAGES['no_money']
-    elif success:
-        messages = ATTACK_MESSAGES['success']
-    else:
-        messages = ATTACK_MESSAGES['fail']
-    
-    message = random.choice(messages)
-    return message.format(**kwargs)
+    try:
+        if not has_money:
+            messages = ATTACK_MESSAGES.get('no_money', [])
+        elif success:
+            messages = ATTACK_MESSAGES.get('success', [])
+        else:
+            messages = ATTACK_MESSAGES.get('fail', [])
+        
+        if not messages:
+            return "Наезд завершён." if success else "Наезд провалился."
+        
+        message = random.choice(messages)
+        return message.format(**kwargs)
+    except (KeyError, ValueError) as e:
+        return "Наезд завершён." if success else "Наезд провалился."
 
 
 def get_experience_for_action(action: str, success: bool = True) -> int:
@@ -276,12 +301,12 @@ ACHIEVEMENTS = {
     },
     "loser": {
         "name": "🤡 Вечный лузер",
-        "description": "Проиграть 10 раз подряд",
+        "description": "Проиграть 10 PvP, не выиграв ни одного",
         "check": lambda p: p['pvp_losses'] >= 10 and p['pvp_wins'] == 0
     },
     "jailbird": {
-        "name": "⛓️ Вечный сиделец",
-        "description": "Посидеть в тюрьме 10 раз",
+        "name": "⛓️ Вечный неудачник",
+        "description": "Провалить 10 преступлений",
         "check": lambda p: p['crimes_fail'] >= 10
     }
 }
@@ -290,9 +315,23 @@ ACHIEVEMENTS = {
 def check_achievements(player: Dict[str, Any]) -> list:
     """Проверить какие достижения заслужил игрок"""
     earned = []
+    # Устанавливаем дефолтные значения для безопасной проверки
+    safe_player = {
+        'crimes_success': player.get('crimes_success', 0),
+        'crimes_fail': player.get('crimes_fail', 0),
+        'pvp_wins': player.get('pvp_wins', 0),
+        'pvp_losses': player.get('pvp_losses', 0),
+        'money': player.get('money', 0),
+        'experience': player.get('experience', 0),
+    }
+    
     for key, achievement in ACHIEVEMENTS.items():
-        if achievement['check'](player):
-            earned.append((key, achievement))
+        try:
+            if achievement['check'](safe_player):
+                earned.append((key, achievement))
+        except (KeyError, TypeError, ValueError) as e:
+            # Пропускаем достижение если проверка упала
+            pass
     return earned
 
 
@@ -325,7 +364,10 @@ RANDOM_PHRASES = {
 
 def get_random_phrase(category: str, **kwargs) -> str:
     """Получить случайную фразу из категории"""
-    if category in RANDOM_PHRASES:
-        phrase = random.choice(RANDOM_PHRASES[category])
-        return phrase.format(**kwargs)
+    try:
+        if category in RANDOM_PHRASES:
+            phrase = random.choice(RANDOM_PHRASES[category])
+            return phrase.format(**kwargs)
+    except (KeyError, ValueError) as e:
+        pass
     return ""

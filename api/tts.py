@@ -12,6 +12,7 @@ import base64
 
 # ElevenLabs API
 ELEVENLABS_API_KEY = os.environ.get('ELEVENLABS_API_KEY', '')
+MAX_CONTENT_LENGTH = 50 * 1024  # 50 KB - защита от DoS (текст не должен быть большим)
 ELEVENLABS_API_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 
 # Голос для тёти Розы (можно поменять на другой)
@@ -70,8 +71,23 @@ class handler(BaseHTTPRequestHandler):
         
         try:
             content_length = int(self.headers.get('Content-Length', 0))
+            
+            # Защита от слишком больших запросов
+            if content_length > MAX_CONTENT_LENGTH:
+                self._send_error(413, "Request body too large")
+                return
+            
+            if content_length == 0:
+                self._send_error(400, "Empty request body")
+                return
+            
             body = self.rfile.read(content_length)
-            data = json.loads(body.decode('utf-8'))
+            
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except json.JSONDecodeError as e:
+                self._send_error(400, f"Invalid JSON: {str(e)}")
+                return
             
             text = data.get('text', '').strip()
             voice_id = data.get('voice_id', DEFAULT_VOICE_ID)
