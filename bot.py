@@ -1305,6 +1305,10 @@ async def cmd_ai_profile(message: Message):
 {interests_text}
 """
         
+        # Если профиль устарел — добавляем подсказку
+        if report.get('_note'):
+            text += f"\n⚠️ _{report['_note']}_"
+        
         await message.answer(text, parse_mode=ParseMode.MARKDOWN)
         
     except Exception as e:

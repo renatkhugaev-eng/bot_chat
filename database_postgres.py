@@ -2887,11 +2887,64 @@ async def get_chat_social_graph(chat_id: int) -> List[Dict[str, Any]]:
 
 
 async def get_user_activity_report(user_id: int, chat_id: int) -> Dict[str, Any]:
-    """Получить отчёт об активности пользователя в конкретном чате (per-chat!)"""
+    """
+    Получить отчёт об активности пользователя в конкретном чате (per-chat!).
+    
+    ВАЖНО: Если профиль пуст или устарел, автоматически подсчитывает 
+    базовые данные из chat_messages для корректного отображения.
+    """
     profile = await get_user_full_profile(user_id, chat_id)
     
+    # Получаем реальное количество сообщений из chat_messages
+    async with (await get_pool()).acquire() as conn:
+        real_stats = await conn.fetchrow("""
+            SELECT 
+                COUNT(*) as total_messages,
+                AVG(LENGTH(COALESCE(message_text, ''))) as avg_length,
+                MIN(created_at) as first_seen,
+                MAX(created_at) as last_seen,
+                MAX(first_name) as first_name,
+                MAX(username) as username
+            FROM chat_messages 
+            WHERE chat_id = $1 AND user_id = $2
+        """, chat_id, user_id)
+        
+        real_message_count = real_stats['total_messages'] or 0
+    
+    # Если профиль не найден, но есть реальные сообщения — создаём базовый отчёт
     if not profile:
-        return {'error': 'Profile not found'}
+        if real_message_count == 0:
+            return {'error': 'Profile not found'}
+        
+        # Базовый отчёт из реальных данных
+        return {
+            'user_id': user_id,
+            'name': real_stats['first_name'] or real_stats['username'] or 'Unknown',
+            'gender': 'unknown',
+            'gender_confidence': '0%',
+            'total_messages': real_message_count,
+            'activity_level': 'active' if real_message_count > 50 else 'normal' if real_message_count > 10 else 'lurker',
+            'communication_style': 'neutral',
+            'sentiment': {'score': 0, 'positive': 0, 'negative': 0, 'neutral': real_message_count},
+            'behavior': {
+                'is_night_owl': False,
+                'is_early_bird': False,
+                'peak_hour': None,
+                'avg_message_length': round(real_stats['avg_length'] or 0),
+                'emoji_rate': '0.0%',
+                'toxicity': '0%',
+                'humor': '0%',
+            },
+            'interests': [],
+            'top_interacted_users': [],
+            'first_seen': real_stats['first_seen'],
+            'last_seen': real_stats['last_seen'],
+            '_note': 'Базовый профиль — напиши админу /admin rebuild_profiles для полного анализа'
+        }
+    
+    # Если профиль есть, но total_messages сильно отличается от реальности — используем реальные данные
+    profile_messages = profile.get('total_messages', 0)
+    use_real_count = real_message_count > profile_messages * 1.5 or (profile_messages == 0 and real_message_count > 0)
     
     # Формируем читаемый отчёт
     report = {
@@ -2899,7 +2952,7 @@ async def get_user_activity_report(user_id: int, chat_id: int) -> Dict[str, Any]
         'name': profile.get('first_name') or profile.get('username') or 'Unknown',
         'gender': profile.get('detected_gender', 'unknown'),
         'gender_confidence': f"{(profile.get('gender_confidence', 0) * 100):.0f}%",
-        'total_messages': profile.get('total_messages', 0),
+        'total_messages': real_message_count if use_real_count else profile_messages,
         'activity_level': profile.get('activity_level', 'unknown'),
         'communication_style': profile.get('communication_style', 'neutral'),
         'sentiment': {
@@ -2912,16 +2965,20 @@ async def get_user_activity_report(user_id: int, chat_id: int) -> Dict[str, Any]
             'is_night_owl': profile.get('is_night_owl', False),
             'is_early_bird': profile.get('is_early_bird', False),
             'peak_hour': profile.get('peak_hour'),
-            'avg_message_length': round(profile.get('avg_message_length', 0)),
+            'avg_message_length': round(profile.get('avg_message_length', 0) or real_stats['avg_length'] or 0),
             'emoji_rate': f"{profile.get('emoji_usage_rate', 0):.1f}%",
             'toxicity': f"{(profile.get('toxicity_score', 0) * 100):.0f}%",
             'humor': f"{(profile.get('humor_score', 0) * 100):.0f}%",
         },
         'interests': [i['topic'] for i in profile.get('top_interests', [])],
         'top_interacted_users': [i['target_user_id'] for i in profile.get('top_interactions', [])],
-        'first_seen': profile.get('first_seen_at'),
-        'last_seen': profile.get('last_seen_at'),
+        'first_seen': profile.get('first_seen_at') or real_stats['first_seen'],
+        'last_seen': profile.get('last_seen_at') or real_stats['last_seen'],
     }
+    
+    # Добавляем подсказку если профиль устарел
+    if use_real_count and profile_messages < real_message_count * 0.5:
+        report['_note'] = f'Профиль устарел ({profile_messages} vs {real_message_count} сообщений)'
     
     return report
 
