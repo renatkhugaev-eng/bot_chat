@@ -1467,8 +1467,8 @@ async def cmd_learn_user(message: Message):
     try:
         from database_postgres import get_user_messages, save_user_fact
         
-        # Получаем последние 50 сообщений пользователя
-        messages = await get_user_messages(chat_id, user_id, limit=50)
+        # Получаем последние 500 сообщений пользователя для глубокого обучения
+        messages = await get_user_messages(chat_id, user_id, limit=500)
         
         if len(messages) < 5:
             await processing.edit_text("📝 Недостаточно сообщений. Напиши побольше, а потом запусти обучение!")
@@ -1484,9 +1484,9 @@ async def cmd_learn_user(message: Message):
             await processing.edit_text("📝 Твои сообщения слишком короткие для анализа. Пиши более развёрнуто!")
             return
         
-        # Отбираем до 10 самых длинных/информативных
+        # Отбираем до 30 самых длинных/информативных для глубокого обучения
         informative_messages.sort(key=lambda x: len(x.get('message_text', '')), reverse=True)
-        to_analyze = informative_messages[:10]
+        to_analyze = informative_messages[:30]
         
         # Проверяем API
         extract_url = EXTRACT_FACTS_API_URL or VERCEL_API_URL.replace("/summary", "/extract_facts")
@@ -1556,6 +1556,138 @@ async def cmd_learn_user(message: Message):
             await processing.edit_text("❌ Ошибка обучения")
         except:
             await message.answer("❌ Ошибка обучения")
+
+
+@router.message(Command("глубокое", "deeplearn", "fulllearn", "полное"))
+async def cmd_deep_learn(message: Message):
+    """
+    ГЛУБОКОЕ обучение — анализирует ВСЕ сообщения пользователя в чате.
+    Может занять несколько минут, но бот запомнит максимум информации.
+    """
+    if not USE_POSTGRES:
+        await message.answer("⚠️ Глубокое обучение доступно только в полной версии")
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or "Аноним"
+    
+    # Rate limit — не чаще раза в 30 минут (это тяжёлая операция)
+    if not check_cooldown(user_id, chat_id, "deeplearn", 1800):
+        await message.reply("⏳ Глубокое обучение можно запускать раз в 30 минут!")
+        return
+    
+    processing = await message.answer("🧠 Запускаю ГЛУБОКОЕ обучение...\nЭто может занять несколько минут.")
+    
+    try:
+        from database_postgres import get_user_messages, save_user_fact
+        
+        # Получаем ВСЕ сообщения пользователя (до 5000)
+        messages = await get_user_messages(chat_id, user_id, limit=5000)
+        total_messages = len(messages)
+        
+        if total_messages < 10:
+            await processing.edit_text("📝 Недостаточно сообщений для глубокого обучения. Нужно минимум 10.")
+            return
+        
+        await processing.edit_text(f"🧠 Найдено {total_messages} сообщений. Анализирую...")
+        
+        # Фильтруем информативные сообщения (>30 символов для глубокого анализа)
+        informative_messages = [
+            m for m in messages 
+            if m.get('message_text') and len(m.get('message_text', '')) > 30
+        ]
+        
+        if len(informative_messages) < 5:
+            await processing.edit_text("📝 Слишком мало информативных сообщений для глубокого обучения.")
+            return
+        
+        # Сортируем по длине и берём до 100 самых информативных
+        informative_messages.sort(key=lambda x: len(x.get('message_text', '')), reverse=True)
+        to_analyze = informative_messages[:100]  # До 100 сообщений для глубокого анализа
+        
+        # Проверяем API
+        extract_url = EXTRACT_FACTS_API_URL or VERCEL_API_URL.replace("/summary", "/extract_facts")
+        if not extract_url or "your-vercel" in extract_url:
+            await processing.edit_text("❌ API для извлечения фактов не настроен")
+            return
+        
+        await processing.edit_text(f"🧠 Глубокий анализ {len(to_analyze)} сообщений из {total_messages}...")
+        
+        facts_saved = 0
+        analyzed = 0
+        session = await get_http_session()
+        
+        for i, msg in enumerate(to_analyze):
+            text = msg.get('message_text', '')
+            
+            try:
+                async with session.post(extract_url, json={
+                    "message": text[:1000],
+                    "user_name": user_name
+                }, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        analyzed += 1
+                        
+                        if result.get("has_facts") and result.get("facts"):
+                            for fact in result["facts"][:5]:  # До 5 фактов на сообщение
+                                fact_type = fact.get("type", "personal")
+                                fact_text = fact.get("text", "")
+                                confidence = fact.get("confidence", 0.7)
+                                
+                                if fact_text and len(fact_text) > 3:
+                                    success = await save_user_fact(
+                                        chat_id=chat_id,
+                                        user_id=user_id,
+                                        fact_type=fact_type,
+                                        fact_text=fact_text,
+                                        confidence=confidence
+                                    )
+                                    if success:
+                                        facts_saved += 1
+                
+                # Обновляем прогресс каждые 10 сообщений
+                if (i + 1) % 10 == 0:
+                    try:
+                        await processing.edit_text(
+                            f"🧠 Глубокое обучение: {i+1}/{len(to_analyze)} сообщений...\n"
+                            f"Найдено фактов: {facts_saved}"
+                        )
+                    except:
+                        pass
+                
+                # Пауза между запросами (чтобы не перегружать API)
+                await asyncio.sleep(0.3)
+                
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.debug(f"Deep learn extraction error: {e}")
+                continue
+        
+        if facts_saved > 0:
+            await processing.edit_text(
+                f"✅ **Глубокое обучение завершено!**\n\n"
+                f"📊 Всего сообщений: {total_messages}\n"
+                f"🔍 Проанализировано: {analyzed}\n"
+                f"📌 Новых фактов: {facts_saved}\n\n"
+                f"Теперь бот знает о тебе гораздо больше!\n"
+                f"Используй /память чтобы увидеть всё.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await processing.edit_text(
+                f"🤔 Проанализировал {analyzed} сообщений, но новых фактов не нашёл.\n"
+                f"Возможно, я уже всё знаю о тебе, или попробуй рассказать что-то новое!"
+            )
+    
+    except Exception as e:
+        logger.error(f"Deep learn error: {e}")
+        try:
+            await processing.edit_text("❌ Ошибка глубокого обучения")
+        except:
+            await message.answer("❌ Ошибка глубокого обучения")
 
 
 @router.message(Command("психоанализ", "psycho", "анализ", "разбор"))
@@ -3028,7 +3160,7 @@ async def generate_smart_reply(message: Message) -> str:
                 smart_ctx = await build_smart_context(
                     chat_id=chat_id,
                     user_id=user_id,
-                    max_messages=50,  # Последние 50 сообщений
+                    max_messages=150,  # Последние 150 сообщений для полного контекста
                     include_facts=True,
                     include_summaries=True,
                     include_events=True
@@ -8290,7 +8422,8 @@ async def setup_bot_commands():
         BotCommand(command="dossier", description="📋 AI-досье на юзера"),
         BotCommand(command="psycho", description="🧠 Психоанализ личности"),
         BotCommand(command="memory", description="🧠 Что бот помнит о юзере"),
-        BotCommand(command="learnme", description="📚 Обучить бота на моих сообщениях"),
+        BotCommand(command="learnme", description="📚 Быстрое обучение (30 сообщений)"),
+        BotCommand(command="deeplearn", description="🧠 Глубокое обучение (все сообщения)"),
         BotCommand(command="social", description="🕸️ Социальный граф чата"),
         BotCommand(command="allprofiles", description="👥 Все профили чата"),
         

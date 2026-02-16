@@ -1629,19 +1629,19 @@ async def build_smart_context(
     
     # 2. Факты о конкретном пользователе (если указан)
     if include_facts and user_id:
-        context['user_facts'] = await get_user_facts(chat_id, user_id, limit=15)
+        context['user_facts'] = await get_user_facts(chat_id, user_id, limit=50)  # Все факты о пользователе
     
     # 3. Факты о чате в целом
     if include_facts:
-        context['chat_facts'] = await get_all_chat_facts(chat_id, limit=30)
+        context['chat_facts'] = await get_all_chat_facts(chat_id, limit=100)  # Больше фактов о чате
     
-    # 4. Последние сводки
+    # 4. Последние сводки (неделя назад)
     if include_summaries:
-        context['summaries'] = await get_recent_summaries(chat_id, limit=3, hours=72)
+        context['summaries'] = await get_recent_summaries(chat_id, limit=10, hours=168)  # Неделя сводок
     
-    # 5. Важные события
+    # 5. Важные события (месяц)
     if include_events:
-        context['events'] = await get_chat_events(chat_id, limit=5, days=14)
+        context['events'] = await get_chat_events(chat_id, limit=15, days=30)  # Месяц событий
     
     # Форматируем контекст для промпта
     parts = []
