@@ -1343,19 +1343,22 @@ async def cmd_psychoanalysis(message: Message):
     processing = await message.answer(f"🧠 Анализирую личность {target_name}...")
     
     try:
-        # Получаем полный профиль (per-chat!)
-        profile = await get_user_profile_for_ai(target_id, message.chat.id, target_name, target_username or "")
-        full_profile = await get_user_full_profile(target_id, message.chat.id)
+        # Получаем последние сообщения для анализа (до 1000 для полной картины)
+        # ВАЖНО: сначала получаем реальные сообщения, чтобы проверить их количество
+        messages = await get_user_messages(message.chat.id, target_id, limit=1000)
+        real_message_count = len(messages)
         
-        if not full_profile or full_profile.get('total_messages', 0) < 10:
+        if real_message_count < 10:
             await processing.edit_text(
                 f"🔍 Недостаточно данных для психоанализа {target_name}.\n"
-                f"Нужно минимум 10 сообщений, а у него только {full_profile.get('total_messages', 0) if full_profile else 0}."
+                f"Нужно минимум 10 сообщений, а найдено только {real_message_count}.\n\n"
+                f"💡 Пусть {target_name} побольше пишет в чате!"
             )
             return
         
-        # Получаем последние сообщения для анализа (до 1000 для полной картины)
-        messages = await get_user_messages(message.chat.id, target_id, limit=1000)
+        # Получаем профиль (может быть None если профилирование ещё не накопило данные)
+        profile = await get_user_profile_for_ai(target_id, message.chat.id, target_name, target_username or "")
+        full_profile = await get_user_full_profile(target_id, message.chat.id)
         # Берём 30 самых информативных для контекста
         msg_texts = [m.get('message_text', '') for m in messages if m.get('message_text')]
         interesting_msgs = sorted(msg_texts, key=len, reverse=True)[:20]
@@ -1414,8 +1417,8 @@ async def cmd_psychoanalysis(message: Message):
 
 {gender_icon} *БАЗОВЫЕ ДАННЫЕ*
 • Пол: {gender}
-• Сообщений проанализировано: {full_profile.get('total_messages', 0)}
-• В чате с: {full_profile.get('first_seen_at', 'неизвестно')}
+• Сообщений проанализировано: {real_message_count}
+• В чате с: {full_profile.get('first_seen_at', 'неизвестно') if full_profile else 'недавно'}
 
 📊 *АКТИВНОСТЬ*
 • Уровень: {activity_desc}
@@ -1426,7 +1429,7 @@ async def cmd_psychoanalysis(message: Message):
 • Стиль: {style_desc}
 • Токсичность: {toxicity_level} ({toxicity:.0%})
 • Чувство юмора: {humor_level}
-• Эмодзи: {full_profile.get('emoji_usage_rate', 0):.1f}%
+• Эмодзи: {full_profile.get('emoji_usage_rate', 0) if full_profile else 0:.1f}%
 
 🎯 *ИНТЕРЕСЫ*
 • {interests_text}
