@@ -1228,11 +1228,14 @@ async def cmd_ai_profile(message: Message):
         target_user = message.reply_to_message.from_user
         target_name = target_user.first_name or target_user.username or "Аноним"
     
+    # Показываем что работаем (может занять время при пересборке)
+    processing = await message.answer(f"🔍 Собираю досье на *{target_name}*...", parse_mode=ParseMode.MARKDOWN)
+    
     try:
         report = await get_user_activity_report(target_user.id, message.chat.id)
         
         if report.get('error'):
-            await message.answer(f"🔍 Досье на *{target_name}* пока не собрано. Пусть побольше болтает!", parse_mode=ParseMode.MARKDOWN)
+            await processing.edit_text(f"🔍 Досье на *{target_name}* пока не собрано. Пусть побольше болтает!", parse_mode=ParseMode.MARKDOWN)
             return
         
         # Формируем красивый вывод
@@ -1305,15 +1308,21 @@ async def cmd_ai_profile(message: Message):
 {interests_text}
 """
         
+        # Если профиль был пересобран — добавляем инфо
+        if report.get('_rebuilt'):
+            text += f"\n✨ _Профиль пересобран из истории сообщений_"
         # Если профиль устарел — добавляем подсказку
-        if report.get('_note'):
+        elif report.get('_note'):
             text += f"\n⚠️ _{report['_note']}_"
         
-        await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+        await processing.edit_text(text, parse_mode=ParseMode.MARKDOWN)
         
     except Exception as e:
         logger.error(f"Profile error: {e}")
-        await message.answer("❌ Ошибка получения профиля")
+        try:
+            await processing.edit_text("❌ Ошибка получения профиля")
+        except:
+            await message.answer("❌ Ошибка получения профиля")
 
 
 @router.message(Command("психоанализ", "psycho", "анализ", "разбор"))

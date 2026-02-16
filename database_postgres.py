@@ -2886,12 +2886,17 @@ async def get_chat_social_graph(chat_id: int) -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
-async def get_user_activity_report(user_id: int, chat_id: int) -> Dict[str, Any]:
+async def get_user_activity_report(user_id: int, chat_id: int, auto_rebuild: bool = True) -> Dict[str, Any]:
     """
     Получить отчёт об активности пользователя в конкретном чате (per-chat!).
     
-    ВАЖНО: Если профиль пуст или устарел, автоматически подсчитывает 
-    базовые данные из chat_messages для корректного отображения.
+    ВАЖНО: Если профиль пуст или сильно устарел и auto_rebuild=True,
+    автоматически пересобирает профиль из chat_messages.
+    
+    Args:
+        user_id: ID пользователя
+        chat_id: ID чата
+        auto_rebuild: Автоматически пересобрать профиль если устарел (default: True)
     """
     profile = await get_user_full_profile(user_id, chat_id)
     
@@ -2911,12 +2916,35 @@ async def get_user_activity_report(user_id: int, chat_id: int) -> Dict[str, Any]
         
         real_message_count = real_stats['total_messages'] or 0
     
-    # Если профиль не найден, но есть реальные сообщения — создаём базовый отчёт
+    # Определяем нужна ли пересборка
+    profile_messages = profile.get('total_messages', 0) if profile else 0
+    needs_rebuild = (
+        auto_rebuild and 
+        real_message_count >= 5 and  # минимум 5 сообщений для rebuild
+        (
+            not profile or  # профиля нет
+            profile_messages == 0 or  # профиль пустой
+            real_message_count > profile_messages * 2  # профиль сильно устарел (>50% новых)
+        )
+    )
+    
+    # Автоматическая пересборка профиля
+    if needs_rebuild:
+        try:
+            rebuild_result = await rebuild_single_user_profile(user_id, chat_id, limit=500)
+            if rebuild_result.get('success'):
+                # Перечитываем профиль после пересборки
+                profile = await get_user_full_profile(user_id, chat_id)
+                profile_messages = profile.get('total_messages', 0) if profile else 0
+        except Exception as e:
+            pass  # Не критично — вернём то что есть
+    
+    # Если профиль всё ещё не найден
     if not profile:
         if real_message_count == 0:
             return {'error': 'Profile not found'}
         
-        # Базовый отчёт из реальных данных
+        # Базовый отчёт из реальных данных (rebuild не сработал)
         return {
             'user_id': user_id,
             'name': real_stats['first_name'] or real_stats['username'] or 'Unknown',
@@ -2939,12 +2967,11 @@ async def get_user_activity_report(user_id: int, chat_id: int) -> Dict[str, Any]
             'top_interacted_users': [],
             'first_seen': real_stats['first_seen'],
             'last_seen': real_stats['last_seen'],
-            '_note': 'Базовый профиль — напиши админу /admin rebuild_profiles для полного анализа'
+            '_note': 'Не удалось проанализировать — попробуй /admin rebuild_profiles'
         }
     
-    # Если профиль есть, но total_messages сильно отличается от реальности — используем реальные данные
-    profile_messages = profile.get('total_messages', 0)
-    use_real_count = real_message_count > profile_messages * 1.5 or (profile_messages == 0 and real_message_count > 0)
+    # Используем реальное количество если профиль всё ещё отстаёт
+    use_real_count = real_message_count > profile_messages * 1.5
     
     # Формируем читаемый отчёт
     report = {
@@ -2952,7 +2979,7 @@ async def get_user_activity_report(user_id: int, chat_id: int) -> Dict[str, Any]
         'name': profile.get('first_name') or profile.get('username') or 'Unknown',
         'gender': profile.get('detected_gender', 'unknown'),
         'gender_confidence': f"{(profile.get('gender_confidence', 0) * 100):.0f}%",
-        'total_messages': real_message_count if use_real_count else profile_messages,
+        'total_messages': max(real_message_count, profile_messages),  # всегда показываем большее
         'activity_level': profile.get('activity_level', 'unknown'),
         'communication_style': profile.get('communication_style', 'neutral'),
         'sentiment': {
@@ -2976,9 +3003,9 @@ async def get_user_activity_report(user_id: int, chat_id: int) -> Dict[str, Any]
         'last_seen': profile.get('last_seen_at') or real_stats['last_seen'],
     }
     
-    # Добавляем подсказку если профиль устарел
-    if use_real_count and profile_messages < real_message_count * 0.5:
-        report['_note'] = f'Профиль устарел ({profile_messages} vs {real_message_count} сообщений)'
+    # Добавляем информацию о пересборке
+    if needs_rebuild and profile_messages > 0:
+        report['_rebuilt'] = True
     
     return report
 
@@ -3427,6 +3454,71 @@ async def get_enriched_chat_data_for_ai(chat_id: int, hours: int = 5) -> Dict[st
 
 
 # ==================== МИГРАЦИЯ ПРОФИЛЕЙ ====================
+
+async def rebuild_single_user_profile(user_id: int, chat_id: int, limit: int = 500) -> Dict[str, Any]:
+    """
+    Пересобрать профиль ОДНОГО пользователя из chat_messages.
+    Вызывается автоматически если профиль устарел или отсутствует.
+    
+    Args:
+        user_id: ID пользователя
+        chat_id: ID чата
+        limit: Максимум сообщений для анализа
+    
+    Returns:
+        Статистика пересборки
+    """
+    stats = {'messages_analyzed': 0, 'success': False, 'error': None}
+    
+    async with (await get_pool()).acquire() as conn:
+        try:
+            # Получаем сообщения пользователя
+            messages = await conn.fetch("""
+                SELECT message_text, created_at, reply_to_user_id, first_name, username, message_type
+                FROM chat_messages
+                WHERE chat_id = $1 AND user_id = $2 
+                AND message_text IS NOT NULL AND message_text != ''
+                ORDER BY created_at ASC
+                LIMIT $3
+            """, chat_id, user_id, limit)
+            
+            if not messages:
+                stats['error'] = 'No messages found'
+                return stats
+            
+            first_name = messages[0]['first_name'] or ''
+            username = messages[0]['username'] or ''
+            
+            # Удаляем старый профиль если есть
+            await conn.execute(
+                "DELETE FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
+                user_id, chat_id
+            )
+            
+            # Пересоздаём профиль из всех сообщений
+            for msg in messages:
+                try:
+                    await update_user_profile_comprehensive(
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        message_text=msg['message_text'],
+                        timestamp=msg['created_at'],
+                        first_name=msg['first_name'] or first_name,
+                        username=msg['username'] or username,
+                        reply_to_user_id=msg.get('reply_to_user_id'),
+                        message_type=msg.get('message_type', 'text')
+                    )
+                    stats['messages_analyzed'] += 1
+                except Exception:
+                    pass  # Продолжаем при ошибках отдельных сообщений
+            
+            stats['success'] = True
+            
+        except Exception as e:
+            stats['error'] = str(e)
+    
+    return stats
+
 
 async def rebuild_profiles_from_messages(chat_id: int, limit: int = 500) -> Dict[str, Any]:
     """
