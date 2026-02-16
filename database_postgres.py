@@ -727,6 +727,77 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_user_interests_user_chat
             ON user_interests(user_id, chat_id, score DESC)
         """)
+        
+        # ==================== УМНАЯ ПАМЯТЬ ====================
+        
+        # Таблица извлечённых фактов о пользователях (AI извлекает из сообщений)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_facts (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                fact_type TEXT NOT NULL,
+                fact_text TEXT NOT NULL,
+                confidence REAL DEFAULT 0.8,
+                source_message_id BIGINT,
+                mentioned_users BIGINT[],
+                created_at BIGINT NOT NULL,
+                last_confirmed_at BIGINT,
+                times_confirmed INTEGER DEFAULT 1,
+                is_active BOOLEAN DEFAULT TRUE,
+                UNIQUE(chat_id, user_id, fact_type, fact_text)
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_facts_lookup
+            ON user_facts(chat_id, user_id, is_active, confidence DESC)
+        """)
+        
+        # Категории фактов для быстрого поиска
+        # fact_type: personal (имя, возраст, работа), interest (хобби, увлечения), 
+        #            social (отношения с другими), event (что случилось), opinion (мнения)
+        
+        # Таблица контекстных сводок (автоматические сводки каждые N часов)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS context_summaries (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                summary_type TEXT NOT NULL,
+                summary_text TEXT NOT NULL,
+                period_start BIGINT NOT NULL,
+                period_end BIGINT NOT NULL,
+                messages_count INTEGER DEFAULT 0,
+                active_users INTEGER DEFAULT 0,
+                key_topics TEXT[],
+                mood_score REAL DEFAULT 0,
+                created_at BIGINT NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_context_summaries_lookup
+            ON context_summaries(chat_id, created_at DESC)
+        """)
+        
+        # summary_type: hourly, daily, weekly, important_event
+        
+        # Таблица важных событий чата
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_events (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                event_type TEXT NOT NULL,
+                event_description TEXT NOT NULL,
+                participants BIGINT[],
+                importance INTEGER DEFAULT 5,
+                created_at BIGINT NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_chat_events_lookup
+            ON chat_events(chat_id, importance DESC, created_at DESC)
+        """)
+        
+        # event_type: conflict, celebration, milestone, funny, important_news
     
     logger.info("✅ PostgreSQL database initialized!")
 
@@ -1303,6 +1374,316 @@ async def get_user_memories(chat_id: int, user_id: int, limit: int = 10) -> List
             LIMIT $4
         """, chat_id, user_id, current_time, limit)
         return [dict(row) for row in rows]
+
+
+# ==================== УМНАЯ ПАМЯТЬ (SMART MEMORY SYSTEM) ====================
+
+async def save_user_fact(
+    chat_id: int,
+    user_id: int,
+    fact_type: str,
+    fact_text: str,
+    confidence: float = 0.8,
+    source_message_id: int = None,
+    mentioned_users: List[int] = None
+) -> bool:
+    """
+    Сохранить извлечённый факт о пользователе.
+    
+    fact_type:
+      - personal: имя, возраст, профессия, место жительства
+      - interest: хобби, увлечения, предпочтения  
+      - social: отношения с другими пользователями
+      - event: что случилось, новости из жизни
+      - opinion: мнения, взгляды, позиция
+    """
+    now = int(time.time())
+    
+    async with (await get_pool()).acquire() as conn:
+        try:
+            # Upsert — если факт уже есть, увеличиваем подтверждения
+            await conn.execute("""
+                INSERT INTO user_facts 
+                (chat_id, user_id, fact_type, fact_text, confidence, 
+                 source_message_id, mentioned_users, created_at, last_confirmed_at, times_confirmed)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, 1)
+                ON CONFLICT (chat_id, user_id, fact_type, fact_text) 
+                DO UPDATE SET 
+                    last_confirmed_at = $8,
+                    times_confirmed = user_facts.times_confirmed + 1,
+                    confidence = LEAST(user_facts.confidence + 0.1, 1.0)
+            """, chat_id, user_id, fact_type, fact_text[:500], confidence,
+                 source_message_id, mentioned_users or [], now)
+            return True
+        except Exception as e:
+            logger.debug(f"Could not save user fact: {e}")
+            return False
+
+
+async def get_user_facts(
+    chat_id: int, 
+    user_id: int, 
+    fact_types: List[str] = None,
+    limit: int = 20,
+    min_confidence: float = 0.5
+) -> List[Dict[str, Any]]:
+    """Получить факты о пользователе"""
+    async with (await get_pool()).acquire() as conn:
+        if fact_types:
+            rows = await conn.fetch("""
+                SELECT fact_type, fact_text, confidence, times_confirmed, created_at
+                FROM user_facts 
+                WHERE chat_id = $1 AND user_id = $2 
+                  AND is_active = TRUE 
+                  AND confidence >= $3
+                  AND fact_type = ANY($4)
+                ORDER BY confidence DESC, times_confirmed DESC, created_at DESC
+                LIMIT $5
+            """, chat_id, user_id, min_confidence, fact_types, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT fact_type, fact_text, confidence, times_confirmed, created_at
+                FROM user_facts 
+                WHERE chat_id = $1 AND user_id = $2 
+                  AND is_active = TRUE 
+                  AND confidence >= $3
+                ORDER BY confidence DESC, times_confirmed DESC, created_at DESC
+                LIMIT $4
+            """, chat_id, user_id, min_confidence, limit)
+        return [dict(row) for row in rows]
+
+
+async def get_all_chat_facts(chat_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+    """Получить все факты чата (для контекста AI)"""
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT f.user_id, f.fact_type, f.fact_text, f.confidence,
+                   u.first_name, u.username
+            FROM user_facts f
+            LEFT JOIN chat_users u ON f.chat_id = u.chat_id AND f.user_id = u.user_id
+            WHERE f.chat_id = $1 AND f.is_active = TRUE AND f.confidence >= 0.6
+            ORDER BY f.confidence DESC, f.times_confirmed DESC
+            LIMIT $2
+        """, chat_id, limit)
+        return [dict(row) for row in rows]
+
+
+async def save_context_summary(
+    chat_id: int,
+    summary_type: str,
+    summary_text: str,
+    period_start: int,
+    period_end: int,
+    messages_count: int = 0,
+    active_users: int = 0,
+    key_topics: List[str] = None,
+    mood_score: float = 0.0
+) -> bool:
+    """
+    Сохранить контекстную сводку чата.
+    
+    summary_type:
+      - hourly: каждые 6 часов
+      - daily: ежедневная сводка
+      - weekly: еженедельная сводка
+      - important_event: важное событие
+    """
+    now = int(time.time())
+    
+    async with (await get_pool()).acquire() as conn:
+        try:
+            await conn.execute("""
+                INSERT INTO context_summaries 
+                (chat_id, summary_type, summary_text, period_start, period_end,
+                 messages_count, active_users, key_topics, mood_score, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """, chat_id, summary_type, summary_text[:2000], period_start, period_end,
+                 messages_count, active_users, key_topics or [], mood_score, now)
+            return True
+        except Exception as e:
+            logger.debug(f"Could not save context summary: {e}")
+            return False
+
+
+async def get_recent_summaries(
+    chat_id: int, 
+    summary_types: List[str] = None,
+    limit: int = 5,
+    hours: int = 168  # неделя
+) -> List[Dict[str, Any]]:
+    """Получить последние сводки чата"""
+    since_time = int(time.time()) - (hours * 3600)
+    
+    async with (await get_pool()).acquire() as conn:
+        if summary_types:
+            rows = await conn.fetch("""
+                SELECT summary_type, summary_text, period_start, period_end,
+                       messages_count, active_users, key_topics, mood_score, created_at
+                FROM context_summaries 
+                WHERE chat_id = $1 AND created_at >= $2 AND summary_type = ANY($3)
+                ORDER BY created_at DESC
+                LIMIT $4
+            """, chat_id, since_time, summary_types, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT summary_type, summary_text, period_start, period_end,
+                       messages_count, active_users, key_topics, mood_score, created_at
+                FROM context_summaries 
+                WHERE chat_id = $1 AND created_at >= $2
+                ORDER BY created_at DESC
+                LIMIT $3
+            """, chat_id, since_time, limit)
+        return [dict(row) for row in rows]
+
+
+async def save_chat_event(
+    chat_id: int,
+    event_type: str,
+    event_description: str,
+    participants: List[int] = None,
+    importance: int = 5
+) -> bool:
+    """
+    Сохранить важное событие чата.
+    
+    event_type:
+      - conflict: конфликт между участниками
+      - celebration: праздник, поздравления
+      - milestone: достижение (1000 сообщений и т.д.)
+      - funny: смешной момент
+      - important_news: важная новость
+    """
+    now = int(time.time())
+    
+    async with (await get_pool()).acquire() as conn:
+        try:
+            await conn.execute("""
+                INSERT INTO chat_events 
+                (chat_id, event_type, event_description, participants, importance, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            """, chat_id, event_type, event_description[:500], participants or [], importance, now)
+            return True
+        except Exception as e:
+            logger.debug(f"Could not save chat event: {e}")
+            return False
+
+
+async def get_chat_events(
+    chat_id: int, 
+    limit: int = 10,
+    min_importance: int = 3,
+    days: int = 30
+) -> List[Dict[str, Any]]:
+    """Получить важные события чата"""
+    since_time = int(time.time()) - (days * 24 * 3600)
+    
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT event_type, event_description, participants, importance, created_at
+            FROM chat_events 
+            WHERE chat_id = $1 AND created_at >= $2 AND importance >= $3
+            ORDER BY importance DESC, created_at DESC
+            LIMIT $4
+        """, chat_id, since_time, min_importance, limit)
+        return [dict(row) for row in rows]
+
+
+async def build_smart_context(
+    chat_id: int, 
+    user_id: int = None,
+    max_messages: int = 100,
+    include_facts: bool = True,
+    include_summaries: bool = True,
+    include_events: bool = True
+) -> Dict[str, Any]:
+    """
+    Собрать УМНЫЙ контекст для AI — многоуровневая память.
+    
+    Возвращает словарь с:
+    - recent_messages: последние сообщения (краткосрочная память)
+    - user_facts: факты о пользователе (долгосрочная)
+    - chat_facts: факты о чате
+    - summaries: последние сводки (среднесрочная)
+    - events: важные события
+    - formatted_context: готовая строка для промпта
+    """
+    context = {
+        'recent_messages': [],
+        'user_facts': [],
+        'chat_facts': [],
+        'summaries': [],
+        'events': [],
+        'formatted_context': ''
+    }
+    
+    async with (await get_pool()).acquire() as conn:
+        # 1. Краткосрочная память — последние сообщения
+        messages = await conn.fetch("""
+            SELECT user_id, first_name, username, message_text, created_at
+            FROM chat_messages 
+            WHERE chat_id = $1 AND message_text IS NOT NULL AND message_text != ''
+            ORDER BY created_at DESC
+            LIMIT $2
+        """, chat_id, max_messages)
+        context['recent_messages'] = [dict(m) for m in messages]
+    
+    # 2. Факты о конкретном пользователе (если указан)
+    if include_facts and user_id:
+        context['user_facts'] = await get_user_facts(chat_id, user_id, limit=15)
+    
+    # 3. Факты о чате в целом
+    if include_facts:
+        context['chat_facts'] = await get_all_chat_facts(chat_id, limit=30)
+    
+    # 4. Последние сводки
+    if include_summaries:
+        context['summaries'] = await get_recent_summaries(chat_id, limit=3, hours=72)
+    
+    # 5. Важные события
+    if include_events:
+        context['events'] = await get_chat_events(chat_id, limit=5, days=14)
+    
+    # Форматируем контекст для промпта
+    parts = []
+    
+    # Сводки (давно -> недавно)
+    if context['summaries']:
+        parts.append("=== СВОДКИ (что было раньше) ===")
+        for s in reversed(context['summaries']):
+            topics = ", ".join(s.get('key_topics', [])[:3]) if s.get('key_topics') else ""
+            parts.append(f"[{s['summary_type']}] {s['summary_text'][:300]}" + (f" (темы: {topics})" if topics else ""))
+    
+    # События
+    if context['events']:
+        parts.append("\n=== ВАЖНЫЕ СОБЫТИЯ ===")
+        for e in context['events']:
+            parts.append(f"[{e['event_type']}] {e['event_description']}")
+    
+    # Факты о пользователе
+    if context['user_facts']:
+        parts.append("\n=== ФАКТЫ О ПОЛЬЗОВАТЕЛЕ ===")
+        for f in context['user_facts']:
+            parts.append(f"• [{f['fact_type']}] {f['fact_text']}")
+    
+    # Факты о чате
+    if context['chat_facts']:
+        parts.append("\n=== ФАКТЫ О УЧАСТНИКАХ ЧАТА ===")
+        for f in context['chat_facts'][:20]:
+            name = f.get('first_name') or f.get('username') or 'Аноним'
+            parts.append(f"• {name}: {f['fact_text']}")
+    
+    # Последние сообщения (новые внизу)
+    if context['recent_messages']:
+        parts.append(f"\n=== ПОСЛЕДНИЕ {len(context['recent_messages'])} СООБЩЕНИЙ ===")
+        for m in reversed(context['recent_messages'][-50:]):  # последние 50
+            name = m.get('first_name') or m.get('username') or 'Аноним'
+            text = (m.get('message_text') or '')[:150]
+            if text:
+                parts.append(f"{name}: {text}")
+    
+    context['formatted_context'] = "\n".join(parts)
+    
+    return context
 
 
 async def get_active_chats_for_auto_summary(min_messages: int = 50, hours: int = 12) -> List[Dict[str, Any]]:

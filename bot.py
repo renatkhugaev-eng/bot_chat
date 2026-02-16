@@ -382,10 +382,13 @@ async def gather_user_context(chat_id: int, user_id: int, limit: int = 1000) -> 
 
 async def gather_user_memory(chat_id: int, user_id: int, user_name: str = "") -> str:
     """
-    Собирает ВСЮ память о пользователе для AI-команд:
-    - Профиль (пол, стиль, токсичность, юмор, интересы)
-    - Воспоминания (факты, активность, отношения)
-    - Социальные связи (друзья, враги)
+    Собирает МНОГОУРОВНЕВУЮ память о пользователе для AI-команд:
+    
+    Уровень 1: Профиль (пол, стиль, активность)
+    Уровень 2: Умные факты (извлечённые AI)
+    Уровень 3: Воспоминания (старая система)
+    Уровень 4: Социальные связи
+    Уровень 5: События чата (опционально)
     
     Возвращает форматированную строку для контекста AI.
     """
@@ -395,7 +398,7 @@ async def gather_user_memory(chat_id: int, user_id: int, user_name: str = "") ->
     memory_parts = []
     
     try:
-        # 1. Профиль пользователя
+        # 1. Профиль пользователя (базовый уровень)
         profile = await get_user_profile_for_ai(user_id, chat_id, user_name, "")
         if profile:
             gender = profile.get('gender', 'неизвестно')
@@ -408,7 +411,7 @@ async def gather_user_memory(chat_id: int, user_id: int, user_name: str = "") ->
             if gender != 'unknown':
                 profile_lines.append(f"Пол: {gender}")
             if style:
-                profile_lines.append(f"Стиль: {style}")
+                profile_lines.append(f"Стиль общения: {style}")
             if activity:
                 profile_lines.append(f"Активность: {activity}")
             if traits:
@@ -427,7 +430,27 @@ async def gather_user_memory(chat_id: int, user_id: int, user_name: str = "") ->
                 memory_parts.append("=== ПРОФИЛЬ ===")
                 memory_parts.extend(profile_lines)
         
-        # 2. Воспоминания о пользователе
+        # 2. УМНЫЕ ФАКТЫ (новая система — извлечённые AI)
+        try:
+            from database_postgres import get_user_facts
+            facts = await get_user_facts(chat_id, user_id, limit=15, min_confidence=0.6)
+            if facts:
+                memory_parts.append("\n=== ИЗВЕСТНЫЕ ФАКТЫ ===")
+                for f in facts:
+                    fact_type = f.get('fact_type', '')
+                    fact_text = f.get('fact_text', '')
+                    confidence = f.get('confidence', 0)
+                    times = f.get('times_confirmed', 1)
+                    # Более уверенные факты помечаем
+                    marker = "✓" if confidence > 0.8 or times > 2 else "•"
+                    if fact_text:
+                        memory_parts.append(f"{marker} [{fact_type}] {fact_text}")
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"Could not get user facts: {e}")
+        
+        # 3. Старые воспоминания (legacy система)
         memories = await get_user_memories(chat_id, user_id, limit=10)
         if memories:
             memory_parts.append("\n=== ВОСПОМИНАНИЯ ===")
@@ -436,6 +459,21 @@ async def gather_user_memory(chat_id: int, user_id: int, user_name: str = "") ->
                 memory_text = m.get('memory_text', '')
                 if memory_text:
                     memory_parts.append(f"• [{memory_type}] {memory_text[:150]}")
+        
+        # 4. Последние сводки чата (контекст)
+        try:
+            from database_postgres import get_recent_summaries
+            summaries = await get_recent_summaries(chat_id, limit=2, hours=48)
+            if summaries:
+                memory_parts.append("\n=== ЧТО БЫЛО В ЧАТЕ ===")
+                for s in summaries:
+                    text = s.get('summary_text', '')[:200]
+                    if text:
+                        memory_parts.append(f"• {text}")
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"Could not get summaries: {e}")
         
     except Exception as e:
         logger.warning(f"Could not gather user memory: {e}")
@@ -1323,6 +1361,201 @@ async def cmd_ai_profile(message: Message):
             await processing.edit_text("❌ Ошибка получения профиля")
         except:
             await message.answer("❌ Ошибка получения профиля")
+
+
+@router.message(Command("память", "memory", "факты", "facts"))
+async def cmd_smart_memory(message: Message):
+    """Показать что бот помнит о пользователе (умная память)"""
+    if not USE_POSTGRES:
+        await message.answer("⚠️ Умная память доступна только в полной версии")
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or "Аноним"
+    
+    # Определяем цель — себя или кого-то по реплаю
+    target_id = user_id
+    target_name = user_name
+    
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+        target_name = message.reply_to_message.from_user.first_name or "Аноним"
+    
+    processing = await message.answer("🧠 Собираю умную память...")
+    
+    try:
+        from database_postgres import get_user_facts, get_user_memories, get_recent_summaries
+        
+        report_parts = [f"🧠 **Умная память о {target_name}:**\n"]
+        
+        # 1. Факты (извлечённые AI)
+        facts = await get_user_facts(chat_id, target_id, limit=20, min_confidence=0.5)
+        if facts:
+            report_parts.append("**📌 Известные факты:**")
+            by_type = {}
+            for f in facts:
+                ft = f.get('fact_type', 'other')
+                if ft not in by_type:
+                    by_type[ft] = []
+                by_type[ft].append(f)
+            
+            type_icons = {
+                'personal': '👤', 'interest': '⭐', 'social': '👥',
+                'event': '📅', 'opinion': '💭'
+            }
+            
+            for ft, items in by_type.items():
+                icon = type_icons.get(ft, '•')
+                report_parts.append(f"\n{icon} _{ft}_:")
+                for item in items[:5]:
+                    conf = item.get('confidence', 0)
+                    times = item.get('times_confirmed', 1)
+                    marker = "✓" if conf > 0.8 or times > 2 else "○"
+                    report_parts.append(f"  {marker} {item.get('fact_text', '')}")
+        else:
+            report_parts.append("_Фактов пока нет. Бот извлекает факты из информативных сообщений автоматически._")
+        
+        # 2. Воспоминания (legacy)
+        memories = await get_user_memories(chat_id, target_id, limit=10)
+        if memories:
+            report_parts.append("\n**💾 Воспоминания:**")
+            for m in memories[:5]:
+                mtype = m.get('memory_type', '')
+                mtext = m.get('memory_text', '')[:100]
+                if mtext:
+                    report_parts.append(f"• [{mtype}] {mtext}")
+        
+        # 3. Статистика
+        report_parts.append(f"\n**📊 Итого:**")
+        report_parts.append(f"• Фактов: {len(facts)}")
+        report_parts.append(f"• Воспоминаний: {len(memories)}")
+        
+        report = "\n".join(report_parts)
+        
+        try:
+            await processing.edit_text(report[:4000], parse_mode=ParseMode.MARKDOWN)
+        except:
+            await processing.edit_text(report[:4000].replace("**", "").replace("_", ""))
+    
+    except Exception as e:
+        logger.error(f"Memory command error: {e}")
+        try:
+            await processing.edit_text("❌ Ошибка получения памяти")
+        except:
+            await message.answer("❌ Ошибка получения памяти")
+
+
+@router.message(Command("обучи", "learnme", "запомни", "учись"))
+async def cmd_learn_user(message: Message):
+    """Принудительное обучение бота на последних сообщениях пользователя"""
+    if not USE_POSTGRES:
+        await message.answer("⚠️ Обучение доступно только в полной версии")
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or "Аноним"
+    
+    # Rate limit — не чаще раза в 5 минут
+    if not check_cooldown(user_id, chat_id, "learnme", 300):
+        await message.reply("⏳ Подожди 5 минут между обучениями!")
+        return
+    
+    processing = await message.answer("🧠 Анализирую твои сообщения...")
+    
+    try:
+        from database_postgres import get_user_messages, save_user_fact
+        
+        # Получаем последние 50 сообщений пользователя
+        messages = await get_user_messages(chat_id, user_id, limit=50)
+        
+        if len(messages) < 5:
+            await processing.edit_text("📝 Недостаточно сообщений. Напиши побольше, а потом запусти обучение!")
+            return
+        
+        # Фильтруем только информативные сообщения (>20 символов)
+        informative_messages = [
+            m for m in messages 
+            if m.get('message_text') and len(m.get('message_text', '')) > 20
+        ]
+        
+        if len(informative_messages) < 3:
+            await processing.edit_text("📝 Твои сообщения слишком короткие для анализа. Пиши более развёрнуто!")
+            return
+        
+        # Отбираем до 10 самых длинных/информативных
+        informative_messages.sort(key=lambda x: len(x.get('message_text', '')), reverse=True)
+        to_analyze = informative_messages[:10]
+        
+        # Проверяем API
+        extract_url = EXTRACT_FACTS_API_URL or VERCEL_API_URL.replace("/summary", "/extract_facts")
+        if not extract_url or "your-vercel" in extract_url:
+            await processing.edit_text("❌ API для извлечения фактов не настроен")
+            return
+        
+        await processing.edit_text(f"🧠 Анализирую {len(to_analyze)} сообщений...")
+        
+        facts_saved = 0
+        session = await get_http_session()
+        
+        for msg in to_analyze:
+            text = msg.get('message_text', '')
+            
+            try:
+                async with session.post(extract_url, json={
+                    "message": text[:1000],
+                    "user_name": user_name
+                }, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        
+                        if result.get("has_facts") and result.get("facts"):
+                            for fact in result["facts"][:3]:
+                                fact_type = fact.get("type", "personal")
+                                fact_text = fact.get("text", "")
+                                confidence = fact.get("confidence", 0.7)
+                                
+                                if fact_text and len(fact_text) > 3:
+                                    success = await save_user_fact(
+                                        chat_id=chat_id,
+                                        user_id=user_id,
+                                        fact_type=fact_type,
+                                        fact_text=fact_text,
+                                        confidence=confidence
+                                    )
+                                    if success:
+                                        facts_saved += 1
+                
+                # Небольшая пауза между запросами
+                await asyncio.sleep(0.5)
+                
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.debug(f"Learn extraction error: {e}")
+                continue
+        
+        if facts_saved > 0:
+            await processing.edit_text(
+                f"✅ **Обучение завершено!**\n\n"
+                f"🧠 Проанализировано: {len(to_analyze)} сообщений\n"
+                f"📌 Новых фактов: {facts_saved}\n\n"
+                f"Используй /память чтобы увидеть что я запомнил!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await processing.edit_text(
+                "🤔 Не нашёл новых фактов в твоих сообщениях.\n"
+                "Попробуй рассказать что-то о себе: работа, хобби, семья, мнения!"
+            )
+    
+    except Exception as e:
+        logger.error(f"Learn command error: {e}")
+        try:
+            await processing.edit_text("❌ Ошибка обучения")
+        except:
+            await message.answer("❌ Ошибка обучения")
 
 
 @router.message(Command("психоанализ", "psycho", "анализ", "разбор"))
@@ -2755,10 +2988,14 @@ REPLY_API_URL = os.getenv("REPLY_API_URL", "")
 
 async def generate_smart_reply(message: Message) -> str:
     """
-    Генерирует умный AI-ответ с полным контекстом:
-    - Профиль пользователя
-    - Память о пользователе
-    - Последние сообщения чата
+    Генерирует умный AI-ответ с МНОГОУРОВНЕВЫМ контекстом:
+    
+    Уровень 1: Профиль пользователя (пол, стиль)
+    Уровень 2: Умная память (факты, воспоминания)
+    Уровень 3: Контекст чата (последние сообщения)
+    Уровень 4: Сводки и события (что было раньше)
+    
+    Использует build_smart_context для максимальной контекстуальности.
     """
     chat_id = message.chat.id
     user_id = message.from_user.id
@@ -2773,7 +3010,7 @@ async def generate_smart_reply(message: Message) -> str:
     
     if USE_POSTGRES:
         try:
-            # Профиль
+            # Профиль пользователя
             profile = await get_user_profile_for_ai(user_id, chat_id, user_name, message.from_user.username or "")
             if profile:
                 gender = profile.get('gender', 'мужской')
@@ -2782,21 +3019,38 @@ async def generate_smart_reply(message: Message) -> str:
                 style = profile.get('communication_style', '')
                 user_profile = f"Пол: {gender}\nСтиль: {style}\nЧерты: {', '.join(traits[:5])}\nИнтересы: {', '.join(interests[:5])}"
             
-            # Память
+            # МНОГОУРОВНЕВАЯ ПАМЯТЬ — собираем всё
             user_memory = await gather_user_memory(chat_id, user_id, user_name)
             
-            # Последние сообщения чата (для контекста беседы)
-            from database_postgres import get_chat_statistics
-            stats = await get_chat_statistics(chat_id, hours=1)
-            if stats and stats.get('recent_messages'):
-                recent = stats['recent_messages'][:10]
-                chat_lines = []
-                for msg in recent:
-                    sender = msg.get('first_name', 'Аноним')
-                    text_msg = msg.get('message_text', '')[:100]
-                    if text_msg:
-                        chat_lines.append(f"{sender}: {text_msg}")
-                chat_context = "\n".join(chat_lines)
+            # УМНЫЙ КОНТЕКСТ — факты, сводки, события + сообщения
+            try:
+                from database_postgres import build_smart_context
+                smart_ctx = await build_smart_context(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    max_messages=50,  # Последние 50 сообщений
+                    include_facts=True,
+                    include_summaries=True,
+                    include_events=True
+                )
+                
+                # Используем готовый форматированный контекст
+                chat_context = smart_ctx.get('formatted_context', '')[:4000]
+                
+            except ImportError:
+                # Fallback на старую систему
+                from database_postgres import get_chat_statistics
+                stats = await get_chat_statistics(chat_id, hours=1)
+                if stats and stats.get('recent_messages'):
+                    recent = stats['recent_messages'][:20]
+                    chat_lines = []
+                    for msg in recent:
+                        sender = msg.get('first_name', 'Аноним')
+                        text_msg = msg.get('message_text', '')[:100]
+                        if text_msg:
+                            chat_lines.append(f"{sender}: {text_msg}")
+                    chat_context = "\n".join(chat_lines)
+                    
         except Exception as e:
             logger.debug(f"Could not gather context for smart reply: {e}")
     
@@ -2828,6 +3082,104 @@ async def generate_smart_reply(message: Message) -> str:
     
     # Fallback на локальный ответ
     return get_contextual_reply(text)
+
+
+# ==================== АВТОЗАПОМИНАНИЕ ФАКТОВ ====================
+
+EXTRACT_FACTS_API_URL = os.getenv("EXTRACT_FACTS_API_URL", "")
+
+# Кэш для rate limiting извлечения фактов (chat_id -> last_extraction_time)
+fact_extraction_cache = {}
+FACT_EXTRACTION_INTERVAL = 30  # Секунд между извлечениями фактов для одного чата
+
+
+async def extract_and_save_facts(message: Message) -> bool:
+    """
+    Извлекает факты из сообщения и сохраняет в умную память.
+    Вызывается фоново для длинных информативных сообщений.
+    """
+    text = message.text or ""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or "Аноним"
+    
+    # Не анализируем короткие сообщения
+    if len(text) < 20:
+        return False
+    
+    # Rate limiting — не чаще раза в 30 секунд на чат
+    now = time.time()
+    last_extraction = fact_extraction_cache.get(chat_id, 0)
+    if now - last_extraction < FACT_EXTRACTION_INTERVAL:
+        return False
+    
+    # Быстрая фильтрация — только потенциально информативные сообщения
+    # Сообщения с "я", "мой", "моя", "меня" и т.д. более информативны
+    personal_markers = ['я ', 'мой ', 'моя ', 'моё ', 'мне ', 'меня ', 'работаю', 'живу', 
+                        'люблю', 'ненавижу', 'купил', 'поехал', 'женился', 'развёлся']
+    has_personal = any(marker in text.lower() for marker in personal_markers)
+    
+    # Сообщения о других людях тоже информативны
+    social_markers = ['@', 'он ', 'она ', 'они ', 'вместе', 'встречаемся', 'друг', 'подруга']
+    has_social = any(marker in text.lower() for marker in social_markers)
+    
+    # Длинные сообщения (>100 символов) более информативны
+    is_long = len(text) > 100
+    
+    # Анализируем только если есть признаки информативности
+    if not (has_personal or has_social or is_long):
+        return False
+    
+    # Обновляем cache
+    fact_extraction_cache[chat_id] = now
+    
+    # Вызываем API извлечения фактов
+    extract_url = EXTRACT_FACTS_API_URL or VERCEL_API_URL.replace("/summary", "/extract_facts")
+    if not extract_url or "your-vercel" in extract_url:
+        return False
+    
+    try:
+        session = await get_http_session()
+        async with session.post(extract_url, json={
+            "message": text[:1000],
+            "user_name": user_name
+        }, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            if response.status == 200:
+                result = await response.json()
+                
+                if result.get("has_facts") and result.get("facts"):
+                    # Импортируем функцию сохранения
+                    if USE_POSTGRES:
+                        from database_postgres import save_user_fact
+                        
+                        saved_count = 0
+                        for fact in result["facts"][:5]:  # Максимум 5 фактов за раз
+                            fact_type = fact.get("type", "personal")
+                            fact_text = fact.get("text", "")
+                            confidence = fact.get("confidence", 0.7)
+                            
+                            if fact_text and len(fact_text) > 3:
+                                success = await save_user_fact(
+                                    chat_id=chat_id,
+                                    user_id=user_id,
+                                    fact_type=fact_type,
+                                    fact_text=fact_text,
+                                    confidence=confidence,
+                                    source_message_id=message.message_id
+                                )
+                                if success:
+                                    saved_count += 1
+                        
+                        if saved_count > 0:
+                            logger.info(f"SMART MEMORY: Saved {saved_count} facts for {user_name} in chat {chat_id}")
+                        return saved_count > 0
+                        
+    except asyncio.TimeoutError:
+        pass
+    except Exception as e:
+        logger.debug(f"Fact extraction error: {e}")
+    
+    return False
 
 
 # ==================== ГОЛОСОВЫЕ СООБЩЕНИЯ (ElevenLabs TTS) ====================
@@ -3956,6 +4308,11 @@ async def who_is_this_handler(message: Message):
     
     # Сохраняем сообщение в БД (делаем это здесь, т.к. этот хэндлер ловит все текстовые)
     await _save_text_message(message)
+    
+    # УМНАЯ ПАМЯТЬ: Фоновое извлечение фактов из информативных сообщений
+    # Не блокируем — запускаем асинхронно
+    if USE_POSTGRES and message.text and len(message.text) > 20:
+        asyncio.create_task(extract_and_save_facts(message))
     
     # === СПЕЦИФИЧНАЯ ЛОГИКА "ЭТО КТО?" ===
     text_lower = message.text.lower().strip()
@@ -6401,7 +6758,7 @@ async def scheduled_auto_summaries():
                             summary = result.get("summary", "")
                             
                             if summary and len(summary) > 50:
-                                # Сохраняем сводку
+                                # Сохраняем сводку в старую систему
                                 top_author = stats.get('top_authors', [{}])[0]
                                 await save_summary(
                                     chat_id=chat_id,
@@ -6411,6 +6768,33 @@ async def scheduled_auto_summaries():
                                     top_talker_count=top_author.get('msg_count'),
                                 )
                                 summaries_created += 1
+                                
+                                # УМНАЯ ПАМЯТЬ: Сохраняем в context_summaries
+                                try:
+                                    from database_postgres import save_context_summary
+                                    now = int(time.time())
+                                    
+                                    # Извлекаем ключевые темы из топ-авторов
+                                    key_topics = []
+                                    for author in stats.get('top_authors', [])[:3]:
+                                        name = author.get('first_name') or author.get('username')
+                                        if name:
+                                            key_topics.append(name)
+                                    
+                                    await save_context_summary(
+                                        chat_id=chat_id,
+                                        summary_type="hourly",
+                                        summary_text=summary[:1500],
+                                        period_start=now - 12*3600,  # 12 часов назад
+                                        period_end=now,
+                                        messages_count=stats.get('total_messages', 0),
+                                        active_users=stats.get('unique_users', 0),
+                                        key_topics=key_topics,
+                                        mood_score=0.0  # TODO: вычислять из сообщений
+                                    )
+                                    logger.debug(f"✅ Context summary saved for chat {chat_id}")
+                                except Exception as e:
+                                    logger.debug(f"Could not save context summary: {e}")
                                 
                                 # Сохраняем воспоминания об активных участниках
                                 for author in stats.get('top_authors', [])[:5]:
@@ -7905,6 +8289,8 @@ async def setup_bot_commands():
         # Анализ и профили
         BotCommand(command="dossier", description="📋 AI-досье на юзера"),
         BotCommand(command="psycho", description="🧠 Психоанализ личности"),
+        BotCommand(command="memory", description="🧠 Что бот помнит о юзере"),
+        BotCommand(command="learnme", description="📚 Обучить бота на моих сообщениях"),
         BotCommand(command="social", description="🕸️ Социальный граф чата"),
         BotCommand(command="allprofiles", description="👥 Все профили чата"),
         
