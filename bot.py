@@ -2748,6 +2748,88 @@ async def cmd_ventilate(message: Message):
         await processing_msg.edit_text("🪟 Форточка заклинила. Попробуй позже!")
 
 
+# ==================== УМНЫЕ ОТВЕТЫ НА УПОМИНАНИЯ ====================
+
+REPLY_API_URL = os.getenv("REPLY_API_URL", "")
+
+
+async def generate_smart_reply(message: Message) -> str:
+    """
+    Генерирует умный AI-ответ с полным контекстом:
+    - Профиль пользователя
+    - Память о пользователе
+    - Последние сообщения чата
+    """
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or "Аноним"
+    text = message.text or message.caption or ""
+    
+    # Собираем контекст
+    user_profile = "Профиль не известен"
+    user_memory = ""
+    chat_context = ""
+    gender = "мужской"
+    
+    if USE_POSTGRES:
+        try:
+            # Профиль
+            profile = await get_user_profile_for_ai(user_id, chat_id, user_name, message.from_user.username or "")
+            if profile:
+                gender = profile.get('gender', 'мужской')
+                traits = profile.get('traits', [])
+                interests = profile.get('interests', [])
+                style = profile.get('communication_style', '')
+                user_profile = f"Пол: {gender}\nСтиль: {style}\nЧерты: {', '.join(traits[:5])}\nИнтересы: {', '.join(interests[:5])}"
+            
+            # Память
+            user_memory = await gather_user_memory(chat_id, user_id, user_name)
+            
+            # Последние сообщения чата (для контекста беседы)
+            from database_postgres import get_chat_statistics
+            stats = await get_chat_statistics(chat_id, hours=1)
+            if stats and stats.get('recent_messages'):
+                recent = stats['recent_messages'][:10]
+                chat_lines = []
+                for msg in recent:
+                    sender = msg.get('first_name', 'Аноним')
+                    text_msg = msg.get('message_text', '')[:100]
+                    if text_msg:
+                        chat_lines.append(f"{sender}: {text_msg}")
+                chat_context = "\n".join(chat_lines)
+        except Exception as e:
+            logger.debug(f"Could not gather context for smart reply: {e}")
+    
+    # Fallback на локальный ответ если API не настроен
+    reply_url = REPLY_API_URL or VERCEL_API_URL.replace("/summary", "/reply")
+    if not reply_url or "your-vercel" in reply_url:
+        return get_contextual_reply(text)
+    
+    try:
+        session = await get_http_session()
+        async with session.post(reply_url, json={
+            "message": text,
+            "user_name": user_name,
+            "gender": gender,
+            "user_profile": user_profile,
+            "user_memory": user_memory[:2000] if user_memory else "",
+            "chat_context": chat_context[:1500] if chat_context else ""
+        }, timeout=aiohttp.ClientTimeout(total=15)) as response:
+            if response.status == 200:
+                result = await response.json()
+                reply = result.get("reply", "")
+                if reply:
+                    logger.info(f"SMART REPLY generated for {user_name}: {reply[:50]}...")
+                    return reply
+    except asyncio.TimeoutError:
+        logger.warning("Smart reply timeout, falling back to local")
+    except Exception as e:
+        logger.warning(f"Smart reply error: {e}, falling back to local")
+    
+    # Fallback на локальный ответ
+    return get_contextual_reply(text)
+
+
 # ==================== ГОЛОСОВЫЕ СООБЩЕНИЯ (ElevenLabs TTS) ====================
 
 TTS_API_URL = os.getenv("TTS_API_URL", "")
@@ -3796,6 +3878,66 @@ async def _save_text_message(message: Message):
             await update_player_stats(user_id, chat_id, experience=f"+{exp_gain}", money=f"+{money_gain}")
 
 
+async def maybe_random_comment(message: Message) -> bool:
+    """
+    Случайный умный комментарий бота на интересное сообщение.
+    Срабатывает редко (2-5%) на длинные или эмоциональные сообщения.
+    """
+    text = message.text or ""
+    chat_id = message.chat.id
+    
+    # Не отвечаем на короткие сообщения
+    if len(text) < 50:
+        return False
+    
+    # Проверяем кулдаун (не чаще раза в 5 минут на чат)
+    cooldown_key = f"random_comment_{chat_id}"
+    can_do, _ = check_cooldown(0, chat_id, cooldown_key, 300)
+    if not can_do:
+        return False
+    
+    # Определяем "интересность" сообщения
+    interest_score = 0
+    text_lower = text.lower()
+    
+    # Длина добавляет интерес
+    if len(text) > 100:
+        interest_score += 1
+    if len(text) > 200:
+        interest_score += 1
+    
+    # Вопросительные предложения интересны
+    if "?" in text:
+        interest_score += 1
+    
+    # Эмоциональные маркеры
+    if any(w in text_lower for w in ['охуеть', 'пиздец', 'блять', 'ахаха', 'ору', 'жесть', 'капец', 'нихуя себе']):
+        interest_score += 2
+    
+    # Личные истории интересны
+    if any(w in text_lower for w in ['сегодня', 'вчера', 'случилось', 'представьте', 'короче', 'история']):
+        interest_score += 1
+    
+    # Базовый шанс 1%, увеличивается с interest_score
+    # interest_score 0 = 1%, 1 = 2%, 2 = 3%, 3 = 4%, 4+ = 5%
+    chance = min(0.01 + interest_score * 0.01, 0.05)
+    
+    if random.random() > chance:
+        return False
+    
+    # Генерируем умный комментарий
+    try:
+        response = await generate_smart_reply(message)
+        if response and len(response) > 5:
+            await message.reply(response)
+            logger.info(f"RANDOM COMMENT in chat {chat_id}: {response[:50]}...")
+            return True
+    except Exception as e:
+        logger.debug(f"Random comment failed: {e}")
+    
+    return False
+
+
 @router.message(F.text, ~F.text.startswith("/"))
 async def who_is_this_handler(message: Message):
     """Обработчик 'это кто?' с реплаем или упоминанием + общая обработка текста"""
@@ -3808,6 +3950,9 @@ async def who_is_this_handler(message: Message):
     
     # Проверяем упоминание бота
     await check_bot_mention(message)
+    
+    # Случайный умный комментарий на интересные сообщения (1-5% шанс)
+    await maybe_random_comment(message)
     
     # Сохраняем сообщение в БД (делаем это здесь, т.к. этот хэндлер ловит все текстовые)
     await _save_text_message(message)
@@ -5338,8 +5483,8 @@ async def handle_bot_mention_or_reply(message: Message) -> bool:
             response = random.choice(BOT_REPLIES_VIDEO)
         
     elif message.text:
-        # Глубокий анализ текста
-        response = get_contextual_reply(message.text)
+        # УМНЫЙ AI-ответ с контекстом (профиль + память + чат)
+        response = await generate_smart_reply(message)
         
     else:
         response = random.choice(BOT_REPLIES_TEXT)
