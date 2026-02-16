@@ -445,8 +445,8 @@ async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]
             return [dict(row) for row in rows]
 
 
-async def get_user_messages(chat_id: int, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-    """Получить последние N сообщений конкретного пользователя"""
+async def get_user_messages(chat_id: int, user_id: int, limit: int = 1000) -> List[Dict[str, Any]]:
+    """Получить последние N сообщений конкретного пользователя (по умолчанию 1000)"""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""

@@ -8,7 +8,9 @@ from typing import Optional, List, Dict
 from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ChatMemberUpdated, BufferedInputFile, TelegramObject
+    ChatMemberUpdated, BufferedInputFile, TelegramObject,
+    BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
@@ -67,7 +69,7 @@ if USE_POSTGRES:
         update_user_gender_incrementally, update_user_profile_comprehensive,
         get_user_full_profile, get_user_activity_report, get_chat_social_graph,
         get_user_profile_for_ai, get_enriched_chat_data_for_ai, get_chat_social_data_for_ai,
-        find_user_in_chat
+        find_user_in_chat, get_all_chat_profiles
     )
 else:
     from database import (
@@ -105,6 +107,7 @@ else:
     async def get_user_profile_for_ai(user_id, chat_id, first_name="", username=""): return {'user_id': user_id, 'name': first_name or username or 'Аноним', 'gender': 'unknown', 'description': '', 'traits': [], 'interests': [], 'social': {}}
     async def get_enriched_chat_data_for_ai(chat_id, hours=5): return {'profiles': [], 'profiles_text': '', 'social': {}, 'social_text': ''}
     async def get_chat_social_data_for_ai(chat_id): return {'relationships': [], 'conflicts': [], 'friendships': [], 'description': ''}
+    async def get_all_chat_profiles(chat_id, limit=50): return []
     async def find_user_in_chat(chat_id, search_term): return None
 from game_utils import (
     format_player_card, format_top_players, get_rank, get_next_rank,
@@ -207,8 +210,8 @@ def check_cooldown(user_id: int, chat_id: int, action: str, cooldown_seconds: in
     
     cooldowns[key] = current_time + cooldown_seconds
     
-    # Очистка старых записей (раз в 100 проверок)
-    if len(cooldowns) > 1000:
+    # Очистка старых записей (раз в 100 записей или каждые 500 записей)
+    if len(cooldowns) > 500 or (len(cooldowns) > 100 and len(cooldowns) % 50 == 0):
         cleanup_cooldowns()
     
     return True, 0
@@ -236,9 +239,10 @@ def cleanup_api_calls():
 
 # ==================== СБОР КОНТЕКСТА (DRY) ====================
 
-async def gather_user_context(chat_id: int, user_id: int, limit: int = 100) -> tuple[str, int]:
+async def gather_user_context(chat_id: int, user_id: int, limit: int = 1000) -> tuple[str, int]:
     """
     Собирает контекст сообщений пользователя для AI-команд.
+    Загружает до 1000 сообщений, выбирает ~40 самых информативных.
     Возвращает (context_string, messages_count)
     """
     context_parts = []
@@ -258,10 +262,19 @@ async def gather_user_context(chat_id: int, user_id: int, limit: int = 100) -> t
             messages_found = len(texts)
             
             if texts:
-                # Берём интересные (длинные) + последние
-                interesting = sorted(texts, key=len, reverse=True)[:15]
+                # Берём разнообразный контекст из всей истории:
+                # - 20 самых длинных (информативных)
+                # - 15 последних (актуальных)
+                # - 5 случайных из середины (для разнообразия)
+                interesting = sorted(texts, key=len, reverse=True)[:20]
                 recent = texts[:15]
-                all_texts = list(dict.fromkeys(interesting + recent))[:20]
+                
+                # Случайные из середины (если есть)
+                middle_texts = texts[15:-20] if len(texts) > 35 else []
+                import random
+                random_middle = random.sample(middle_texts, min(5, len(middle_texts))) if middle_texts else []
+                
+                all_texts = list(dict.fromkeys(interesting + recent + random_middle))[:40]
                 
                 for i, text in enumerate(all_texts, 1):
                     truncated = text[:200] + "..." if len(text) > 200 else text
@@ -288,6 +301,7 @@ API_LIMITS = {
     "summary": (2, 300),  # 2 сводки за 5 минут
     "vision": (10, 60),
     "ventilate": (10, 60),  # 10 проветриваний в минуту
+    "dream": (5, 60),     # 5 снов в минуту на чат
 }
 
 
@@ -1021,9 +1035,9 @@ _Бот запоминает все мемы и иногда выдаёт их �
     await message.answer(help_text, parse_mode=ParseMode.MARKDOWN)
 
 
-@router.message(Command("profile", "профиль", "досье"))
-async def cmd_profile(message: Message):
-    """Показать профиль пользователя с полным анализом"""
+@router.message(Command("досье", "профиль", "dossier"))
+async def cmd_ai_profile(message: Message):
+    """Показать AI-профиль пользователя с полным анализом"""
     if not USE_POSTGRES:
         await message.answer("⚠️ Профили доступны только в полной версии")
         return
@@ -1163,9 +1177,14 @@ async def cmd_psychoanalysis(message: Message):
             )
             return
         
-        # Получаем последние сообщения для анализа
-        messages = await get_user_messages(message.chat.id, target_id, limit=50)
-        messages_text = "\n".join([f"- {m.get('message_text', '')[:100]}" for m in messages[:20] if m.get('message_text')])
+        # Получаем последние сообщения для анализа (до 1000 для полной картины)
+        messages = await get_user_messages(message.chat.id, target_id, limit=1000)
+        # Берём 30 самых информативных для контекста
+        msg_texts = [m.get('message_text', '') for m in messages if m.get('message_text')]
+        interesting_msgs = sorted(msg_texts, key=len, reverse=True)[:20]
+        recent_msgs = msg_texts[:15]
+        selected_msgs = list(dict.fromkeys(interesting_msgs + recent_msgs))[:30]
+        messages_text = "\n".join([f"- {t[:100]}" for t in selected_msgs])
         
         # Создаём кликабельное упоминание
         user_mention = make_user_mention(target_id, target_name, target_username)
@@ -1623,16 +1642,16 @@ async def cmd_describe_photo(message: Message):
         
         image_base64 = base64.b64encode(photo_data).decode('utf-8')
         
-        # Отправляем на анализ
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                VISION_API_URL,
-                json={
-                    "image_base64": image_base64,
-                    "media_type": "image/jpeg"
-                },
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
+        # Отправляем на анализ (используем глобальную сессию)
+        session = await get_http_session()
+        async with session.post(
+            VISION_API_URL,
+            json={
+                "image_base64": image_base64,
+                "media_type": "image/jpeg"
+            },
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
                 if response.status == 200:
                     result = await response.json()
                     description = result.get("description", "Хуйня какая-то, не разобрать...")
@@ -2350,9 +2369,9 @@ async def cmd_ventilate(message: Message):
     victim_profile = {}
     try:
         if USE_POSTGRES and victim_id:
-            # Берём больше сообщений для точного определения пола по глаголам
-            messages = await get_user_messages(chat_id, victim_id, limit=30)
-            victim_messages = [m.get('text', '') for m in messages if m.get('text')]
+            # Берём до 1000 сообщений для точного определения пола по глаголам
+            messages = await get_user_messages(chat_id, victim_id, limit=1000)
+            victim_messages = [m.get('message_text', '') for m in messages if m.get('message_text')]
             
             # Получаем полный профиль жертвы для персонализации (per-chat!)
             victim_profile = await get_user_profile_for_ai(victim_id, chat_id, victim_name, victim_username or "")
@@ -2367,7 +2386,13 @@ async def cmd_ventilate(message: Message):
         is_female = False
         name_lower = victim_name.lower() if victim_name else ""
         female_endings = ['а', 'я', 'ия', 'ья']
-        male_with_a = ['никита', 'илья', 'кузьма', 'фома', 'лука', 'саша', 'женя']
+        # Расширенный список мужских имён на -а/-я
+        male_with_a = [
+            'никита', 'илья', 'кузьма', 'фома', 'лука', 'саша', 'женя',
+            'вова', 'дима', 'миша', 'коля', 'толя', 'витя', 'петя', 'ваня',
+            'лёша', 'лёня', 'гоша', 'гриша', 'паша', 'сеня', 'стёпа', 'тёма',
+            'данила', 'кирилла', 'савва', 'наума'
+        ]
         if name_lower not in male_with_a:
             for ending in female_endings:
                 if name_lower.endswith(ending):
@@ -2589,11 +2614,28 @@ DREAM_API_URL = os.getenv("DREAM_API_URL", "")
 async def cmd_dream(message: Message):
     """Генерирует грязный извращённый сон про человека"""
     
+    # Проверяем реплай на бота
+    if await check_command_reply_to_bot(message):
+        return
+    
     if message.chat.type == "private":
         await message.reply("Эта команда только для групповых чатов, одиночка ебаный")
         return
     
     chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    # Кулдаун 30 секунд
+    can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "dream", 30)
+    if not can_do:
+        await message.reply(f"⏰ Подожди {cooldown_remaining} сек, ещё не проснулась")
+        return
+    
+    # Rate limit
+    can_call, wait_time = check_api_rate_limit(chat_id, "dream")
+    if not can_call:
+        await message.reply(f"⏰ Слишком много снов! Подожди {wait_time} сек")
+        return
     
     # Определяем цель
     target_user = None
@@ -6508,20 +6550,21 @@ async def cmd_rawprofile(message: Message):
         await message.answer("❌ Профили доступны только с PostgreSQL")
         return
     
-    # Получаем ID из аргумента
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.answer("Использование: /rawprofile <user_id>")
+    # Получаем ID из аргумента: /rawprofile <user_id> <chat_id>
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("Использование: /rawprofile <user_id> <chat_id>")
         return
     
     try:
         user_id = int(args[1])
+        chat_id = int(args[2])
     except ValueError:
-        await message.answer("❌ ID должен быть числом")
+        await message.answer("❌ ID должны быть числами")
         return
     
     try:
-        profile = await get_user_full_profile(user_id)
+        profile = await get_user_full_profile(user_id, chat_id)
         if not profile:
             await message.answer(f"❌ Профиль {user_id} не найден")
             return
@@ -6545,6 +6588,97 @@ async def cmd_rawprofile(message: Message):
         await message.answer(f"```json\n{json_text}\n```", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Raw profile error: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@router.message(Command("allprofiles", "all_profiles", "профили"))
+async def cmd_all_profiles(message: Message):
+    """Показать все профили пользователей чата"""
+    if not USE_POSTGRES:
+        await message.answer("⚠️ Профили доступны только в полной версии")
+        return
+    
+    chat_id = message.chat.id
+    
+    # В личке требуем chat_id как аргумент (только для админов)
+    if message.chat.type == "private":
+        if not is_admin(message.from_user.id):
+            await message.answer("❌ Эта команда только для админов в личке")
+            return
+        
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("Использование в личке: /allprofiles <chat_id>")
+            return
+        
+        try:
+            chat_id = int(args[1])
+        except ValueError:
+            await message.answer("❌ chat_id должен быть числом")
+            return
+    
+    try:
+        profiles = await get_all_chat_profiles(chat_id, limit=30)
+        
+        if not profiles:
+            await message.answer("📭 В этом чате пока нет профилей")
+            return
+        
+        # Формируем красивый вывод
+        lines = [f"👥 *Профили чата* (`{chat_id}`)\n"]
+        
+        for i, p in enumerate(profiles, 1):
+            # Определяем иконки
+            gender_icon = "👨" if p.get('detected_gender') == 'мужской' else "👩" if p.get('detected_gender') == 'женский' else "🤷"
+            
+            # Стиль общения
+            style = p.get('communication_style', 'нейтральный')
+            style_icons = {
+                'токсик': '☠️', 'матершинник': '🤬', 'шутник': '😂',
+                'позитивный': '😊', 'негативный': '😤', 'крикун': '📢',
+                'молодёжный': '🔥', 'нейтральный': '😐'
+            }
+            style_icon = style_icons.get(style, '😐')
+            
+            # Активность
+            activity = p.get('activity_level', 'normal')
+            activity_icons = {
+                'hyperactive': '🚀', 'very_active': '⚡', 'active': '💪',
+                'normal': '👤', 'lurker': '👻'
+            }
+            activity_icon = activity_icons.get(activity, '👤')
+            
+            # Время активности
+            time_icon = "🌙" if p.get('is_night_owl') else "🌅" if p.get('is_early_bird') else "☀️"
+            
+            # Имя
+            name = p.get('first_name') or p.get('username') or f"id{p.get('user_id')}"
+            name = name[:15] + "…" if len(name) > 15 else name
+            
+            # Метрики
+            msgs = p.get('total_messages', 0)
+            toxicity = p.get('toxicity_score', 0) or 0
+            humor = p.get('humor_score', 0) or 0
+            
+            # Любимые эмодзи
+            fav_emojis = p.get('favorite_emojis') or []
+            emojis_str = "".join(fav_emojis[:3]) if fav_emojis else ""
+            
+            lines.append(
+                f"{i}. {gender_icon}{activity_icon}{style_icon}{time_icon} *{name}*\n"
+                f"   📝 {msgs} | 🧪 {toxicity:.0%} | 😂 {humor:.0%} {emojis_str}"
+            )
+        
+        # Добавляем легенду
+        lines.append("\n*Легенда:*")
+        lines.append("👨👩🤷 пол | 🚀⚡💪👤👻 активность")
+        lines.append("☠️🤬😂😊😤📢🔥😐 стиль | 🌙🌅☀️ время")
+        lines.append("📝 сообщений | 🧪 токсичность | 😂 юмор")
+        
+        await message.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        
+    except Exception as e:
+        logger.error(f"All profiles error: {e}")
         await message.answer(f"❌ Ошибка: {e}")
 
 
@@ -7215,6 +7349,115 @@ class CommandReplyInterceptMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+# ==================== РЕГИСТРАЦИЯ КОМАНД В МЕНЮ TELEGRAM ====================
+
+async def setup_bot_commands():
+    """
+    Регистрирует команды бота в меню Telegram (при нажатии /).
+    Разные команды для групп, личных сообщений и админов.
+    """
+    
+    # ===== КОМАНДЫ ДЛЯ ГРУППОВЫХ ЧАТОВ =====
+    group_commands = [
+        # RPG система
+        BotCommand(command="help", description="📖 Справка по командам"),
+        BotCommand(command="profile", description="👤 Мой игровой профиль"),
+        BotCommand(command="top", description="🏆 Топ игроков"),
+        BotCommand(command="crime", description="🔫 Пойти на дело"),
+        BotCommand(command="attack", description="💥 Наехать на игрока"),
+        BotCommand(command="casino", description="🎰 Казино"),
+        BotCommand(command="treasury", description="💰 Общак чата"),
+        BotCommand(command="achievements", description="🏅 Мои достижения"),
+        
+        # AI-развлечения
+        BotCommand(command="poem", description="📜 Стих-унижение про юзера"),
+        BotCommand(command="diagnosis", description="🏥 Диагноз юзеру"),
+        BotCommand(command="burn", description="🔥 Сжечь на костре правды"),
+        BotCommand(command="drink", description="🍺 Бухнуть и слить секреты"),
+        BotCommand(command="suck", description="🍭 Послать сосать"),
+        BotCommand(command="dream", description="💤 Грязный сон про юзера"),
+        BotCommand(command="ventilate", description="🪟 Проветрить чат"),
+        
+        # Анализ и профили
+        BotCommand(command="dossier", description="📋 AI-досье на юзера"),
+        BotCommand(command="psycho", description="🧠 Психоанализ личности"),
+        BotCommand(command="social", description="🕸️ Социальный граф чата"),
+        BotCommand(command="allprofiles", description="👥 Все профили чата"),
+        
+        # Утилиты
+        BotCommand(command="describe", description="🖼️ Описать фото (реплай)"),
+        BotCommand(command="say", description="🎤 Сказать голосом"),
+        BotCommand(command="pic", description="🔍 Найти картинку"),
+        BotCommand(command="svodka", description="📊 Сводка чата за 5 часов"),
+        
+        # Мемы
+        BotCommand(command="meme", description="🎭 Случайный мем"),
+        BotCommand(command="memestats", description="📈 Статистика мемов"),
+    ]
+    
+    # ===== КОМАНДЫ ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ =====
+    private_commands = [
+        BotCommand(command="start", description="🚀 Начать"),
+        BotCommand(command="help", description="📖 Справка по командам"),
+        BotCommand(command="say", description="🎤 Сказать голосом"),
+        BotCommand(command="pic", description="🔍 Найти картинку"),
+        BotCommand(command="describe", description="🖼️ Описать фото"),
+    ]
+    
+    # ===== КОМАНДЫ ДЛЯ АДМИНОВ (в личке) =====
+    admin_commands = [
+        BotCommand(command="start", description="🚀 Начать"),
+        BotCommand(command="help", description="📖 Справка"),
+        BotCommand(command="admin", description="⚙️ Админ-панель"),
+        BotCommand(command="dbstats", description="📊 Статистика БД"),
+        BotCommand(command="chats", description="💬 Список чатов"),
+        BotCommand(command="chat", description="🔍 Инфо о чате"),
+        BotCommand(command="topusers", description="👥 Топ юзеров глобально"),
+        BotCommand(command="finduser", description="🔎 Найти юзера"),
+        BotCommand(command="health", description="💚 Здоровье системы"),
+        BotCommand(command="metrics", description="📈 Метрики бота"),
+        BotCommand(command="cleanup", description="🧹 Очистка БД"),
+        BotCommand(command="userstats", description="👤 Статистика профилей"),
+        BotCommand(command="rawprofile", description="📄 Сырой профиль юзера"),
+        BotCommand(command="allprofiles", description="👥 Профили чата"),
+        BotCommand(command="say", description="🎤 Сказать голосом"),
+        BotCommand(command="pic", description="🔍 Найти картинку"),
+        BotCommand(command="vk_import", description="📥 Импорт мемов из VK"),
+    ]
+    
+    try:
+        # Устанавливаем команды для групповых чатов
+        await bot.set_my_commands(
+            commands=group_commands,
+            scope=BotCommandScopeAllGroupChats()
+        )
+        logger.info(f"✅ Зарегистрировано {len(group_commands)} команд для групп")
+        
+        # Устанавливаем команды для личных сообщений (обычные юзеры)
+        await bot.set_my_commands(
+            commands=private_commands,
+            scope=BotCommandScopeAllPrivateChats()
+        )
+        logger.info(f"✅ Зарегистрировано {len(private_commands)} команд для личных сообщений")
+        
+        # Устанавливаем расширенные команды для админов
+        admin_ids = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+        for admin_id in admin_ids:
+            try:
+                await bot.set_my_commands(
+                    commands=admin_commands,
+                    scope=BotCommandScopeChat(chat_id=admin_id)
+                )
+                logger.info(f"✅ Админ-команды установлены для {admin_id}")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось установить команды для админа {admin_id}: {e}")
+        
+        logger.info("✅ Меню команд бота успешно настроено!")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка настройки команд: {e}")
+
+
 async def main():
     """Главная функция запуска бота"""
     # Инициализация БД
@@ -7225,6 +7468,9 @@ async def main():
     
     # Подключаем роутер
     dp.include_router(router)
+    
+    # Настраиваем меню команд в Telegram
+    await setup_bot_commands()
     
     # Регистрируем shutdown handler
     dp.shutdown.register(on_shutdown)

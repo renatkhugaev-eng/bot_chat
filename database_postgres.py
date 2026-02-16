@@ -1099,8 +1099,8 @@ async def get_chat_messages(chat_id: int, hours: int = 5) -> List[Dict[str, Any]
         return [dict(row) for row in rows]
 
 
-async def get_user_messages(chat_id: int, user_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-    """Получить последние N сообщений конкретного пользователя"""
+async def get_user_messages(chat_id: int, user_id: int, limit: int = 1000) -> List[Dict[str, Any]]:
+    """Получить последние N сообщений конкретного пользователя (по умолчанию 1000)"""
     async with (await get_pool()).acquire() as conn:
         rows = await conn.fetch("""
             SELECT message_text, message_type, sticker_emoji, created_at
@@ -3151,6 +3151,29 @@ async def get_user_profile_for_ai(user_id: int, chat_id: int, first_name: str = 
         'crushes': crushes[:3],
         'enemies': enemies[:3],
     }
+
+
+async def get_all_chat_profiles(chat_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    Получить все профили пользователей чата с ключевыми метриками.
+    Для админской команды /allprofiles.
+    """
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT 
+                user_id, first_name, username,
+                detected_gender, gender_confidence,
+                communication_style, activity_level,
+                total_messages, toxicity_score, humor_score,
+                sentiment_score, mat_rate, is_night_owl, is_early_bird,
+                peak_hour, favorite_emojis, last_seen_at
+            FROM user_profiles 
+            WHERE chat_id = $1 AND total_messages > 0
+            ORDER BY total_messages DESC
+            LIMIT $2
+        """, chat_id, limit)
+        
+        return [dict(row) for row in rows]
 
 
 async def get_chat_users_profiles_for_ai(chat_id: int, user_ids: List[int] = None) -> List[Dict[str, Any]]:
