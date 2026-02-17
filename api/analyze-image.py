@@ -132,7 +132,7 @@ class handler(BaseHTTPRequestHandler):
             
             # Вызываем Claude Vision
             request_body = json.dumps({
-                "model": "anthropic/claude-sonnet-4.5",
+                "model": "anthropic/claude-sonnet-4-20250514",
                 "max_tokens": 200,
                 "system": IMAGE_ANALYSIS_PROMPT,
                 "messages": [

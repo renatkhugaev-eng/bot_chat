@@ -1489,7 +1489,7 @@ async def cmd_learn_user(message: Message):
         to_analyze = informative_messages[:30]
         
         # Проверяем API
-        extract_url = EXTRACT_FACTS_API_URL or VERCEL_API_URL.replace("/summary", "/extract_facts")
+        extract_url = EXTRACT_FACTS_API_URL or get_api_url("extract_facts")
         if not extract_url or "your-vercel" in extract_url:
             await processing.edit_text("❌ API для извлечения фактов не настроен")
             return
@@ -1607,7 +1607,7 @@ async def cmd_deep_learn(message: Message):
         to_analyze = informative_messages[:100]  # До 100 сообщений для глубокого анализа
         
         # Проверяем API
-        extract_url = EXTRACT_FACTS_API_URL or VERCEL_API_URL.replace("/summary", "/extract_facts")
+        extract_url = EXTRACT_FACTS_API_URL or get_api_url("extract_facts")
         if not extract_url or "your-vercel" in extract_url:
             await processing.edit_text("❌ API для извлечения фактов не настроен")
             return
@@ -2148,9 +2148,36 @@ async def cmd_take(message: Message):
 # ==================== СВОДКА ЧАТА ====================
 
 # URL твоего Vercel API (замени на свой после деплоя)
-VERCEL_API_URL = os.getenv("VERCEL_API_URL", "https://your-vercel-app.vercel.app/api/generate-summary")
+VERCEL_API_URL = os.getenv("VERCEL_API_URL", "https://your-vercel-app.vercel.app/api/summary")
 VISION_API_URL = os.getenv("VISION_API_URL", "")
 POEM_API_URL = os.getenv("POEM_API_URL", "")
+
+
+def get_api_url(endpoint: str) -> str:
+    """
+    Надёжно формирует URL для Vercel API endpoint.
+    
+    Args:
+        endpoint: Название endpoint без слэша (например: "burn", "dream", "reply")
+    
+    Returns:
+        Полный URL или пустая строка если не настроено
+    
+    Examples:
+        get_api_url("burn") -> "https://botchat-six.vercel.app/api/burn"
+        get_api_url("dream") -> "https://botchat-six.vercel.app/api/dream"
+    """
+    if not VERCEL_API_URL or "your-vercel" in VERCEL_API_URL:
+        return ""
+    
+    # Извлекаем базовый URL (до /api/)
+    if "/api/" in VERCEL_API_URL:
+        base_url = VERCEL_API_URL.rsplit('/api/', 1)[0]
+    else:
+        # Если нет /api/, пробуем отрезать последний сегмент
+        base_url = VERCEL_API_URL.rsplit('/', 1)[0]
+    
+    return f"{base_url}/api/{endpoint}"
 
 
 # ==================== ОПИСАНИЕ ФОТО ====================
@@ -2284,7 +2311,7 @@ async def cmd_poem(message: Message):
         target_name = "Аноним"
     
     # Проверяем API URL
-    poem_api_url = os.getenv("POEM_API_URL") or VERCEL_API_URL.replace("/summary", "/poem")
+    poem_api_url = os.getenv("POEM_API_URL") or get_api_url("poem")
     
     if not poem_api_url or "your-vercel" in poem_api_url:
         await message.answer("❌ API для стихов не настроен!")
@@ -2398,7 +2425,7 @@ async def cmd_diagnosis(message: Message):
         target_name = "Аноним"
     
     # Проверяем API URL
-    diagnosis_api_url = VERCEL_API_URL.replace("/summary", "/diagnosis")
+    diagnosis_api_url = get_api_url("diagnosis")
     
     # Кулдаун 30 секунд
     can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "diagnosis", 30)
@@ -2504,7 +2531,7 @@ async def cmd_burn(message: Message):
     if not target_name:
         target_name = "Хуй с горы"
     
-    burn_api_url = VERCEL_API_URL.replace("/summary", "/burn")
+    burn_api_url = get_api_url("burn")
     
     can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "burn", 30)
     if not can_do:
@@ -2596,7 +2623,7 @@ async def cmd_drink(message: Message):
     if not target_name:
         target_name = "этот хрен"
     
-    drink_api_url = VERCEL_API_URL.replace("/summary", "/drink")
+    drink_api_url = get_api_url("drink")
     
     can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "drink", 30)
     if not can_do:
@@ -3021,7 +3048,7 @@ async def cmd_ventilate(message: Message):
     }
     
     # Проверяем API
-    ventilate_url = VENTILATE_API_URL or VERCEL_API_URL.replace("/summary", "/ventilate")
+    ventilate_url = VENTILATE_API_URL or get_api_url("ventilate")
     
     processing_msg = await message.answer("🪟 Открываю форточку...")
     metrics.track_command("ventilate")
@@ -3187,7 +3214,7 @@ async def generate_smart_reply(message: Message) -> str:
             logger.debug(f"Could not gather context for smart reply: {e}")
     
     # Fallback на локальный ответ если API не настроен
-    reply_url = REPLY_API_URL or VERCEL_API_URL.replace("/summary", "/reply")
+    reply_url = REPLY_API_URL or get_api_url("reply")
     if not reply_url or "your-vercel" in reply_url:
         return get_contextual_reply(text)
     
@@ -3266,7 +3293,7 @@ async def extract_and_save_facts(message: Message) -> bool:
     fact_extraction_cache[chat_id] = now
     
     # Вызываем API извлечения фактов
-    extract_url = EXTRACT_FACTS_API_URL or VERCEL_API_URL.replace("/summary", "/extract_facts")
+    extract_url = EXTRACT_FACTS_API_URL or get_api_url("extract_facts")
     if not extract_url or "your-vercel" in extract_url:
         return False
     
@@ -3368,7 +3395,7 @@ async def cmd_say(message: Message):
         await message.reply("⚠️ Текст обрезан до 500 символов")
     
     # Проверяем API URL
-    tts_url = TTS_API_URL or VERCEL_API_URL.replace("/summary", "/tts")
+    tts_url = TTS_API_URL or get_api_url("tts")
     if not tts_url or "your-vercel" in tts_url:
         await message.reply("❌ TTS API не настроен")
         return
@@ -3513,11 +3540,7 @@ async def cmd_dream(message: Message):
     try:
         # Вызываем API
         # Формируем URL для dream API
-        dream_url = DREAM_API_URL
-        if not dream_url:
-            # Берём базовый URL и добавляем /dream
-            base_url = VERCEL_API_URL.rsplit('/api/', 1)[0] if '/api/' in VERCEL_API_URL else VERCEL_API_URL.rsplit('/', 1)[0]
-            dream_url = f"{base_url}/api/dream"
+        dream_url = DREAM_API_URL or get_api_url("dream")
         
         session = await get_http_session()
         async with session.post(
@@ -5435,11 +5458,11 @@ async def check_cringe_and_react(message: Message) -> bool:
 
 # ==================== ОТВЕТ НА РЕПЛАЙ/ТЕГ БОТА ====================
 
-# Шанс ответить на реплай/тег (40%)
-BOT_REPLY_CHANCE = 0.40
-# Кулдаун на ответы (30 сек на чат)
+# Шанс для СЛУЧАЙНЫХ комментариев (не прямые обращения)
+BOT_RANDOM_COMMENT_CHANCE = 0.40
+# Кулдаун на ответы (5 сек на чат для быстрых диалогов)
 bot_reply_cooldowns: Dict[int, float] = {}
-BOT_REPLY_COOLDOWN = 30
+BOT_REPLY_COOLDOWN = 5
 
 # Ответы на разные типы контента
 BOT_REPLIES_TEXT = [
@@ -5920,21 +5943,30 @@ async def generate_rude_response_to_content(content_type: str, description: str)
     return random.choice(rude_templates)
 
 
-async def handle_bot_mention_or_reply(message: Message) -> bool:
+async def handle_bot_mention_or_reply(message: Message, use_chance: bool = False) -> bool:
     """
     Обрабатывает реплай на бота или упоминание бота.
     АНАЛИЗИРУЕТ контент и отвечает ПО СУЩЕСТВУ.
-    Возвращает True если ответили.
+    
+    Args:
+        message: Сообщение от пользователя
+        use_chance: Если True - применяет случайный шанс ответа (для случайных комментариев)
+                   Если False - отвечает всегда (для прямых обращений)
+    
+    Returns:
+        True если ответили, False если нет
     """
     chat_id = message.chat.id
     
-    # Проверяем кулдаун
+    # Проверяем кулдаун (короткий, для быстрых диалогов)
     last_reply = bot_reply_cooldowns.get(chat_id, 0)
     if time.time() - last_reply < BOT_REPLY_COOLDOWN:
+        logger.debug(f"[BOT_REPLY] Cooldown active for chat {chat_id}")
         return False
     
-    # Проверяем шанс
-    if random.random() > BOT_REPLY_CHANCE:
+    # Шанс применяется ТОЛЬКО для случайных комментариев, НЕ для прямых обращений
+    if use_chance and random.random() > BOT_RANDOM_COMMENT_CHANCE:
+        logger.debug(f"[BOT_REPLY] Random chance failed for chat {chat_id}")
         return False
     
     # Определяем тип контента и АНАЛИЗИРУЕМ его

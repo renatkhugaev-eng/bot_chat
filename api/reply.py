@@ -151,12 +151,12 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             ai_request = {
-                "model": "anthropic:claude-sonnet-4-20250514",
+                "model": "anthropic/claude-sonnet-4-20250514",
                 "max_tokens": 300,
+                "system": prompt,
                 "messages": [
                     {"role": "user", "content": f"Сообщение от {user_name}: {message}"}
-                ],
-                "system": prompt
+                ]
             }
 
             req = urllib.request.Request(
@@ -164,7 +164,8 @@ class handler(BaseHTTPRequestHandler):
                 data=json.dumps(ai_request).encode("utf-8"),
                 headers={
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}"
+                    "Authorization": f"Bearer {api_key}",
+                    "anthropic-version": "2023-06-01"
                 },
                 method="POST"
             )
