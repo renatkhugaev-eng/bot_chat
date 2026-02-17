@@ -4,7 +4,7 @@ import logging
 import random
 import re
 import time
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
 from aiogram.types import (
@@ -3252,10 +3252,71 @@ fact_extraction_cache = {}
 FACT_EXTRACTION_INTERVAL = 30  # Секунд между извлечениями фактов для одного чата
 
 
+def extract_facts_locally(text: str, user_name: str) -> List[Dict[str, Any]]:
+    """
+    Локальное извлечение базовых фактов без AI.
+    Используется как fallback если API недоступен.
+    """
+    facts = []
+    text_lower = text.lower()
+    
+    # Паттерны для работы/профессии
+    work_patterns = [
+        (r'работаю\s+(\w+)', 'work', 'работает {0}'),
+        (r'я\s+(\w+ист|программист|дизайнер|менеджер|врач|учитель|инженер)', 'work', 'по профессии {0}'),
+        (r'в\s+(компании|офисе|банке|магазине)\s+(\w+)', 'work', 'работает в {1}'),
+    ]
+    
+    # Паттерны для семьи
+    family_patterns = [
+        (r'(женился|вышла замуж)', 'family', 'состоит в браке'),
+        (r'(развёлся|развелась|развод)', 'family', 'в разводе'),
+        (r'(ребёнок|дети|сын|дочь)', 'family', 'есть дети'),
+        (r'(жена|муж|супруг)', 'family', 'в браке'),
+    ]
+    
+    # Паттерны для хобби/интересов
+    hobby_patterns = [
+        (r'люблю\s+(\w+)', 'hobby', 'любит {0}'),
+        (r'играю в\s+(\w+)', 'hobby', 'играет в {0}'),
+        (r'смотрю\s+(\w+)', 'hobby', 'смотрит {0}'),
+        (r'слушаю\s+(\w+)', 'hobby', 'слушает {0}'),
+    ]
+    
+    # Паттерны для места жительства
+    location_patterns = [
+        (r'живу в\s+(\w+)', 'location', 'живёт в {0}'),
+        (r'из\s+(москвы|питера|киева|минска|\w+)', 'location', 'из города {0}'),
+        (r'переехал в\s+(\w+)', 'location', 'переехал в {0}'),
+    ]
+    
+    import re
+    all_patterns = work_patterns + family_patterns + hobby_patterns + location_patterns
+    
+    for pattern, fact_type, template in all_patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            try:
+                groups = match.groups()
+                if groups:
+                    fact_text = template.format(*groups)
+                else:
+                    fact_text = template
+                facts.append({
+                    'type': fact_type,
+                    'text': f"{user_name} {fact_text}",
+                    'confidence': 0.6  # Локальные факты менее уверенные
+                })
+            except:
+                pass
+    
+    return facts[:3]  # Максимум 3 факта локально
+
+
 async def extract_and_save_facts(message: Message) -> bool:
     """
     Извлекает факты из сообщения и сохраняет в умную память.
-    Вызывается фоново для длинных информативных сообщений.
+    Использует AI API с fallback на локальное извлечение.
     """
     text = message.text or ""
     chat_id = message.chat.id
@@ -3273,70 +3334,80 @@ async def extract_and_save_facts(message: Message) -> bool:
         return False
     
     # Быстрая фильтрация — только потенциально информативные сообщения
-    # Сообщения с "я", "мой", "моя", "меня" и т.д. более информативны
     personal_markers = ['я ', 'мой ', 'моя ', 'моё ', 'мне ', 'меня ', 'работаю', 'живу', 
                         'люблю', 'ненавижу', 'купил', 'поехал', 'женился', 'развёлся']
     has_personal = any(marker in text.lower() for marker in personal_markers)
     
-    # Сообщения о других людях тоже информативны
     social_markers = ['@', 'он ', 'она ', 'они ', 'вместе', 'встречаемся', 'друг', 'подруга']
     has_social = any(marker in text.lower() for marker in social_markers)
     
-    # Длинные сообщения (>100 символов) более информативны
     is_long = len(text) > 100
     
-    # Анализируем только если есть признаки информативности
     if not (has_personal or has_social or is_long):
         return False
     
     # Обновляем cache
     fact_extraction_cache[chat_id] = now
     
-    # Вызываем API извлечения фактов
-    extract_url = EXTRACT_FACTS_API_URL or get_api_url("extract_facts")
-    if not extract_url or "your-vercel" in extract_url:
-        return False
+    facts_to_save = []
+    api_success = False
     
-    try:
-        session = await get_http_session()
-        async with session.post(extract_url, json={
-            "message": text[:1000],
-            "user_name": user_name
-        }, timeout=aiohttp.ClientTimeout(total=10)) as response:
-            if response.status == 200:
-                result = await response.json()
-                
-                if result.get("has_facts") and result.get("facts"):
-                    # Импортируем функцию сохранения
-                    if USE_POSTGRES:
-                        from database_postgres import save_user_fact
-                        
-                        saved_count = 0
-                        for fact in result["facts"][:5]:  # Максимум 5 фактов за раз
-                            fact_type = fact.get("type", "personal")
-                            fact_text = fact.get("text", "")
-                            confidence = fact.get("confidence", 0.7)
-                            
-                            if fact_text and len(fact_text) > 3:
-                                success = await save_user_fact(
-                                    chat_id=chat_id,
-                                    user_id=user_id,
-                                    fact_type=fact_type,
-                                    fact_text=fact_text,
-                                    confidence=confidence,
-                                    source_message_id=message.message_id
-                                )
-                                if success:
-                                    saved_count += 1
-                        
-                        if saved_count > 0:
-                            logger.info(f"SMART MEMORY: Saved {saved_count} facts for {user_name} in chat {chat_id}")
-                        return saved_count > 0
-                        
-    except asyncio.TimeoutError:
-        pass
-    except Exception as e:
-        logger.debug(f"Fact extraction error: {e}")
+    # Пробуем API извлечения фактов
+    extract_url = EXTRACT_FACTS_API_URL or get_api_url("extract_facts")
+    if extract_url and "your-vercel" not in extract_url:
+        try:
+            session = await get_http_session()
+            async with session.post(extract_url, json={
+                "message": text[:1000],
+                "user_name": user_name
+            }, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    if result.get("has_facts") and result.get("facts"):
+                        facts_to_save = result["facts"][:5]
+                        api_success = True
+                else:
+                    logger.warning(f"[FACTS] API returned {response.status}")
+        except asyncio.TimeoutError:
+            logger.warning("[FACTS] API timeout, using local extraction")
+        except Exception as e:
+            logger.warning(f"[FACTS] API error: {e}, using local extraction")
+    
+    # Fallback на локальное извлечение если API не сработал
+    if not api_success and has_personal:
+        local_facts = extract_facts_locally(text, user_name)
+        if local_facts:
+            facts_to_save = local_facts
+            logger.info(f"[FACTS] Local extraction found {len(local_facts)} facts")
+    
+    # Сохраняем факты
+    if facts_to_save and USE_POSTGRES:
+        from database_postgres import save_user_fact
+        
+        saved_count = 0
+        for fact in facts_to_save:
+            fact_type = fact.get("type", "personal")
+            fact_text = fact.get("text", "")
+            confidence = fact.get("confidence", 0.7)
+            
+            if fact_text and len(fact_text) > 3:
+                try:
+                    success = await save_user_fact(
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        fact_type=fact_type,
+                        fact_text=fact_text,
+                        confidence=confidence,
+                        source_message_id=message.message_id
+                    )
+                    if success:
+                        saved_count += 1
+                except Exception as e:
+                    logger.debug(f"[FACTS] Save error: {e}")
+        
+        if saved_count > 0:
+            logger.info(f"[FACTS] Saved {saved_count} facts for {user_name} in chat {chat_id}")
+        return saved_count > 0
     
     return False
 

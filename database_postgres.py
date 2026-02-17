@@ -3437,17 +3437,28 @@ async def get_user_profile_for_ai(user_id: int, chat_id: int, first_name: str = 
     }
     traits.append(activity_map.get(activity, 'обычный'))
     
-    # Стиль общения
-    style = profile.get('communication_style', 'neutral')
+    # Стиль общения — РУССКИЕ ключи (как в update_user_profile_comprehensive)
+    style = profile.get('communication_style', 'нейтральный')
     style_map = {
+        # Русские ключи (как сохраняются в БД)
+        'матершинник': 'матершинник, любит крепкое словцо',
+        'токсик': 'токсичный агрессор',
+        'шутник': 'шутник и юморист',
+        'крикун': 'орёт капсом постоянно',
+        'молодёжный': 'говорит на молодёжном сленге',
+        'позитивный': 'позитивный оптимист',
+        'негативный': 'вечно недовольный нытик',
+        'нейтральный': '',
+        # Fallback на английские (если вдруг старые данные)
         'toxic': 'токсичный агрессор',
         'humorous': 'шутник и юморист',
         'positive': 'позитивный оптимист',
         'negative': 'вечно недовольный нытик',
-        'neutral': 'нейтральный'
+        'neutral': ''
     }
-    if style != 'neutral':
-        traits.append(style_map.get(style, ''))
+    style_trait = style_map.get(style, style)  # Если нет в map — используем как есть
+    if style_trait and style != 'нейтральный' and style != 'neutral':
+        traits.append(style_trait)
     
     # Режим сна
     if profile.get('is_night_owl'):
