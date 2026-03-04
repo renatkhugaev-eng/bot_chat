@@ -3,8 +3,11 @@ SQLite база данных (для локальной разработки)
 v3.0 - Full feature parity with PostgreSQL
 """
 import aiosqlite
+import logging
 import time
 from typing import Optional, Dict, Any, List
+
+logger = logging.getLogger(__name__)
 
 DATABASE_PATH = "guild_of_crime.db"
 
@@ -34,12 +37,14 @@ async def init_db():
             )
         """)
         
-        # Миграция: добавляем колонки file_id, file_unique_id, voice_transcription если их нет
-        for col_name in ['file_id', 'file_unique_id', 'voice_transcription']:
+        # Миграция: добавляем колонки если их нет
+        # Имена колонок — статический список, не пользовательский ввод
+        _migration_columns = ['file_id', 'file_unique_id', 'voice_transcription']
+        for col_name in _migration_columns:
             try:
                 await db.execute(f"ALTER TABLE chat_messages ADD COLUMN {col_name} TEXT")
-            except Exception:
-                pass  # Колонка уже существует
+            except aiosqlite.OperationalError:
+                pass  # Колонка уже существует — ожидаемо при повторной инициализации
         
         # Индекс для быстрого поиска по времени
         await db.execute("""
@@ -264,11 +269,21 @@ async def update_player_stats(user_id: int, chat_id: int, **kwargs):
             continue
             
         if isinstance(value, str) and value.startswith('+'):
+            try:
+                amount = int(value[1:])
+            except ValueError:
+                logger.warning("update_player_stats: invalid increment value for '%s': %r", key, value)
+                continue
             set_clauses.append(f"{key} = {key} + ?")
-            values.append(int(value[1:]))
+            values.append(amount)
         elif isinstance(value, str) and value.startswith('-'):
+            try:
+                amount = int(value[1:])
+            except ValueError:
+                logger.warning("update_player_stats: invalid decrement value for '%s': %r", key, value)
+                continue
             set_clauses.append(f"{key} = {key} - ?")
-            values.append(int(value[1:]))
+            values.append(amount)
         else:
             set_clauses.append(f"{key} = ?")
             values.append(value)
@@ -698,7 +713,8 @@ async def get_database_stats() -> Dict[str, Any]:
                 async with db.execute(f"SELECT COUNT(*) as count FROM {table}") as cursor:
                     row = await cursor.fetchone()
                     stats[f'{table}_count'] = row[0] if row else 0
-            except Exception:
+            except aiosqlite.OperationalError as e:
+                logger.warning("get_database_stats: table '%s' not accessible: %s", table, e)
                 stats[f'{table}_count'] = 0
         
         # Размер сообщений за последние сутки
@@ -732,14 +748,14 @@ async def get_database_stats() -> Dict[str, Any]:
 async def cleanup_old_events(days: int = 30) -> int:
     """Очистка старых записей из event_log"""
     threshold = int(time.time()) - (days * 24 * 60 * 60)
-    db = await get_db()
-    async with db.execute(
-        "DELETE FROM event_log WHERE created_at < ?",
-        (threshold,)
-    ) as cursor:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM event_log WHERE created_at < ?",
+            (threshold,)
+        )
         deleted = cursor.rowcount
-    await db.commit()
-    return deleted
+        await db.commit()
+        return deleted
 
 
 async def full_cleanup() -> Dict[str, int]:

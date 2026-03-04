@@ -2426,7 +2426,10 @@ async def cmd_diagnosis(message: Message):
     
     # Проверяем API URL
     diagnosis_api_url = get_api_url("diagnosis")
-    
+    if not diagnosis_api_url:
+        await message.answer("❌ API для диагнозов не настроен! Нужна переменная VERCEL_API_URL")
+        return
+
     # Кулдаун 30 секунд
     can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "diagnosis", 30)
     if not can_do:
@@ -8587,7 +8590,15 @@ async def setup_bot_commands():
         logger.info(f"✅ Зарегистрировано {len(private_commands)} команд для личных сообщений")
         
         # Устанавливаем расширенные команды для админов
-        admin_ids = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+        admin_ids = []
+        for x in os.getenv("ADMIN_IDS", "").split(","):
+            x = x.strip()
+            if not x:
+                continue
+            try:
+                admin_ids.append(int(x))
+            except ValueError:
+                logger.warning("Некорректный ADMIN_ID в переменной окружения: %r — пропускаю", x)
         for admin_id in admin_ids:
             try:
                 await bot.set_my_commands(
