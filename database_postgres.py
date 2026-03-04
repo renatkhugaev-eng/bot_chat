@@ -2822,6 +2822,32 @@ def calculate_vocabulary_richness(unique_words_count: int, total_words: int) -> 
     return round(normalized, 3)
 
 
+def _safe_jsonb_dict(value) -> dict:
+    """Безопасно прочитать JSONB-значение, которое могло быть сохранено как строка (legacy-баг)."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _safe_jsonb_list(value) -> list:
+    """Безопасно прочитать JSONB-значение, которое могло быть сохранено как строка (legacy-баг)."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
 async def update_user_profile_comprehensive(
     user_id: int,
     chat_id: int,
@@ -2864,7 +2890,7 @@ async def update_user_profile_comprehensive(
             total_msgs = profile['total_messages'] + 1
             
             # --- Часы активности ---
-            active_hours = dict(profile.get('active_hours') or {})
+            active_hours = _safe_jsonb_dict(profile.get('active_hours'))
             hour_str = str(hour)
             active_hours[hour_str] = active_hours.get(hour_str, 0) + 1
             peak_hour = int(max(active_hours, key=active_hours.get)) if active_hours else hour
@@ -2877,13 +2903,13 @@ async def update_user_profile_comprehensive(
             is_early_bird = morning_hours / total_hours > 0.3
             
             # --- Настроение по дням/часам ---
-            mood_by_day = dict(profile.get('mood_by_day') or {})
+            mood_by_day = _safe_jsonb_dict(profile.get('mood_by_day'))
             old_day_mood = mood_by_day.get(day_of_week, 0)
             day_count = mood_by_day.get(f'{day_of_week}_count', 0) + 1
             mood_by_day[day_of_week] = (old_day_mood * (day_count - 1) + sentiment['sentiment']) / day_count
             mood_by_day[f'{day_of_week}_count'] = day_count
-            
-            mood_by_hour = dict(profile.get('mood_by_hour') or {})
+
+            mood_by_hour = _safe_jsonb_dict(profile.get('mood_by_hour'))
             old_hour_mood = mood_by_hour.get(hour_str, 0)
             hour_count = mood_by_hour.get(f'{hour_str}_count', 0) + 1
             mood_by_hour[hour_str] = (old_hour_mood * (hour_count - 1) + sentiment['sentiment']) / hour_count
@@ -2953,21 +2979,21 @@ async def update_user_profile_comprehensive(
             vocabulary_richness = calculate_vocabulary_richness(new_unique_count, total_msgs * 10)  # примерно 10 слов на сообщение
             
             # --- НОВОЕ v2: Любимые фразы ---
-            favorite_phrases = list(profile.get('favorite_phrases') or [])
+            favorite_phrases = _safe_jsonb_list(profile.get('favorite_phrases'))
             for phrase in catchphrases:
                 if phrase not in favorite_phrases:
                     favorite_phrases.append(phrase)
             favorite_phrases = favorite_phrases[-50:]  # храним последние 50
             
             # --- НОВОЕ v2: Любимые эмодзи ---
-            favorite_emojis = list(profile.get('favorite_emojis') or [])
+            favorite_emojis = _safe_jsonb_list(profile.get('favorite_emojis'))
             for emoji in emojis_in_message:
                 if emoji not in favorite_emojis:
                     favorite_emojis.append(emoji)
             favorite_emojis = favorite_emojis[-30:]  # храним последние 30
             
             # --- НОВОЕ v2: Эмоциональные триггеры ---
-            trigger_topics = list(profile.get('trigger_topics') or [])
+            trigger_topics = _safe_jsonb_list(profile.get('trigger_topics'))
             for trigger in emotional_triggers:
                 if trigger not in trigger_topics:
                     trigger_topics.append(trigger)
@@ -3098,16 +3124,16 @@ async def update_user_profile_comprehensive(
                 WHERE user_id = $1 AND chat_id = $2
             """, user_id, chat_id, first_name or None, username or None,
                  detected_gender, gender_confidence, new_female_score, new_male_score,
-                 total_msgs, now, json.dumps(active_hours), peak_hour,
+                 total_msgs, now, active_hours, peak_hour,
                  is_night_owl, is_early_bird, new_sentiment, positive, negative, neutral,
                  new_emoji_rate, new_avg_len, new_toxicity, new_humor,
                  activity_level, communication_style,
                  # Новые поля v2
                  new_caps, new_mat, new_slang, new_typo, new_question, new_exclaim,
-                 json.dumps(mood_by_day), json.dumps(mood_by_hour),
+                 mood_by_day, mood_by_hour,
                  best_mood_day, worst_mood_day, best_mood_hour, worst_mood_hour,
-                 json.dumps(favorite_phrases), json.dumps(favorite_emojis),
-                 json.dumps(trigger_topics),
+                 favorite_phrases, favorite_emojis,
+                 trigger_topics,
                  messages_as_reply, reply_rate,
                  new_voice_rate, new_photo_rate, new_sticker_rate, new_video_rate,
                  new_unique_count, vocabulary_richness)
@@ -3176,7 +3202,7 @@ async def update_user_profile_comprehensive(
             """, user_id, chat_id, first_name or None, username or None,
                  detected_gender, gender_confidence, 
                  gender_result['female_score'], gender_result['male_score'],
-                 now, json.dumps(active_hours), hour,
+                 now, active_hours, hour,
                  sentiment['sentiment'], positive, negative, neutral,
                  sentiment['emoji_count'] / max(len(message_text), 1) * 100,
                  len(message_text),
@@ -3184,8 +3210,8 @@ async def update_user_profile_comprehensive(
                  min(sentiment['humor_count'] / 2, 1.0),
                  # Новые поля v2
                  initial_caps, initial_mat, initial_slang, initial_typo, initial_question, initial_exclaim,
-                 json.dumps(mood_by_day), json.dumps(mood_by_hour), day_of_week,
-                 json.dumps(catchphrases[:10]), json.dumps(emojis_in_message[:10]), json.dumps(emotional_triggers),
+                 mood_by_day, mood_by_hour, day_of_week,
+                 catchphrases[:10], emojis_in_message[:10], emotional_triggers,
                  is_reply, float(is_reply),
                  float(is_voice), float(is_photo), float(is_sticker), float(is_video),
                  len(lang_style['unique_words']), initial_vocab_richness)
@@ -4030,3 +4056,69 @@ async def rebuild_all_profiles(limit_per_user: int = 200) -> Dict[str, Any]:
                 global_stats['errors'].append(f"Chat {chat_id}: {str(e)}")
     
     return global_stats
+
+
+async def reset_corrupted_profiles(chat_id: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Сбросить профили, у которых JSONB-поля хранятся как строки (legacy-баг с json.dumps).
+    После сброса автоматически пересобирает профили из истории сообщений.
+
+    Args:
+        chat_id: Конкретный чат (None = все чаты)
+
+    Returns:
+        Статистика: deleted, rebuilt, errors
+    """
+    stats = {'deleted': 0, 'rebuilt': 0, 'errors': []}
+
+    async with (await get_pool()).acquire() as conn:
+        # Находим профили с битыми JSONB-полями (значение — строка вместо объекта)
+        if chat_id:
+            corrupted = await conn.fetch("""
+                SELECT user_id, chat_id
+                FROM user_profiles
+                WHERE chat_id = $1
+                  AND (
+                    jsonb_typeof(active_hours) = 'string'
+                    OR jsonb_typeof(mood_by_day) = 'string'
+                    OR jsonb_typeof(favorite_phrases) = 'string'
+                  )
+            """, chat_id)
+        else:
+            corrupted = await conn.fetch("""
+                SELECT user_id, chat_id
+                FROM user_profiles
+                WHERE jsonb_typeof(active_hours) = 'string'
+                   OR jsonb_typeof(mood_by_day) = 'string'
+                   OR jsonb_typeof(favorite_phrases) = 'string'
+            """)
+
+        if not corrupted:
+            logger.info("Битых профилей не найдено — всё чисто!")
+            return stats
+
+        logger.info(f"Найдено {len(corrupted)} битых профилей, сбрасываем...")
+
+        # Удаляем битые профили
+        for row in corrupted:
+            try:
+                await conn.execute(
+                    "DELETE FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
+                    row['user_id'], row['chat_id']
+                )
+                stats['deleted'] += 1
+            except Exception as e:
+                stats['errors'].append(f"Delete {row['user_id']}/{row['chat_id']}: {e}")
+
+    # Пересобираем профили из истории
+    target_chats = {row['chat_id'] for row in corrupted}
+    for cid in target_chats:
+        try:
+            rebuild_stats = await rebuild_profiles_from_messages(cid, limit_per_user=300)
+            stats['rebuilt'] += rebuild_stats.get('profiles_created', 0)
+            stats['errors'].extend(rebuild_stats.get('errors', []))
+        except Exception as e:
+            stats['errors'].append(f"Rebuild chat {cid}: {e}")
+
+    logger.info(f"reset_corrupted_profiles: удалено={stats['deleted']}, пересоздано={stats['rebuilt']}")
+    return stats

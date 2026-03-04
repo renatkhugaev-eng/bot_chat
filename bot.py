@@ -645,8 +645,7 @@ async def choose_class(callback: CallbackQuery):
         f"• /crime — пойти на дело\n"
         f"• /attack @username — наехать на лоха\n"
         f"• /profile — глянуть досье\n"
-        f"• /top — топ авторитетов\n"
-        f"• /casino — испытать удачу\n\n"
+        f"• /top — топ авторитетов\n\n"
         f"Да начнётся беспредел! 😈"
     )
     
@@ -1045,161 +1044,6 @@ async def cmd_attack(message: Message):
     await message.answer(result_text, parse_mode=ParseMode.MARKDOWN)
 
 
-@router.message(Command("casino", "bet", "gamble"))
-async def cmd_casino(message: Message):
-    """Казино"""
-    if message.chat.type == "private":
-        await message.answer("❌ Казино работает только в группах!")
-        return
-    
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    
-    player = await get_player(user_id, chat_id)
-    if not player or not player['player_class']:
-        await message.answer("❌ Сначала вступи в гильдию! /start")
-        return
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🎰 Слоты (50 лавэ)", callback_data="casino_slots_50"),
-            InlineKeyboardButton(text="🎰 Слоты (200 лавэ)", callback_data="casino_slots_200")
-        ],
-        [
-            InlineKeyboardButton(text="🎲 Кости (100 лавэ)", callback_data="casino_dice_100"),
-            InlineKeyboardButton(text="🎲 Кости (500 лавэ)", callback_data="casino_dice_500")
-        ],
-        [
-            InlineKeyboardButton(text="🃏 Рулетка (ВСЁ!)", callback_data="casino_roulette_all")
-        ]
-    ])
-    
-    await message.answer(
-        f"🎰 *КАЗИНО 'БЕСПРЕДЕЛ'*\n\n"
-        f"💰 Твой баланс: {player['money']} лавэ\n\n"
-        f"Выбирай игру, братиш:",
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-
-@router.callback_query(F.data.startswith("casino_"))
-async def casino_game(callback: CallbackQuery):
-    """Игра в казино"""
-    data = callback.data.split("_")
-    if len(data) < 3:
-        await callback.answer("❌ Некорректные данные!", show_alert=True)
-        return
-    
-    game_type = data[1]
-    bet = data[2]
-    
-    user_id = callback.from_user.id
-    chat_id = callback.message.chat.id
-    
-    player = await get_player(user_id, chat_id)
-    if not player:
-        await callback.answer("❌ Ты не в игре!", show_alert=True)
-        return
-    
-    # Определяем ставку
-    if bet == "all":
-        bet_amount = player['money']
-    else:
-        bet_amount = int(bet)
-    
-    if player['money'] < bet_amount:
-        await callback.answer("💸 Не хватает лавэ, нищеброд!", show_alert=True)
-        return
-    
-    if bet_amount < 10:
-        await callback.answer("❌ Минимальная ставка 10 лавэ!", show_alert=True)
-        return
-    
-    # Проверка кулдауна
-    can_do, cooldown_remaining = check_cooldown(user_id, chat_id, "casino", 10)
-    if not can_do:
-        await callback.answer(f"⏰ Подожди {cooldown_remaining} сек!", show_alert=True)
-        return
-    
-    result_text = ""
-    
-    if game_type == "slots":
-        # Слоты
-        symbols = ["🍋", "🍒", "🍀", "💎", "7️⃣", "💰"]
-        weights = [30, 25, 20, 15, 7, 3]  # Вероятности
-        
-        result = random.choices(symbols, weights=weights, k=3)
-        
-        if result[0] == result[1] == result[2]:
-            # Джекпот!
-            if result[0] == "💰":
-                multiplier = 10
-                result_text = f"🎰 [ {' '.join(result)} ]\n\n💰💰💰 МЕГА ДЖЕКПОТ!!! x{multiplier}"
-            elif result[0] == "7️⃣":
-                multiplier = 7
-                result_text = f"🎰 [ {' '.join(result)} ]\n\n🔥 ДЖЕКПОТ!!! x{multiplier}"
-            elif result[0] == "💎":
-                multiplier = 5
-                result_text = f"🎰 [ {' '.join(result)} ]\n\n💎 БРИЛЛИАНТОВЫЙ ВЫИГРЫШ! x{multiplier}"
-            else:
-                multiplier = 3
-                result_text = f"🎰 [ {' '.join(result)} ]\n\n🎉 ТРИ В РЯД! x{multiplier}"
-            
-            winnings = bet_amount * multiplier
-            await update_player_stats(user_id, chat_id, money=f"+{winnings - bet_amount}")
-            result_text += f"\n\n💰 +{winnings} лавэ!"
-        
-        elif result[0] == result[1] or result[1] == result[2]:
-            # Два совпадения
-            winnings = int(bet_amount * 1.5)
-            await update_player_stats(user_id, chat_id, money=f"+{winnings - bet_amount}")
-            result_text = f"🎰 [ {' '.join(result)} ]\n\n✨ Две одинаковых!\n💰 +{winnings} лавэ"
-        
-        else:
-            # Проигрыш
-            await update_player_stats(user_id, chat_id, money=f"-{bet_amount}")
-            result_text = f"🎰 [ {' '.join(result)} ]\n\n😭 Мимо! -{bet_amount} лавэ"
-    
-    elif game_type == "dice":
-        # Кости
-        player_roll = random.randint(1, 6) + random.randint(1, 6)
-        dealer_roll = random.randint(1, 6) + random.randint(1, 6)
-        
-        dice_emoji = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]
-        
-        result_text = f"🎲 Ты выкинул: {player_roll}\n🎲 Крупье выкинул: {dealer_roll}\n\n"
-        
-        if player_roll > dealer_roll:
-            winnings = bet_amount * 2
-            await update_player_stats(user_id, chat_id, money=f"+{bet_amount}")
-            result_text += f"🎉 ПОБЕДА! +{winnings} лавэ"
-        elif player_roll < dealer_roll:
-            await update_player_stats(user_id, chat_id, money=f"-{bet_amount}")
-            result_text += f"💀 Крупье победил! -{bet_amount} лавэ"
-        else:
-            result_text += "🤝 Ничья! Ставка возвращена"
-    
-    elif game_type == "roulette":
-        # Рулетка — всё или ничего
-        if random.random() < 0.45:  # 45% шанс на победу
-            winnings = bet_amount * 2
-            await update_player_stats(user_id, chat_id, money=f"+{bet_amount}")
-            result_text = f"🎡 Рулетка крутится...\n\n🔴 КРАСНОЕ!\n\n🎉 ТЫ УДВОИЛСЯ! +{winnings} лавэ!"
-        else:
-            await update_player_stats(user_id, chat_id, money=f"-{bet_amount}")
-            result_text = f"🎡 Рулетка крутится...\n\n⚫ ЧЁРНОЕ!\n\n💀 ВСЁ ПОТЕРЯЛ! -{bet_amount} лавэ"
-    
-    # Часть проигрышей идёт в общак
-    if "-" in result_text:
-        treasury_cut = int(bet_amount * 0.1)
-        await add_to_treasury(chat_id, treasury_cut)
-    
-    try:
-        await callback.message.edit_text(result_text)
-    except TelegramBadRequest:
-        await callback.message.answer(result_text)
-    await callback.answer()
 
 
 @router.message(Command("treasury", "obshak", "bank"))
@@ -4447,7 +4291,7 @@ async def _save_text_message(message: Message):
                 message_type="text"
             )
         except Exception as e:
-            logger.debug(f"Profile update error: {e}")
+            logger.warning(f"Profile update error (text): {e}", exc_info=True)
     
     # Пассивный опыт для игроков
     player = await get_player(user_id, chat_id)
@@ -6176,7 +6020,7 @@ async def collect_stickers(message: Message):
                 sticker_emoji=sticker.emoji if sticker else None
             )
         except Exception as e:
-            logger.debug(f"Profile update error (sticker): {e}")
+            logger.warning(f"Profile update error (sticker): {e}", exc_info=True)
     
     # Сохраняем стикер в коллекцию (если это не анимированный/видео стикер)
     if sticker and not sticker.is_video and not sticker.is_animated:
@@ -6279,7 +6123,7 @@ async def collect_photos(message: Message):
                 message_type="photo"
             )
         except Exception as e:
-            logger.debug(f"Profile update error (photo): {e}")
+            logger.warning(f"Profile update error (photo): {e}", exc_info=True)
     
     # Сохраняем фото в коллекцию мемов
     await save_media(
@@ -6341,7 +6185,7 @@ async def collect_animations(message: Message):
                 message_type="animation"
             )
         except Exception as e:
-            logger.debug(f"Profile update error (animation): {e}")
+            logger.warning(f"Profile update error (animation): {e}", exc_info=True)
     
     # Сохраняем GIF в коллекцию
     if animation:
@@ -6413,7 +6257,7 @@ async def collect_voice(message: Message):
             if transcription:
                 logger.info(f"Voice transcribed and added to profile: {transcription[:50]}...")
         except Exception as e:
-            logger.debug(f"Profile update error (voice): {e}")
+            logger.warning(f"Profile update error (voice): {e}", exc_info=True)
     
     # Сохраняем голосовое/кружочек в коллекцию
     if message.voice:
@@ -6502,7 +6346,7 @@ async def collect_videos(message: Message):
                 message_type="video"
             )
         except Exception as e:
-            logger.debug(f"Profile update error (video): {e}")
+            logger.warning(f"Profile update error (video): {e}", exc_info=True)
     
     # Сохраняем видео в коллекцию
     if video:
@@ -6573,7 +6417,7 @@ async def collect_audio(message: Message):
                 message_type="audio"
             )
         except Exception as e:
-            logger.debug(f"Profile update error (audio): {e}")
+            logger.warning(f"Profile update error (audio): {e}", exc_info=True)
     
     # Сохраняем аудио в коллекцию
     if audio:
@@ -7893,13 +7737,41 @@ async def admin_rebuild_profiles(message: Message):
         return
     
     args = message.text.split()
-    if len(args) < 2 or args[1] != "rebuild_profiles":
+    if len(args) < 2 or args[1] not in ("rebuild_profiles", "reset_corrupted"):
+        await message.answer(
+            "📋 *Доступные admin-команды:*\n\n"
+            "`/admin rebuild_profiles [chat_id]` — пересобрать профили из истории\n"
+            "`/admin reset_corrupted [chat_id]` — сбросить и пересобрать битые профили",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
-    
+
     if not USE_POSTGRES:
-        await message.answer("❌ Миграция доступна только с PostgreSQL")
+        await message.answer("❌ Команда доступна только с PostgreSQL")
         return
-    
+
+    # --- reset_corrupted ---
+    if args[1] == "reset_corrupted":
+        try:
+            from database_postgres import reset_corrupted_profiles
+            target_chat_id = int(args[2]) if len(args) >= 3 else None
+            scope = f"чата {target_chat_id}" if target_chat_id else "всех чатов"
+            processing = await message.answer(f"🔧 Ищу и сбрасываю битые профили {scope}...")
+
+            results = await reset_corrupted_profiles(target_chat_id)
+
+            await processing.edit_text(
+                f"✅ *Сброс битых профилей завершён!*\n\n"
+                f"🗑️ Удалено битых профилей: {results.get('deleted', 0):,}\n"
+                f"🔨 Пересоздано профилей: {results.get('rebuilt', 0):,}\n"
+                f"❌ Ошибок: {len(results.get('errors', []))}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"reset_corrupted_profiles error: {e}")
+            await message.answer(f"❌ Ошибка: {e}")
+        return
+
     try:
         from database_postgres import rebuild_all_profiles, rebuild_profiles_from_messages
         
@@ -8511,7 +8383,6 @@ async def setup_bot_commands():
         BotCommand(command="top", description="🏆 Топ игроков"),
         BotCommand(command="crime", description="🔫 Пойти на дело"),
         BotCommand(command="attack", description="💥 Наехать на игрока"),
-        BotCommand(command="casino", description="🎰 Казино"),
         BotCommand(command="treasury", description="💰 Общак чата"),
         BotCommand(command="achievements", description="🏅 Мои достижения"),
         
