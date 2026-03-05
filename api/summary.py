@@ -380,7 +380,7 @@ def format_statistics_for_prompt(stats: dict, chat_title: str, hours: int) -> st
     # Выборка диалогов для понимания контекста
     dialogues = ""
     if stats.get("recent_messages"):
-        for msg in stats["recent_messages"][-30:]:
+        for msg in stats["recent_messages"]:
             name = format_name_with_username(msg.get('first_name'), msg.get('username'))
             if msg.get("message_text"):
                 text = msg["message_text"][:120]
@@ -458,7 +458,7 @@ class handler(BaseHTTPRequestHandler):
             
             request_body = json.dumps({
                 "model": "anthropic/claude-sonnet-4-20250514",
-                "max_tokens": 2500,
+                "max_tokens": 3500,
                 "temperature": 1.0,
                 "system": SYSTEM_PROMPT,
                 "messages": [

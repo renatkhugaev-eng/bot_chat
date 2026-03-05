@@ -1246,9 +1246,9 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
             WHERE chat_id = $1 AND created_at >= $2 
             AND (message_type IN ('text', 'photo') OR (message_type = 'voice' AND voice_transcription IS NOT NULL))
             ORDER BY created_at DESC
-            LIMIT 50
+            LIMIT 300
         """, chat_id, since_time)
-        
+
         return {
             "total_messages": total_messages,
             "top_authors": [dict(row) for row in top_authors],
