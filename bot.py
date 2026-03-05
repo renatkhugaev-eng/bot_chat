@@ -4387,9 +4387,23 @@ async def who_is_this_handler(message: Message):
     if USE_POSTGRES and message.text and len(message.text) > 20:
         asyncio.create_task(extract_and_save_facts(message))
     
-    # === СПЕЦИФИЧНАЯ ЛОГИКА "ЭТО КТО?" ===
     text_lower = message.text.lower().strip()
-    
+
+    # === ПЁРДНУТЬ ===
+    if message.reply_to_message and any(trigger in text_lower for trigger in FART_TRIGGERS):
+        target_user = message.reply_to_message.from_user
+        if target_user:
+            target_name = target_user.first_name or target_user.username or "этого"
+            clickable = f'<a href="tg://user?id={target_user.id}">{target_name}</a>'
+            fart_response = random.choice(FART_RESPONSES)
+            fart_response = fart_response.format(
+                name=clickable, name_gen=clickable,
+                name_dat=clickable, name_acc=clickable,
+            )
+            await message.reply(fart_response, parse_mode=ParseMode.HTML)
+            return
+
+    # === СПЕЦИФИЧНАЯ ЛОГИКА "ЭТО КТО?" ===
     # Проверяем триггер
     is_trigger = any(trigger in text_lower for trigger in WHO_IS_THIS_TRIGGERS)
     if not is_trigger:
@@ -4525,6 +4539,29 @@ async def who_is_this_handler(message: Message):
         response += profile_addition
     
     await message.reply(response, parse_mode=ParseMode.HTML)
+
+
+# ==================== ПЁРДНУТЬ ====================
+
+FART_TRIGGERS = [
+    "пёрднуть", "пёрднуть на", "пёрдни на", "пёрдни ему", "пёрдни ей",
+    "пернуть", "пёрнуть", "пёрни", "пёрни на", "пёрни ему", "пёрни ей",
+    "пукнуть", "пукни", "пукни на", "пукни ему", "пукни ей",
+    "пёрд на", "пёрдни", "пукнуть на",
+]
+
+FART_RESPONSES = [
+    "*бесшумно и с достоинством пускает облако в сторону {name}*\n\n{name_dat} досталось что-то тёплое, влажное и с запахом вчерашнего. Судя по выражению лица — не ожидал.",
+    "*сосредотачивается и выдаёт в направлении {name}*\n\n🌬 Звук — как рваный пакет. Запах — как будто внутри что-то умерло и не сразу согласилось. {name} теперь знает правду о жизни.",
+    "*прицельно, с характером, на {name_acc}*\n\n💨 Тихо. Но убийственно. Пока {name} соображал что произошло — оно уже везде. Эксперты называют это «биологическим оружием ближнего боя».",
+    "*встаёт в позицию и исполняет*\n\n Вышло многослойно. Первый слой — тухлое яйцо. Второй — носок трёхдневной выдержки. Третий слой {name} уже не почувствовал — просто отключился.",
+    "*деловито разворачивается к {name_dat}*\n\n💨 Академическое пёрдо — без лишних эмоций, по делу. Запах осел на {name_acc} равномерным слоем. Это теперь часть {name_gen}.",
+    "*глубокий вдох, пауза, и...*\n\n🌫 Вышло тихое, но честное. {name} поднял глаза — поздно. Невидимое облако уже приняло {name_acc} в объятия. Тёплые. Очень тёплые.",
+    "*торжественно, как салют*\n\n💥 ГРОМКО. Чат замолчал. {name} замолчал. Даже бот на секунду завис. Запах достиг {name_gen} со скоростью звука — то есть почти одновременно.",
+    "*без предупреждения, в упор на {name_acc}*\n\n Диетолог бы сказал «это нормально». Но диетолог не стоял рядом с {name_acc}. Диетолог вообще в другом городе. Правильно сделал.",
+    "*методично, как на работе*\n\n Бесшумное. Самое страшное. {name} почувствовал — но не сразу понял. Потом понял. Теперь {name} другой человек.",
+    "*вдохновенно и с душой*\n\n🎺 Звук — почти музыкальный. Почти. Запах — абсолютно не музыкальный. {name_dat} посвящается. Запомни этот момент.",
+]
 
 
 # ==================== ДЕТЕКТОР КРИНЖА "ГОСПОДИ ДОПОМОЖИ" ====================
