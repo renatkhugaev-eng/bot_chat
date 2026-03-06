@@ -86,12 +86,34 @@ class handler(BaseHTTPRequestHandler):
                 self._send_error(400, "No messages provided")
                 return
 
-            # Форматируем сообщения для Claude
-            messages_text = "\n".join([
-                f"{m.get('first_name', 'Аноним')}: {m.get('message_text', '')}"
-                for m in messages
-                if m.get('message_text')
-            ])[:8000]
+            # Форматируем сообщения для Claude с временным контекстом
+            import datetime
+            lines = []
+            for m in messages:
+                text = m.get('message_text') or m.get('text', '')
+                if not text:
+                    continue
+                name = m.get('first_name') or m.get('username') or 'Аноним'
+                ts = m.get('created_at')
+                time_tag = ""
+                if ts:
+                    try:
+                        dt = datetime.datetime.fromtimestamp(int(ts))
+                        h = dt.hour
+                        if 0 <= h < 6:
+                            time_tag = "[ночь] "
+                        elif 6 <= h < 12:
+                            time_tag = "[утро] "
+                        elif 12 <= h < 18:
+                            time_tag = "[день] "
+                        else:
+                            time_tag = "[вечер] "
+                    except Exception:
+                        pass
+                reply_to = m.get('reply_to_first_name')
+                reply_tag = f"→{reply_to} " if reply_to else ""
+                lines.append(f"{time_tag}{name} {reply_tag}: {text}")
+            messages_text = "\n".join(lines)[:8000]
 
             ai_key = os.environ.get("VERCEL_AI_GATEWAY_KEY", "").strip()
             if not ai_key:

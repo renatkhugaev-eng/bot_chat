@@ -2382,7 +2382,7 @@ async def cmd_imagine(message: Message):
         try:
             user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=30)
             if user_msgs:
-                context = "\n".join([m.get("text", "") for m in user_msgs if m.get("text")])[:2000]
+                context = "\n".join([m.get("message_text", "") for m in reversed(user_msgs) if m.get("message_text")])[:2000]
         except Exception:
             pass
 
@@ -2519,7 +2519,7 @@ async def cmd_video(message: Message, command: CommandObject):
                 try:
                     user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=30)
                     if user_msgs:
-                        context = "\n".join([m.get("text", "") for m in user_msgs if m.get("text")])[:2000]
+                        context = "\n".join([m.get("message_text", "") for m in reversed(user_msgs) if m.get("message_text")])[:2000]
                 except Exception:
                     pass
 
@@ -2882,9 +2882,12 @@ async def cmd_music(message: Message, command: CommandObject):
             if USE_POSTGRES:
                 try:
                     user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=200)
-                    text_msgs = [m for m in user_msgs if m.get("text")]
-                    # Приводим к единому формату
-                    text_msgs = [{"first_name": target_name, "message_text": m["text"]} for m in text_msgs]
+                    # reversed() — DESC→ASC (хронологический порядок)
+                    text_msgs = [
+                        {"first_name": target_name, "message_text": m["message_text"]}
+                        for m in reversed(user_msgs)
+                        if m.get("message_text")
+                    ]
                 except Exception:
                     pass
 
@@ -5134,7 +5137,7 @@ async def who_is_this_handler(message: Message):
                 try:
                     user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=20)
                     if user_msgs:
-                        context = "\n".join([m.get("text", "") for m in user_msgs if m.get("text")])[:1500]
+                        context = "\n".join([m.get("message_text", "") for m in reversed(user_msgs) if m.get("message_text")])[:1500]
                 except Exception:
                     pass
 
