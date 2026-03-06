@@ -4479,7 +4479,7 @@ async def maybe_periodic_comment(message: Message):
     current = _chat_msg_counter[chat_id]
 
     if chat_id not in _chat_next_threshold:
-        _chat_next_threshold[chat_id] = random.randint(20, 30)
+        _chat_next_threshold[chat_id] = random.randint(5, 8)  # TEST: было 20-30
 
     threshold = _chat_next_threshold[chat_id]
     logger.info(f"PERIODIC: chat={chat_id} counter={current}/{threshold}")
