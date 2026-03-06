@@ -2910,15 +2910,18 @@ async def cmd_music(message: Message, command: CommandObject):
                 cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
                 return
 
-            # Равномерная выборка: не более 15 сообщений на автора,
-            # чтобы флудеры не доминировали в тексте трека
+            # Перемешиваем перед балансировкой — гарантирует случайный порядок
+            import random as _random
+            shuffled = [m for m in recent if m.get("message_text")]
+            _random.shuffle(shuffled)
+
+            # Равномерная выборка: не более 8 сообщений на автора,
+            # чтобы даже самые активные не доминировали
             author_counts: dict = {}
             balanced = []
-            for m in recent:
-                if not m.get("message_text"):
-                    continue
+            for m in shuffled:
                 author = m.get("first_name") or m.get("username") or "?"
-                if author_counts.get(author, 0) < 15:
+                if author_counts.get(author, 0) < 8:
                     balanced.append(m)
                     author_counts[author] = author_counts.get(author, 0) + 1
             text_msgs = balanced[:300]
