@@ -4479,17 +4479,15 @@ async def maybe_periodic_comment(message: Message):
     current = _chat_msg_counter[chat_id]
 
     if chat_id not in _chat_next_threshold:
-        _chat_next_threshold[chat_id] = random.randint(5, 8)  # TEST: было 20-30
+        _chat_next_threshold[chat_id] = random.randint(20, 30)
 
     threshold = _chat_next_threshold[chat_id]
-    logger.info(f"PERIODIC: chat={chat_id} counter={current}/{threshold}")
 
     if current >= threshold:
         _chat_msg_counter[chat_id] = 0
         _chat_next_threshold[chat_id] = random.randint(20, 30)
 
         text = random.choice(PERIODIC_COMMENTS)
-        logger.info(f"PERIODIC COMMENT FIRING in chat {chat_id}: {text}")
         try:
             await message.answer(text)
         except Exception as e:
@@ -4559,7 +4557,6 @@ async def maybe_random_comment(message: Message) -> bool:
 @router.message(F.text, ~F.text.startswith("/"))
 async def who_is_this_handler(message: Message):
     """Обработчик 'это кто?' с реплаем или упоминанием + общая обработка текста"""
-    logger.info(f"TEXT_HANDLER: chat={message.chat.id} type={message.chat.type} text={repr(message.text[:30])}")
     if message.chat.type == "private":
         return
     

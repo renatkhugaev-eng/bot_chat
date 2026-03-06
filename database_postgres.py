@@ -3069,6 +3069,13 @@ async def update_user_profile_comprehensive(
                 detected_gender = profile['detected_gender']
             
             # ========== ОБНОВЛЯЕМ ПРОФИЛЬ (per-chat!) ==========
+            # JSONB поля должны быть строками для asyncpg
+            active_hours = json.dumps(active_hours, ensure_ascii=False)
+            mood_by_day = json.dumps(mood_by_day, ensure_ascii=False)
+            mood_by_hour = json.dumps(mood_by_hour, ensure_ascii=False)
+            favorite_phrases = json.dumps(favorite_phrases, ensure_ascii=False)
+            favorite_emojis = json.dumps(favorite_emojis, ensure_ascii=False)
+            trigger_topics = json.dumps(trigger_topics, ensure_ascii=False)
             await conn.execute("""
                 UPDATE user_profiles SET
                     first_name = COALESCE($3, first_name),
@@ -3140,9 +3147,9 @@ async def update_user_profile_comprehensive(
         
         else:
             # ========== СОЗДАЁМ НОВЫЙ ПРОФИЛЬ (per-chat!) ==========
-            active_hours = {str(hour): 1}
-            mood_by_day = {day_of_week: sentiment['sentiment'], f'{day_of_week}_count': 1}
-            mood_by_hour = {str(hour): sentiment['sentiment'], f'{str(hour)}_count': 1}
+            active_hours = json.dumps({str(hour): 1}, ensure_ascii=False)
+            mood_by_day = json.dumps({day_of_week: sentiment['sentiment'], f'{day_of_week}_count': 1}, ensure_ascii=False)
+            mood_by_hour = json.dumps({str(hour): sentiment['sentiment'], f'{str(hour)}_count': 1}, ensure_ascii=False)
             
             detected_gender = gender_result['gender']
             gender_confidence = gender_result['confidence']
@@ -3211,7 +3218,7 @@ async def update_user_profile_comprehensive(
                  # Новые поля v2
                  initial_caps, initial_mat, initial_slang, initial_typo, initial_question, initial_exclaim,
                  mood_by_day, mood_by_hour, day_of_week,
-                 catchphrases[:10], emojis_in_message[:10], emotional_triggers,
+                 json.dumps(catchphrases[:10], ensure_ascii=False), json.dumps(emojis_in_message[:10], ensure_ascii=False), json.dumps(emotional_triggers, ensure_ascii=False),
                  is_reply, float(is_reply),
                  float(is_voice), float(is_photo), float(is_sticker), float(is_video),
                  len(lang_style['unique_words']), initial_vocab_richness)
