@@ -13,7 +13,7 @@ from aiogram.types import (
     BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats,
     BotCommandScopeChat
 )
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -2467,7 +2467,7 @@ async def cmd_imagine(message: Message):
 # ==================== ВИДЕО (TEXT-TO-VIDEO) ====================
 
 @router.message(Command("видео", "video", "клип", "снять"))
-async def cmd_video(message: Message):
+async def cmd_video(message: Message, command: CommandObject):
     """Снять видео через Kling AI — /видео описание или реплай на человека"""
     if message.chat.type == "private":
         await message.answer("Команда работает только в групповых чатах")
@@ -2483,13 +2483,8 @@ async def cmd_video(message: Message):
         await message.answer(f"⏳ Подожди ещё {cooldown_remaining:.0f} сек (видео — дорогая штука)")
         return
 
-    # Извлекаем текст после команды
-    command_text = message.text or ""
-    custom_prompt = ""
-    for cmd in ["/видео", "/video", "/клип", "/снять"]:
-        if command_text.lower().startswith(cmd):
-            custom_prompt = command_text[len(cmd):].strip()
-            break
+    # Правильное извлечение аргументов через CommandObject (обрабатывает @botname)
+    custom_prompt = (command.args or "").strip()
 
     # Режим: видео-портрет человека (реплай без кастомного текста)
     target_user = None
