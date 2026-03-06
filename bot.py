@@ -4389,6 +4389,49 @@ async def who_is_this_handler(message: Message):
     
     text_lower = message.text.lower().strip()
 
+    # === ДАЙ ТАБЛЕТКУ ===
+    if message.reply_to_message and any(trigger in text_lower for trigger in PILL_TRIGGERS):
+        target_user = message.reply_to_message.from_user
+        if target_user:
+            target_name = target_user.first_name or target_user.username or "Пациент"
+            target_username = target_user.username or ""
+            clickable = f'<a href="tg://user?id={target_user.id}">{target_name}</a>'
+
+            pill_url = get_api_url("pill")
+            if not pill_url:
+                await message.reply(f"💊 {clickable}, выпей таблетку от долбоёбизма. Доза — максимальная.", parse_mode=ParseMode.HTML)
+                return
+
+            processing = await message.reply("🩺 Доктор Роза изучает историю болезни...", parse_mode=ParseMode.HTML)
+
+            # Собираем последние сообщения цели для персонализации
+            context = ""
+            if USE_POSTGRES:
+                try:
+                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=20)
+                    if user_msgs:
+                        context = "\n".join([m.get("text", "") for m in user_msgs if m.get("text")])[:1500]
+                except Exception:
+                    pass
+
+            try:
+                session = await get_http_session()
+                async with session.post(
+                    pill_url,
+                    json={"name": target_name, "username": target_username, "context": context},
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        text = result.get("text", "Таблетка закончилась.")
+                        await processing.edit_text(f"💊 Рецепт для {clickable}:\n\n{text}", parse_mode=ParseMode.HTML)
+                    else:
+                        await processing.edit_text(f"💊 {clickable}, прими что-нибудь от тупости. Дозировка — на глаз.")
+            except Exception as e:
+                logger.warning(f"PILL API error: {e}")
+                await processing.edit_text(f"💊 {clickable}, доктор пьян. Пей аспирин и не мешай.", parse_mode=ParseMode.HTML)
+        return
+
     # === ПЁРДНУТЬ ===
     if message.reply_to_message and any(trigger in text_lower for trigger in FART_TRIGGERS):
         target_user = message.reply_to_message.from_user
@@ -4540,6 +4583,13 @@ async def who_is_this_handler(message: Message):
     
     await message.reply(response, parse_mode=ParseMode.HTML)
 
+
+# ==================== ДАЙ ТАБЛЕТКУ ====================
+
+PILL_TRIGGERS = [
+    "дай таблетку", "таблетку", "выпей таблетку", "прими таблетку",
+    "таблетка", "пропиши таблетку", "назначь таблетку", "дайте таблетку",
+]
 
 # ==================== ПЁРДНУТЬ ====================
 
