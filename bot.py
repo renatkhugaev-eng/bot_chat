@@ -2824,6 +2824,123 @@ async def cmd_enhance(message: Message):
             pass
 
 
+# ==================== МУЗЫКА (TEXT-TO-MUSIC) ====================
+
+@router.message(Command("музыка", "music", "трек", "track", "песня"))
+async def cmd_music(message: Message):
+    """Генерировать трек на основе сообщений чата через MiniMax Music"""
+    if message.chat.type == "private":
+        await message.answer("Команда работает только в групповых чатах")
+        return
+
+    fal_key = os.getenv("FAL_KEY", "")
+    if not fal_key:
+        await message.answer("❌ FAL_KEY не настроен")
+        return
+
+    music_api_url = get_api_url("music")
+    if not music_api_url:
+        await message.answer("❌ Music API не настроен (нужна VERCEL_API_URL)")
+        return
+
+    can_do, cooldown_remaining = check_cooldown(message.from_user.id, message.chat.id, "music", 120)
+    if not can_do:
+        await message.answer(f"⏳ Подожди ещё {cooldown_remaining:.0f} сек")
+        return
+
+    processing = await message.answer("🎵 Слушаю ваш чат и пишу трек...")
+
+    try:
+        # Берём последние сообщения из БД
+        stats = await get_chat_statistics(message.chat.id, hours=5)
+        recent = stats.get("recent_messages", [])
+
+        if len(recent) < 5:
+            await processing.edit_text(
+                "📭 Слишком мало сообщений за последние 5 часов — не о чём петь!\n"
+                "Напишите хоть что-нибудь сначала."
+            )
+            cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
+            return
+
+        # Берём до 80 последних текстовых сообщений
+        text_msgs = [m for m in recent if m.get("message_text")][-80:]
+
+        session = await get_http_session()
+
+        # Шаг 1: генерим текст песни через Vercel/Claude
+        async with session.post(
+            music_api_url,
+            json={
+                "messages": text_msgs,
+                "chat_title": message.chat.title or "Чат"
+            },
+            timeout=aiohttp.ClientTimeout(total=20)
+        ) as resp:
+            if resp.status != 200:
+                await processing.edit_text(f"❌ Ошибка генерации текста: {await resp.text()}")
+                return
+            music_data = await resp.json()
+
+        lyrics = music_data.get("lyrics", "")
+        style = music_data.get("style", "russian pop, melodic")
+
+        if not lyrics:
+            await processing.edit_text("❌ Не смог сочинить текст")
+            return
+
+        await processing.edit_text(f"🎼 Текст готов, записываю трек...\n\n<i>Стиль: {style}</i>", parse_mode=ParseMode.HTML)
+
+        # Шаг 2: генерим музыку через MiniMax Music на fal.ai
+        fal_headers = {"Authorization": f"Key {fal_key}", "Content-Type": "application/json"}
+
+        async with session.post(
+            "https://fal.run/fal-ai/minimax-music/v1.5",
+            json={
+                "prompt": lyrics,
+                "lyrics_prompt": style,
+                "audio_setting": {"sample_rate": 44100, "bitrate": 256000, "format": "mp3"}
+            },
+            headers=fal_headers,
+            timeout=aiohttp.ClientTimeout(total=120)
+        ) as fal_resp:
+            if fal_resp.status != 200:
+                await processing.edit_text(f"❌ MiniMax Music ошибка: {(await fal_resp.text())[:200]}")
+                return
+            fal_result = await fal_resp.json()
+
+        audio_url = fal_result.get("audio", {}).get("url", "")
+        if not audio_url:
+            await processing.edit_text("❌ Пустой URL аудио")
+            return
+
+        # Скачиваем и отправляем
+        async with session.get(audio_url, timeout=aiohttp.ClientTimeout(total=30)) as audio_resp:
+            audio_data = await audio_resp.read()
+
+        # Считаем топ-3 авторов для подписи
+        top = stats.get("top_authors", [])[:3]
+        top_names = ", ".join(a.get("first_name", "Аноним") for a in top) if top else ""
+        caption = f"🎵 Трек по мотивам этого чата\n🎤 Starring: {top_names}" if top_names else "🎵 Трек по мотивам этого чата"
+
+        await processing.delete()
+        await message.answer_audio(
+            BufferedInputFile(audio_data, filename="track.mp3"),
+            caption=caption,
+            title=f"Трек чата — {message.chat.title or 'Беспредел'}",
+            performer="AI x fal.ai"
+        )
+
+    except asyncio.TimeoutError:
+        await processing.edit_text("⏰ MiniMax думает слишком долго, попробуй позже")
+    except Exception as e:
+        logger.warning(f"MUSIC error: {e}")
+        try:
+            await processing.edit_text(f"❌ Не смог записать трек: {e}")
+        except Exception:
+            pass
+
+
 # ==================== СЖЕЧЬ ЧЕЛОВЕКА ====================
 
 @router.message(Command("burn", "сжечь", "кремация", "костёр", "поджечь"))
@@ -9205,6 +9322,7 @@ async def setup_bot_commands():
         BotCommand(command="видео", description="🎬 Снять видео через Kling AI"),
         BotCommand(command="оживи", description="✨ Анимировать фото (реплай на фото)"),
         BotCommand(command="улучши", description="🔍 Улучшить фото 4x (реплай на фото)"),
+        BotCommand(command="музыка", description="🎵 Трек по мотивам чата через MiniMax"),
         
         # Анализ и профили
         BotCommand(command="dossier", description="📋 AI-досье на юзера"),
