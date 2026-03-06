@@ -80,6 +80,7 @@ class handler(BaseHTTPRequestHandler):
             messages = data.get("messages", [])
             chat_title = data.get("chat_title", "Чат")
             style_hint = data.get("style_hint", "").strip()
+            target_name = data.get("target_name", "").strip()
 
             if not messages:
                 self._send_error(400, "No messages provided")
@@ -97,7 +98,16 @@ class handler(BaseHTTPRequestHandler):
                 self._send_error(500, "AI key not configured")
                 return
 
-            hint_line = f"\nПожелание по стилю от пользователя: {style_hint}" if style_hint else ""
+            hint_line = f"\nПожелание по стилю: {style_hint}" if style_hint else ""
+
+            if target_name:
+                task_line = (
+                    f"Напиши трек КОНКРЕТНО ПРО {target_name} — главный герой песни это {target_name}. "
+                    f"Используй его реальные фразы, темы, манеру общения из сообщений выше. "
+                    f"Имя {target_name} должно звучать в тексте."
+                )
+            else:
+                task_line = "Создай трек по мотивам всего чата."
 
             claude_body = json.dumps({
                 "model": "anthropic/claude-sonnet-4-20250514",
@@ -106,7 +116,7 @@ class handler(BaseHTTPRequestHandler):
                 "system": SYSTEM_PROMPT,
                 "messages": [{
                     "role": "user",
-                    "content": f"Чат: {chat_title}{hint_line}\n\nСообщения:\n{messages_text}\n\nСоздай трек."
+                    "content": f"Чат: {chat_title}{hint_line}\n\nСообщения:\n{messages_text}\n\n{task_line}"
                 }]
             }).encode('utf-8')
 

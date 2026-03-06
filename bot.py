@@ -2848,29 +2848,66 @@ async def cmd_music(message: Message, command: CommandObject):
         await message.answer(f"⏳ Подожди ещё {cooldown_remaining:.0f} сек")
         return
 
-    # Опциональный стиль от пользователя: /музыка рэп  или  /музыка грустный
+    # Опциональный стиль: /музыка рэп  или  /музыка грустный
     style_hint = (command.args or "").strip()
 
-    hint_text = f" в стиле <b>{style_hint}</b>" if style_hint else ""
-    processing = await message.answer(f"🎵 Слушаю ваш чат и пишу трек{hint_text}...", parse_mode=ParseMode.HTML)
+    # Режим реплая — трек про конкретного человека
+    target_user = None
+    target_name = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        target_name = target_user.first_name or target_user.username or "Аноним"
+
+    if target_user:
+        clickable = f'<a href="tg://user?id={target_user.id}">{target_name}</a>'
+        hint_text = f" в стиле <b>{style_hint}</b>" if style_hint else ""
+        processing = await message.answer(
+            f"🎵 Изучаю {clickable} и пишу трек{hint_text}...",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        hint_text = f" в стиле <b>{style_hint}</b>" if style_hint else ""
+        processing = await message.answer(
+            f"🎵 Слушаю ваш чат и пишу трек{hint_text}...",
+            parse_mode=ParseMode.HTML
+        )
 
     try:
-        # Берём последние сообщения из БД
-        stats = await get_chat_statistics(message.chat.id, hours=5)
-        recent = stats.get("recent_messages", [])
-
-        if len(recent) < 5:
-            await processing.edit_text(
-                "📭 Слишком мало сообщений за последние 5 часов — не о чём петь!\n"
-                "Напишите хоть что-нибудь сначала."
-            )
-            cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
-            return
-
-        # Берём все текстовые сообщения (БД отдаёт до 300)
-        text_msgs = [m for m in recent if m.get("message_text")]
-
         session = await get_http_session()
+        text_msgs = []
+        stats = {}
+
+        if target_user:
+            # Режим персонального трека — берём сообщения конкретного человека
+            if USE_POSTGRES:
+                try:
+                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=200)
+                    text_msgs = [m for m in user_msgs if m.get("text")]
+                    # Приводим к единому формату
+                    text_msgs = [{"first_name": target_name, "message_text": m["text"]} for m in text_msgs]
+                except Exception:
+                    pass
+
+            if len(text_msgs) < 3:
+                await processing.edit_text(
+                    f"📭 У {target_name} слишком мало сохранённых сообщений — не о чём петь!"
+                )
+                cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
+                return
+        else:
+            # Режим чата — берём последние сообщения чата
+            stats = await get_chat_statistics(message.chat.id, hours=5)
+            recent = stats.get("recent_messages", [])
+
+            if len(recent) < 5:
+                await processing.edit_text(
+                    "📭 Слишком мало сообщений за последние 5 часов — не о чём петь!\n"
+                    "Напишите хоть что-нибудь сначала."
+                )
+                cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
+                return
+
+            text_msgs = [m for m in recent if m.get("message_text")]
 
         # Шаг 1: генерим текст + стиль через Vercel/Claude Sonnet
         async with session.post(
@@ -2878,7 +2915,8 @@ async def cmd_music(message: Message, command: CommandObject):
             json={
                 "messages": text_msgs,
                 "chat_title": message.chat.title or "Чат",
-                "style_hint": style_hint
+                "style_hint": style_hint,
+                "target_name": target_name or ""
             },
             timeout=aiohttp.ClientTimeout(total=30)
         ) as resp:
@@ -2894,7 +2932,10 @@ async def cmd_music(message: Message, command: CommandObject):
             await processing.edit_text("❌ Не смог сочинить текст")
             return
 
-        await processing.edit_text(f"🎼 Текст готов, записываю трек...\n\n<i>Стиль: {style}</i>", parse_mode=ParseMode.HTML)
+        await processing.edit_text(
+            f"🎼 Текст готов, записываю трек...\n\n<i>Стиль: {style}</i>",
+            parse_mode=ParseMode.HTML
+        )
 
         # Шаг 2: генерим музыку через MiniMax Music на fal.ai
         fal_headers = {"Authorization": f"Key {fal_key}", "Content-Type": "application/json"}
@@ -2919,21 +2960,28 @@ async def cmd_music(message: Message, command: CommandObject):
             await processing.edit_text("❌ Пустой URL аудио")
             return
 
-        # Скачиваем и отправляем
         async with session.get(audio_url, timeout=aiohttp.ClientTimeout(total=30)) as audio_resp:
             audio_data = await audio_resp.read()
 
-        # Считаем топ-3 авторов для подписи
-        top = stats.get("top_authors", [])[:3]
-        top_names = ", ".join(a.get("first_name", "Аноним") for a in top) if top else ""
-        caption = f"🎵 Трек по мотивам этого чата\n🎤 Starring: {top_names}" if top_names else "🎵 Трек по мотивам этого чата"
-
         await processing.delete()
+
+        if target_user:
+            caption = f"🎵 Трек про {clickable}"
+            title = f"{target_name} — AI Portrait"
+            performer = target_name
+        else:
+            top = stats.get("top_authors", [])[:3]
+            top_names = ", ".join(a.get("first_name", "Аноним") for a in top) if top else ""
+            caption = f"🎵 Трек по мотивам этого чата\n🎤 Starring: {top_names}" if top_names else "🎵 Трек по мотивам этого чата"
+            title = f"Трек чата — {message.chat.title or 'Беспредел'}"
+            performer = "AI x fal.ai"
+
         await message.answer_audio(
             BufferedInputFile(audio_data, filename="track.mp3"),
             caption=caption,
-            title=f"Трек чата — {message.chat.title or 'Беспредел'}",
-            performer="AI x fal.ai"
+            title=title,
+            performer=performer,
+            parse_mode=ParseMode.HTML if target_user else None
         )
 
     except asyncio.TimeoutError:
