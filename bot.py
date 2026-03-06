@@ -2414,15 +2414,15 @@ async def cmd_imagine(message: Message):
 
         await processing.edit_text(f"🖌 Рисую {clickable}...", parse_mode=ParseMode.HTML)
 
-        # Шаг 2: fal.ai Flux напрямую из бота (~5-10с)
+        # Шаг 2: fal.ai Flux напрямую из бота (~10-20с)
         async with session.post(
-            "https://fal.run/fal-ai/flux/schnell",
+            "https://fal.run/fal-ai/flux/dev",
             json={
                 "prompt": image_prompt,
                 "image_size": "square_hd",
-                "num_inference_steps": 4,
+                "num_inference_steps": 28,
                 "num_images": 1,
-                "enable_safety_checker": False
+                "guidance_scale": 3.5
             },
             headers={"Authorization": f"Key {fal_key}"},
             timeout=aiohttp.ClientTimeout(total=60)
