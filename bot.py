@@ -76,7 +76,8 @@ if USE_POSTGRES:
         get_user_full_profile, get_user_activity_report, get_chat_social_graph,
         get_user_profile_for_ai, get_enriched_chat_data_for_ai, get_chat_social_data_for_ai,
         find_user_in_chat, get_all_chat_profiles, get_user_memories,
-        get_active_chats_for_auto_summary
+        get_active_chats_for_auto_summary,
+        get_random_messages_for_music
     )
 else:
     from database import (
@@ -2898,28 +2899,22 @@ async def cmd_music(message: Message, command: CommandObject):
                 cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
                 return
         else:
-            # Режим чата — берём сообщения за 3 дня с равномерной выборкой по авторам
-            stats = await get_chat_statistics(message.chat.id, hours=72, random_sample=True)
-            recent = stats.get("recent_messages", [])
+            # Режим чата — случайные сообщения из всей истории чата
+            all_msgs = await get_random_messages_for_music(message.chat.id, limit=500)
 
-            if len(recent) < 5:
+            if len(all_msgs) < 5:
                 await processing.edit_text(
-                    "📭 Слишком мало сообщений за последние 3 дня — не о чём петь!\n"
+                    "📭 Слишком мало сообщений в базе — не о чём петь!\n"
                     "Напишите хоть что-нибудь сначала."
                 )
                 cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
                 return
 
-            # Перемешиваем перед балансировкой — гарантирует случайный порядок
-            import random as _random
-            shuffled = [m for m in recent if m.get("message_text")]
-            _random.shuffle(shuffled)
-
             # Равномерная выборка: не более 8 сообщений на автора,
             # чтобы даже самые активные не доминировали
             author_counts: dict = {}
             balanced = []
-            for m in shuffled:
+            for m in all_msgs:
                 author = m.get("first_name") or m.get("username") or "?"
                 if author_counts.get(author, 0) < 8:
                     balanced.append(m)
