@@ -2899,7 +2899,7 @@ async def cmd_music(message: Message, command: CommandObject):
                 return
         else:
             # Режим чата — берём сообщения за 24ч с равномерной выборкой по авторам
-            stats = await get_chat_statistics(message.chat.id, hours=24)
+            stats = await get_chat_statistics(message.chat.id, hours=24, random_sample=True)
             recent = stats.get("recent_messages", [])
 
             if len(recent) < 5:

@@ -1184,7 +1184,7 @@ async def get_user_messages(chat_id: int, user_id: int, limit: int = 1000) -> Li
         return [dict(row) for row in rows]
 
 
-async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
+async def get_chat_statistics(chat_id: int, hours: int = 5, random_sample: bool = False) -> Dict[str, Any]:
     """Получить статистику чата за последние N часов"""
     since_time = int(time.time()) - (hours * 3600)
     
@@ -1237,15 +1237,16 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
         """, chat_id, since_time)
         hourly_activity = {row['hour']: row['count'] for row in hourly_rows}
         
-        # Последние сообщения (включая voice с транскрипцией)
-        recent_messages = await conn.fetch("""
+        # Последние/случайные сообщения (включая voice с транскрипцией)
+        order_clause = "ORDER BY RANDOM()" if random_sample else "ORDER BY created_at DESC"
+        recent_messages = await conn.fetch(f"""
             SELECT first_name, username, message_text, message_type, sticker_emoji,
-                   reply_to_first_name, reply_to_username, image_description, 
+                   reply_to_first_name, reply_to_username, image_description,
                    voice_transcription, created_at
-            FROM chat_messages 
-            WHERE chat_id = $1 AND created_at >= $2 
+            FROM chat_messages
+            WHERE chat_id = $1 AND created_at >= $2
             AND (message_type IN ('text', 'photo') OR (message_type = 'voice' AND voice_transcription IS NOT NULL))
-            ORDER BY created_at DESC
+            {order_clause}
             LIMIT 300
         """, chat_id, since_time)
 
