@@ -26,7 +26,7 @@ SYSTEM_PROMPT = """Ты — профессиональный рэп-автор. 
 [bridge]
 [outro]
 
-Объём: 1500-2500 символов. Это полноценная 2-3 минутная песня.
+Объём: 700-950 символов включая теги.
 
 Правила рифмовки (СТРОГО):
 - Схема AABB: каждые 2 строки рифмуются между собой
@@ -40,9 +40,9 @@ SYSTEM_PROMPT = """Ты — профессиональный рэп-автор. 
 - КОНКРЕТНО: реальные имена, цитаты фраз, темы из переписки
 - Разговорный русский, можно мат если чат матерится
 - [chorus] — 4 строки, цепляющий, одинаковый оба раза
-- [verse] — 6-8 строк, разные персонажи в каждом куплете
-- [bridge] — 4 строки, неожиданный поворот или эмоциональный пик
-- [outro] — 2-4 строки, завершение
+- [verse] — 4-5 строк, разные персонажи в каждом куплете
+- [bridge] — 2-3 строки, неожиданный поворот
+- [outro] — 2 строки, завершение
 
 ━━━ TAGS (стиль для Suno AI) ━━━
 На английском, 50-120 символов. Только жанр, темп, инструменты, вокал.
@@ -140,7 +140,7 @@ class handler(BaseHTTPRequestHandler):
 
             claude_body = json.dumps({
                 "model": "anthropic/claude-sonnet-4-20250514",
-                "max_tokens": 1200,
+                "max_tokens": 900,
                 "temperature": 0.85,
                 "system": SYSTEM_PROMPT,
                 "messages": [{
@@ -160,7 +160,7 @@ class handler(BaseHTTPRequestHandler):
                 method='POST'
             )
 
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=9) as resp:
                 claude_result = json.loads(resp.read().decode('utf-8'))
 
             raw = claude_result.get("content", [{}])[0].get("text", "").strip()
