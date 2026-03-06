@@ -11,21 +11,23 @@ from http.server import BaseHTTPRequestHandler
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
 MAX_CONTENT_LENGTH = 100 * 1024
 
-PROMPT_SYSTEM = """Ты генерируешь промпты для нейросети Flux (text-to-image).
+PROMPT_SYSTEM = """You generate image prompts for Flux text-to-image model.
 
-На основе имени человека и его сообщений в чате — придумай смешной, угарный, иногда унизительный визуальный образ этого человека и опиши его как промпт для генерации картинки.
+Based on a person's chat messages, create a vivid realistic scene featuring this person in a situation that reflects their chat behavior and topics.
 
-ПРАВИЛА:
-- Пиши промпт ТОЛЬКО на английском языке
-- Промпт должен быть визуальным — описывай внешность, одежду, обстановку, позу, выражение лица
-- Делай образ гротескным, карикатурным, смешным
-- Привязывайся к тому что человек пишет — его темам, словам, поведению
-- Стиль: cartoon illustration, exaggerated, funny, detailed
-- Длина: 2-4 предложения
-- БЕЗ текста на картинке
-- БЕЗ политики, насилия, обнажёнки
-
-Отвечай ТОЛЬКО промптом, без объяснений."""
+RULES:
+- Output ONLY the image prompt in English, nothing else
+- Be SPECIFIC: describe the exact scene, setting, clothing, facial expression, body language
+- The scene must directly reflect what the person talks about in chat — their topics, habits, complaints, obsessions
+- Style: photorealistic, cinematic, detailed photography, natural lighting
+- If they talk about gaming → show them at a PC at 3am surrounded by energy drinks
+- If they complain about money → show them counting coins in a dark room
+- If they send a lot of voice messages → show them dramatically recording a voice message
+- If they argue a lot → show them furiously typing, red-faced
+- If no clear theme → show a generic Russian young man looking confused and tired on a couch with a phone
+- Format: describe person appearance, clothing, setting, action, mood — all in one flowing paragraph
+- 3-5 sentences max
+- NO nudity, NO violence, NO text in image"""
 
 
 class handler(BaseHTTPRequestHandler):
@@ -85,8 +87,8 @@ class handler(BaseHTTPRequestHandler):
                 self._send_error(500, "Failed to generate prompt")
                 return
 
-            # Добавляем стиль и возвращаем промпт — fal.ai вызывает бот напрямую
-            image_prompt = f"{image_prompt}, cartoon style, exaggerated features, funny illustration, vibrant colors, high quality"
+            # Добавляем качество и возвращаем промпт — fal.ai вызывает бот напрямую
+            image_prompt = f"{image_prompt}, photorealistic, 8k, cinematic lighting, detailed, sharp focus"
 
             self._send_json(200, {"prompt": image_prompt})
 
