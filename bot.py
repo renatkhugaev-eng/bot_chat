@@ -4303,6 +4303,69 @@ async def _save_text_message(message: Message):
             await update_player_stats(user_id, chat_id, experience=f"+{exp_gain}", money=f"+{money_gain}")
 
 
+# Счётчики сообщений по чатам для периодических комментариев
+_chat_msg_counter: Dict[int, int] = {}
+_chat_next_threshold: Dict[int, int] = {}
+
+PERIODIC_COMMENTS = [
+    "ну и дебилы блять, я не могу ахах",
+    "вы вообще нормальные? риторический вопрос",
+    "читаю вас и тупею на глазах",
+    "боже, за что мне это",
+    "это что сейчас было вообще",
+    "я с вами с ума сойду",
+    "стоп, что. ЧТО?",
+    "нет ну серьёзно, вы это всерьёз?",
+    "ахах блять. нет. просто нет",
+    "я молчу. просто молчу и страдаю",
+    "окей. окееей. понял. всё понял про вас",
+    "чат деградирует с каждым сообщением и это факт",
+    "я устал. вы меня утомили",
+    "ну и компания блять",
+    "за что мне такой чат господи",
+    "вы специально или это само получается?",
+    "читаю и не верю глазам своим",
+    "чат 10 из 10, рекомендую всем врагам",
+    "я б помолчал но вы сами напросились",
+    "это норма для вас? это НОРМА?",
+    "ладно я понял, продолжайте позориться",
+    "смотрю на вас и думаю — а зачем",
+    "уровень iq чата падает, я это чувствую физически",
+    "вы когда-нибудь говорите что-то умное? просто интересно",
+    "блять, ну вы даёте",
+    "ору с вас тихо",
+    "нет слов. одни эмоции. плохие",
+    "продолжайте-продолжайте, я запомню это",
+    "я не злой. просто вы странные",
+    "у меня нет слов но есть разочарование",
+    "пиздец тихий творится тут",
+    "мне кажется или становится хуже? нет, становится",
+    "жалею что умею читать",
+    "вы лучшее что со мной не случалось",
+    "это клиника или чат? не пойму никак",
+]
+
+
+async def maybe_periodic_comment(message: Message):
+    """Комментарий каждые 20-30 сообщений в чате"""
+    chat_id = message.chat.id
+
+    _chat_msg_counter[chat_id] = _chat_msg_counter.get(chat_id, 0) + 1
+
+    if chat_id not in _chat_next_threshold:
+        _chat_next_threshold[chat_id] = random.randint(20, 30)
+
+    if _chat_msg_counter[chat_id] >= _chat_next_threshold[chat_id]:
+        _chat_msg_counter[chat_id] = 0
+        _chat_next_threshold[chat_id] = random.randint(20, 30)
+
+        text = random.choice(PERIODIC_COMMENTS)
+        try:
+            await message.answer(text)
+        except Exception as e:
+            logger.debug(f"Periodic comment failed: {e}")
+
+
 async def maybe_random_comment(message: Message) -> bool:
     """
     Случайный умный комментарий бота на интересное сообщение.
@@ -4378,6 +4441,9 @@ async def who_is_this_handler(message: Message):
     
     # Случайный умный комментарий на интересные сообщения (1-5% шанс)
     await maybe_random_comment(message)
+
+    # Периодический комментарий каждые 20-30 сообщений
+    await maybe_periodic_comment(message)
     
     # Сохраняем сообщение в БД (делаем это здесь, т.к. этот хэндлер ловит все текстовые)
     await _save_text_message(message)
