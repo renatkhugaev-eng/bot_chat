@@ -4476,19 +4476,24 @@ async def maybe_periodic_comment(message: Message):
     chat_id = message.chat.id
 
     _chat_msg_counter[chat_id] = _chat_msg_counter.get(chat_id, 0) + 1
+    current = _chat_msg_counter[chat_id]
 
     if chat_id not in _chat_next_threshold:
         _chat_next_threshold[chat_id] = random.randint(20, 30)
 
-    if _chat_msg_counter[chat_id] >= _chat_next_threshold[chat_id]:
+    threshold = _chat_next_threshold[chat_id]
+    logger.info(f"PERIODIC: chat={chat_id} counter={current}/{threshold}")
+
+    if current >= threshold:
         _chat_msg_counter[chat_id] = 0
         _chat_next_threshold[chat_id] = random.randint(20, 30)
 
         text = random.choice(PERIODIC_COMMENTS)
+        logger.info(f"PERIODIC COMMENT FIRING in chat {chat_id}: {text}")
         try:
             await message.answer(text)
         except Exception as e:
-            logger.debug(f"Periodic comment failed: {e}")
+            logger.warning(f"Periodic comment failed: {e}")
 
 
 async def maybe_random_comment(message: Message) -> bool:
