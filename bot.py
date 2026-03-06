@@ -2839,9 +2839,9 @@ async def cmd_music(message: Message, command: CommandObject):
         await message.answer("❌ APIFRAME_KEY не настроен")
         return
 
-    music_api_url = get_api_url("music")
-    if not music_api_url:
-        await message.answer("❌ Music API не настроен (нужна VERCEL_API_URL)")
+    ai_gateway_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
+    if not ai_gateway_key:
+        await message.answer("❌ VERCEL_AI_GATEWAY_KEY не настроен")
         return
 
     can_do, cooldown_remaining = check_cooldown(message.from_user.id, message.chat.id, "music", 120)
@@ -2920,21 +2920,102 @@ async def cmd_music(message: Message, command: CommandObject):
                     author_counts[author] = author_counts.get(author, 0) + 1
             text_msgs = balanced[:300]
 
-        # Шаг 1: генерим текст + стиль через Vercel/Claude Sonnet
+        # Шаг 1: форматируем сообщения для Claude
+        import datetime as _dt
+        lines = []
+        for m in text_msgs:
+            text = m.get("message_text") or m.get("text", "")
+            if not text:
+                continue
+            name = m.get("first_name") or m.get("username") or "Аноним"
+            ts = m.get("created_at")
+            time_tag = ""
+            if ts:
+                try:
+                    h = _dt.datetime.fromtimestamp(int(ts)).hour
+                    time_tag = "[ночь] " if h < 6 else "[утро] " if h < 12 else "[день] " if h < 18 else "[вечер] "
+                except Exception:
+                    pass
+            reply_to = m.get("reply_to_first_name")
+            reply_tag = f"→{reply_to} " if reply_to else ""
+            lines.append(f"{time_tag}{name} {reply_tag}: {text}")
+        messages_text = "\n".join(lines)[:12000]
+
+        hint_line = f"\nПожелание по стилю: {style_hint}" if style_hint else ""
+        if target_name:
+            task_line = (
+                f"Напиши трек КОНКРЕТНО ПРО {target_name} — главный герой песни. "
+                f"Используй его реальные фразы и манеру общения. Имя {target_name} должно звучать в тексте."
+            )
+        else:
+            task_line = "Создай трек по мотивам всего чата."
+
+        music_system_prompt = """Ты — профессиональный рэп-автор. Пишешь острые, живые треки по реальным перепискам телеграм-чатов.
+
+ФОРМАТ ОТВЕТА — строго валидный JSON без markdown:
+{"lyrics": "...", "tags": "...", "title": "..."}
+
+━━━ LYRICS ━━━
+Структура (теги обязательны): [verse] [chorus] [verse] [chorus] [bridge] [outro]
+Объём: 1200-2000 символов.
+
+Правила рифмовки (СТРОГО):
+- Схема AABB: каждые 2 строки рифмуются
+- Строка = 6-9 слов, одинаковая длина внутри секции
+- Хорошие рифмы: "базар — угар", "в чате — некстати"
+- Плохие рифмы: "любовь — вновь", "снова — слово" — не использовать
+- Каждый куплет — новые рифмы
+
+Содержание:
+- КОНКРЕТНО: реальные имена, цитаты фраз из переписки
+- Разговорный русский, можно мат если чат матерится
+- [chorus] — 4 строки, цепляющий, одинаковый оба раза
+- [verse] — 5-6 строк, разные персонажи
+- [bridge] — 3 строки, эмоциональный пик
+- [outro] — 2 строки
+
+━━━ TAGS ━━━
+Английский, 50-120 символов: жанр, BPM, инструменты, вокал.
+Примеры: "russian drill rap, 140 BPM, 808 bass, trap hi-hats, aggressive male vocal"
+"sad russian pop, 90 BPM, piano, strings, emotional female vocal, melancholic"
+
+Выбирай по атмосфере: конфликты→drill/trap, грусть→sad pop/emo rap, угар→hyperpop, спокойно→lo-fi, ночь→dark ambient trap
+
+━━━ TITLE ━━━
+Название трека на русском, 2-5 слов."""
+
+        # Шаг 1: генерим текст напрямую через AI Gateway (без Vercel)
         async with session.post(
-            music_api_url,
+            "https://ai-gateway.vercel.sh/v1/messages",
             json={
-                "messages": text_msgs,
-                "chat_title": message.chat.title or "Чат",
-                "style_hint": style_hint,
-                "target_name": target_name or ""
+                "model": "anthropic/claude-sonnet-4-20250514",
+                "max_tokens": 2500,
+                "temperature": 0.85,
+                "system": music_system_prompt,
+                "messages": [{"role": "user", "content": f"Чат: {message.chat.title or 'Чат'}{hint_line}\n\nСообщения:\n{messages_text}\n\n{task_line}"}]
             },
-            timeout=aiohttp.ClientTimeout(total=30)
+            headers={
+                "Authorization": f"Bearer {ai_gateway_key}",
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01"
+            },
+            timeout=aiohttp.ClientTimeout(total=60)
         ) as resp:
             if resp.status != 200:
-                await processing.edit_text(f"❌ Ошибка генерации текста: {await resp.text()}")
+                await processing.edit_text(f"❌ Ошибка генерации текста: {(await resp.text())[:200]}")
                 return
-            music_data = await resp.json()
+            claude_result = await resp.json()
+
+        raw = claude_result.get("content", [{}])[0].get("text", "").strip()
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        try:
+            music_data = json.loads(raw.strip())
+        except Exception:
+            await processing.edit_text(f"❌ Claude вернул не JSON: {raw[:200]}")
+            return
 
         lyrics = music_data.get("lyrics", "")
         tags = music_data.get("tags", "russian pop, melodic")
