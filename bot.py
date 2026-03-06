@@ -2386,23 +2386,61 @@ async def cmd_imagine(message: Message):
         except Exception:
             pass
 
+    fal_key = os.getenv("FAL_KEY", "")
+    if not fal_key:
+        await processing.edit_text("❌ FAL_KEY не настроен")
+        return
+
     try:
         metrics.track_api_call("imagine")
         session = await get_http_session()
+
+        # Шаг 1: получаем промпт от Vercel (быстро, <5с)
         async with session.post(
             imagine_url,
             json={"name": target_name, "username": target_username, "context": context},
-            timeout=aiohttp.ClientTimeout(total=90)
+            timeout=aiohttp.ClientTimeout(total=15)
         ) as resp:
             if resp.status != 200:
                 error = await resp.text()
-                await processing.edit_text(f"❌ Ошибка генерации: {error[:200]}")
+                await processing.edit_text(f"❌ Ошибка генерации промпта: {error[:200]}")
                 return
             result = await resp.json()
 
-        image_url = result.get("image_url", "")
-        if not image_url:
+        image_prompt = result.get("prompt", "")
+        if not image_prompt:
+            await processing.edit_text("❌ Промпт не сгенерировался")
+            return
+
+        await processing.edit_text(f"🖌 Рисую {clickable}...", parse_mode=ParseMode.HTML)
+
+        # Шаг 2: fal.ai Flux напрямую из бота (~5-10с)
+        async with session.post(
+            "https://fal.run/fal-ai/flux/schnell",
+            json={
+                "prompt": image_prompt,
+                "image_size": "square_hd",
+                "num_inference_steps": 4,
+                "num_images": 1,
+                "enable_safety_checker": False
+            },
+            headers={"Authorization": f"Key {fal_key}"},
+            timeout=aiohttp.ClientTimeout(total=60)
+        ) as fal_resp:
+            if fal_resp.status != 200:
+                error = await fal_resp.text()
+                await processing.edit_text(f"❌ Flux вернул ошибку: {error[:200]}")
+                return
+            fal_result = await fal_resp.json()
+
+        images = fal_result.get("images", [])
+        if not images:
             await processing.edit_text("❌ Картинка не вернулась")
+            return
+
+        image_url = images[0].get("url", "")
+        if not image_url:
+            await processing.edit_text("❌ Пустой URL картинки")
             return
 
         # Скачиваем и отправляем
@@ -2416,9 +2454,14 @@ async def cmd_imagine(message: Message):
             parse_mode=ParseMode.HTML
         )
 
+    except asyncio.TimeoutError:
+        await processing.edit_text("⏰ Нейросеть думает слишком долго, попробуй позже")
     except Exception as e:
         logger.warning(f"IMAGINE error: {e}")
-        await processing.edit_text(f"❌ Не смог нарисовать: {e}")
+        try:
+            await processing.edit_text(f"❌ Не смог нарисовать: {e}")
+        except Exception:
+            pass
 
 
 # ==================== СЖЕЧЬ ЧЕЛОВЕКА ====================

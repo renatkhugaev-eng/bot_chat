@@ -9,7 +9,6 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler
 
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
-FAL_URL = "https://fal.run/fal-ai/flux/schnell"
 MAX_CONTENT_LENGTH = 100 * 1024
 
 PROMPT_SYSTEM = """Ты генерируешь промпты для нейросети Flux (text-to-image).
@@ -50,16 +49,11 @@ class handler(BaseHTTPRequestHandler):
             context = data.get("context", "no messages")
 
             ai_key = os.environ.get("VERCEL_AI_GATEWAY_KEY", "").strip()
-            fal_key = os.environ.get("FAL_KEY", "").strip()
-
             if not ai_key:
                 self._send_error(500, "AI key not configured")
                 return
-            if not fal_key:
-                self._send_error(500, "FAL key not configured")
-                return
 
-            # Шаг 1: генерим промпт через Claude
+            # Генерим только промпт через Claude (быстро, <5с)
             display_name = f"{name} (@{username})" if username else name
             claude_body = json.dumps({
                 "model": "anthropic/claude-haiku-4-5-20251001",
@@ -83,7 +77,7 @@ class handler(BaseHTTPRequestHandler):
                 method='POST'
             )
 
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 claude_result = json.loads(resp.read().decode('utf-8'))
 
             image_prompt = claude_result.get("content", [{}])[0].get("text", "").strip()
@@ -91,45 +85,10 @@ class handler(BaseHTTPRequestHandler):
                 self._send_error(500, "Failed to generate prompt")
                 return
 
-            # Добавляем стиль
+            # Добавляем стиль и возвращаем промпт — fal.ai вызывает бот напрямую
             image_prompt = f"{image_prompt}, cartoon style, exaggerated features, funny illustration, vibrant colors, high quality"
 
-            # Шаг 2: рисуем через Flux
-            fal_body = json.dumps({
-                "prompt": image_prompt,
-                "image_size": "square_hd",
-                "num_inference_steps": 4,
-                "num_images": 1,
-                "enable_safety_checker": False
-            }).encode('utf-8')
-
-            fal_req = urllib.request.Request(
-                FAL_URL,
-                data=fal_body,
-                headers={
-                    'Content-Type': 'application/json',
-                    'Authorization': f'Key {fal_key}'
-                },
-                method='POST'
-            )
-
-            with urllib.request.urlopen(fal_req, timeout=60) as fal_resp:
-                fal_result = json.loads(fal_resp.read().decode('utf-8'))
-
-            images = fal_result.get("images", [])
-            if not images:
-                self._send_error(500, "No image returned from Flux")
-                return
-
-            image_url = images[0].get("url", "")
-            if not image_url:
-                self._send_error(500, "Empty image URL")
-                return
-
-            self._send_json(200, {
-                "image_url": image_url,
-                "prompt": image_prompt
-            })
+            self._send_json(200, {"prompt": image_prompt})
 
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8') if e.fp else str(e)
