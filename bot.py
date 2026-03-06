@@ -2827,7 +2827,7 @@ async def cmd_enhance(message: Message):
 # ==================== МУЗЫКА (TEXT-TO-MUSIC) ====================
 
 @router.message(Command("музыка", "music", "трек", "track", "песня"))
-async def cmd_music(message: Message):
+async def cmd_music(message: Message, command: CommandObject):
     """Генерировать трек на основе сообщений чата через MiniMax Music"""
     if message.chat.type == "private":
         await message.answer("Команда работает только в групповых чатах")
@@ -2848,7 +2848,11 @@ async def cmd_music(message: Message):
         await message.answer(f"⏳ Подожди ещё {cooldown_remaining:.0f} сек")
         return
 
-    processing = await message.answer("🎵 Слушаю ваш чат и пишу трек...")
+    # Опциональный стиль от пользователя: /музыка рэп  или  /музыка грустный
+    style_hint = (command.args or "").strip()
+
+    hint_text = f" в стиле <b>{style_hint}</b>" if style_hint else ""
+    processing = await message.answer(f"🎵 Слушаю ваш чат и пишу трек{hint_text}...", parse_mode=ParseMode.HTML)
 
     try:
         # Берём последние сообщения из БД
@@ -2868,14 +2872,15 @@ async def cmd_music(message: Message):
 
         session = await get_http_session()
 
-        # Шаг 1: генерим текст песни через Vercel/Claude
+        # Шаг 1: генерим текст + стиль через Vercel/Claude Sonnet
         async with session.post(
             music_api_url,
             json={
                 "messages": text_msgs,
-                "chat_title": message.chat.title or "Чат"
+                "chat_title": message.chat.title or "Чат",
+                "style_hint": style_hint
             },
-            timeout=aiohttp.ClientTimeout(total=20)
+            timeout=aiohttp.ClientTimeout(total=30)
         ) as resp:
             if resp.status != 200:
                 await processing.edit_text(f"❌ Ошибка генерации текста: {await resp.text()}")
