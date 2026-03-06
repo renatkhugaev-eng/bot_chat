@@ -2863,8 +2863,8 @@ async def cmd_music(message: Message):
             cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
             return
 
-        # Берём до 80 последних текстовых сообщений
-        text_msgs = [m for m in recent if m.get("message_text")][-80:]
+        # Берём все текстовые сообщения (БД отдаёт до 300)
+        text_msgs = [m for m in recent if m.get("message_text")]
 
         session = await get_http_session()
 

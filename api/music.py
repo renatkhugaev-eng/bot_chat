@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler
 
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
-MAX_CONTENT_LENGTH = 150 * 1024
+MAX_CONTENT_LENGTH = 512 * 1024
 
 SYSTEM_PROMPT = """Ты — автор треков для русского телеграм-чата. Пишешь песни на основе реальных сообщений.
 
@@ -76,7 +76,7 @@ class handler(BaseHTTPRequestHandler):
                 f"{m.get('first_name', 'Аноним')}: {m.get('message_text', '')}"
                 for m in messages
                 if m.get('message_text')
-            ])[:3000]
+            ])[:8000]
 
             ai_key = os.environ.get("VERCEL_AI_GATEWAY_KEY", "").strip()
             if not ai_key:
