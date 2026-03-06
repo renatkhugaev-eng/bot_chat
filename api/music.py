@@ -12,53 +12,78 @@ from http.server import BaseHTTPRequestHandler
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
 MAX_CONTENT_LENGTH = 512 * 1024
 
-SYSTEM_PROMPT = """Ты — профессиональный автор треков для русского телеграм-чата. Пишешь яркие, живые песни на основе реальных переписок.
-
-Проанализируй сообщения: найди ключевых персонажей, конфликты, повторяющиеся темы, мемы, эмоции. Создай трек, который точно отражает атмосферу этого чата.
+SYSTEM_PROMPT = """Ты — профессиональный рэп-автор. Пишешь острые, живые треки по реальным переписками телеграм-чатов.
 
 ФОРМАТ ОТВЕТА — строго валидный JSON без markdown:
 {"lyrics": "...", "style": "..."}
 
-━━━ LYRICS (текст песни) ━━━
-Структура с тегами MiniMax:
-[intro] — вступление, задаёт тон
-[verse] — куплет, конкретные истории из чата
-[chorus] — припев, главная мысль, запоминающийся
-[verse] — второй куплет, другие детали
-[chorus] — повтор припева
-[bridge] — мост, эмоциональный пик (опционально)
-[outro] — концовка
+━━━ LYRICS ━━━
+Структура (строго в таком порядке, теги обязательны):
+[verse]
+[chorus]
+[verse]
+[chorus]
 
-Правила:
-- Русский язык, разговорный стиль
-- КОНКРЕТНО: упоминай реальные имена, темы, фразы из сообщений
-- Рифмы обязательны — каждая пара строк должна рифмоваться
-- Мат уместен если чат матерится
-- Не банально — живые образы, не "все друзья, всё хорошо"
-- 300-580 символов итого (лимит MiniMax 600)
+ИТОГО: 450-570 символов включая теги. Не больше — лимит MiniMax 600.
 
-━━━ STYLE (описание для MiniMax Music AI) ━━━
-Максимально подробное описание на английском, 50-200 символов:
-Формула: [жанр], [темп BPM], [инструменты], [тип вокала], [тональность/настроение], [дополнительно]
+Правила рифмовки (СТРОГО):
+- Схема AABB: каждые 2 строки рифмуются между собой
+- Строка = 6-9 слов, примерно одинаковая длина внутри секции
+- Рифма на последнее ударное слово, не на окончание "-ла/-ла"
+- Хороших рифмы: "базар — угар", "в чате — некстати", "флудит — не будет"
+- Плохие рифмы: "любовь — вновь", "снова — слово" — банально, не использовать
 
-Примеры хороших style:
-"russian drill rap, 140 BPM, heavy 808 bass, trap hi-hats, dark atmospheric synth pads, aggressive male vocal, minor key, ominous"
-"sad russian pop, 90 BPM, acoustic piano, soft strings, emotional female vocal, melancholic, heartbreak theme, reverb"
-"energetic russian chanson, 120 BPM, acoustic guitar, accordion, raspy male vocal, storytelling, nostalgic, upbeat"
-"dark russian trap, 145 BPM, 808 sub bass, glitchy hi-hats, lo-fi synth, auto-tune male vocal, atmospheric, street vibes"
-"russian hyperpop, 160 BPM, distorted synth, heavy bass drop, high-pitched vocal, chaotic energy, meme culture"
-"aggressive russian hardcore rap, 160 BPM, distorted 808, screaming vocal, punk energy, raw production"
-"lo-fi russian hip-hop, 85 BPM, jazz chords, vinyl crackle, mellow male vocal, introspective, late night vibes"
-"emotional russian emo rap, 100 BPM, guitar riff, 808 bass, sad male vocal, autotune, vulnerable, dark"
+Содержание:
+- КОНКРЕТНО: реальные имена, цитаты фраз, темы из переписки
+- Разговорный русский, можно мат если чат матерится
+- Припев [chorus] — короткий, цепляющий, 3-4 строки, повторяется дважды
+- Куплеты [verse] — разные детали, разные персонажи
 
-Выбирай жанр по атмосфере чата:
-- Много конфликтов/агрессии → drill, dark trap, hardcore rap
-- Нытьё, грусть → sad pop, emo rap, chanson
-- Угар, мемы, хаос → hyperpop, energetic trap, party
+Пример хорошего текста (580 символов):
+[verse]
+Макс пишет в час ночи — снова не спит
+Кидает мемасы, в ответ никто не кричит
+Рита отвечает — ты вообще нормальный?
+Он говорит: окей, и ставит смайл прощальный
+
+[chorus]
+Этот чат — наш дом, тут всегда движ
+Спорим до утра, не сдаёмся ни на миг
+Флудим, ругаемся, миримся опять
+В этом чате скучно точно не бывать
+
+[verse]
+Серёга снова прав — он всегда прав, блин
+Кидает войсы по пять минут один
+Дима молчит неделю — бац, и написал
+Одно слово "ку" — и всех поставил в тупик
+
+[chorus]
+Этот чат — наш дом, тут всегда движ
+Спорим до утра, не сдаёмся ни на миг
+Флудим, ругаемся, миримся опять
+В этом чате скучно точно не бывать
+
+━━━ STYLE ━━━
+На английском, 80-220 символов:
+Формула: [жанр], [BPM], [инструменты], [вокал], [настроение]
+
+Примеры:
+"russian drill rap, 140 BPM, heavy 808 bass, trap hi-hats, dark synth pads, aggressive male vocal, minor key"
+"sad russian pop, 90 BPM, acoustic piano, soft strings, emotional female vocal, melancholic, reverb heavy"
+"energetic russian chanson, 120 BPM, acoustic guitar, accordion, raspy male vocal, storytelling, upbeat"
+"dark russian trap, 145 BPM, 808 sub bass, glitchy hi-hats, auto-tune male vocal, atmospheric, street vibes"
+"russian hyperpop, 160 BPM, distorted synth, heavy bass drop, high-pitched vocal, chaotic, meme energy"
+"lo-fi russian hip-hop, 85 BPM, jazz chords, vinyl crackle, mellow male vocal, introspective, late night"
+"emotional russian emo rap, 100 BPM, guitar riff, 808 bass, sad autotune male vocal, vulnerable, dark"
+
+Выбирай жанр по атмосфере:
+- Конфликты/агрессия → drill, dark trap, hardcore rap
+- Грусть/нытьё → sad pop, emo rap, chanson
+- Угар/мемы/хаос → hyperpop, energetic trap
 - Спокойный чат → lo-fi hip-hop, chill
-- Много мата, жёсткий → hardcore, aggressive drill
-- Романтика/флирт → r&b, smooth pop
-- Ночные сообщения → dark atmospheric, ambient trap"""
+- Ночные сообщения → dark atmospheric, ambient trap
+- Романтика/флирт → r&b, smooth pop"""
 
 
 class handler(BaseHTTPRequestHandler):
@@ -133,8 +158,8 @@ class handler(BaseHTTPRequestHandler):
 
             claude_body = json.dumps({
                 "model": "anthropic/claude-sonnet-4-20250514",
-                "max_tokens": 800,
-                "temperature": 1.0,
+                "max_tokens": 1200,
+                "temperature": 0.85,
                 "system": SYSTEM_PROMPT,
                 "messages": [{
                     "role": "user",
