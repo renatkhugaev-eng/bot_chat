@@ -2898,19 +2898,30 @@ async def cmd_music(message: Message, command: CommandObject):
                 cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
                 return
         else:
-            # Режим чата — берём последние сообщения чата
-            stats = await get_chat_statistics(message.chat.id, hours=5)
+            # Режим чата — берём сообщения за 24ч с равномерной выборкой по авторам
+            stats = await get_chat_statistics(message.chat.id, hours=24)
             recent = stats.get("recent_messages", [])
 
             if len(recent) < 5:
                 await processing.edit_text(
-                    "📭 Слишком мало сообщений за последние 5 часов — не о чём петь!\n"
+                    "📭 Слишком мало сообщений за последние 24 часа — не о чём петь!\n"
                     "Напишите хоть что-нибудь сначала."
                 )
                 cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
                 return
 
-            text_msgs = [m for m in recent if m.get("message_text")]
+            # Равномерная выборка: не более 15 сообщений на автора,
+            # чтобы флудеры не доминировали в тексте трека
+            author_counts: dict = {}
+            balanced = []
+            for m in recent:
+                if not m.get("message_text"):
+                    continue
+                author = m.get("first_name") or m.get("username") or "?"
+                if author_counts.get(author, 0) < 15:
+                    balanced.append(m)
+                    author_counts[author] = author_counts.get(author, 0) + 1
+            text_msgs = balanced[:250]
 
         # Шаг 1: генерим текст + стиль через Vercel/Claude Sonnet
         async with session.post(
