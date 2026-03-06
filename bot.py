@@ -3271,9 +3271,22 @@ async def cmd_podcast(message: Message, command: CommandObject):
                     )
                 )
             )
-            pcm_data = response.candidates[0].content.parts[0].inline_data.data
+            raw = response.candidates[0].content.parts[0].inline_data.data
 
-            # PCM → WAV в памяти
+            # inline_data.data может быть base64-строкой или bytes — декодируем
+            import base64 as _b64
+            if isinstance(raw, str):
+                pcm_data = _b64.b64decode(raw)
+            elif isinstance(raw, bytes):
+                # Проверяем: вдруг это всё же base64 в bytes
+                try:
+                    pcm_data = _b64.b64decode(raw)
+                except Exception:
+                    pcm_data = raw
+            else:
+                pcm_data = bytes(raw)
+
+            # PCM → WAV в памяти (24kHz, 16-bit, mono)
             buf = _io.BytesIO()
             with _wave.open(buf, "wb") as wf:
                 wf.setnchannels(1)
