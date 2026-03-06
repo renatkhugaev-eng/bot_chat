@@ -7700,7 +7700,7 @@ async def scheduled_auto_summaries():
                     async with session.post(
                         VERCEL_API_URL,
                         json={
-                            "messages": stats.get('sample_messages', [])[:100],
+                            "messages": stats.get('recent_messages', [])[:100],
                             "stats": {
                                 "total_messages": stats.get('total_messages', 0),
                                 "unique_users": stats.get('unique_users', 0),

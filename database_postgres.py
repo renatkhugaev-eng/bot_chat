@@ -1249,8 +1249,16 @@ async def get_chat_statistics(chat_id: int, hours: int = 5) -> Dict[str, Any]:
             LIMIT 300
         """, chat_id, since_time)
 
+        # Уникальные пользователи за период
+        uniq_row = await conn.fetchrow("""
+            SELECT COUNT(DISTINCT user_id) as unique_users
+            FROM chat_messages WHERE chat_id = $1 AND created_at >= $2
+        """, chat_id, since_time)
+        unique_users = uniq_row['unique_users'] if uniq_row else 0
+
         return {
             "total_messages": total_messages,
+            "unique_users": unique_users,
             "top_authors": [dict(row) for row in top_authors],
             "message_types": message_types,
             "reply_pairs": [dict(row) for row in reply_pairs],
