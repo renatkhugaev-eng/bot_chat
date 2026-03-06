@@ -4559,6 +4559,7 @@ async def maybe_random_comment(message: Message) -> bool:
 @router.message(F.text, ~F.text.startswith("/"))
 async def who_is_this_handler(message: Message):
     """Обработчик 'это кто?' с реплаем или упоминанием + общая обработка текста"""
+    logger.info(f"TEXT_HANDLER: chat={message.chat.id} type={message.chat.type} text={repr(message.text[:30])}")
     if message.chat.type == "private":
         return
     
