@@ -2514,7 +2514,7 @@ async def cmd_video(message: Message, command: CommandObject):
         fal_headers = {"Authorization": f"Key {fal_key}", "Content-Type": "application/json"}
 
         if target_user:
-            # Получаем контекст человека и генерим промпт через Vercel
+            # Получаем контекст человека
             context = ""
             if USE_POSTGRES:
                 try:
@@ -2524,22 +2524,35 @@ async def cmd_video(message: Message, command: CommandObject):
                 except Exception:
                     pass
 
-            video_api_url = get_api_url("video")
-            if not video_api_url:
-                await processing.edit_text("❌ Video API не настроен (нужна VERCEL_API_URL)")
+            ai_gateway_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
+            if not ai_gateway_key:
+                await processing.edit_text("❌ VERCEL_AI_GATEWAY_KEY не настроен")
                 return
 
             async with session.post(
-                video_api_url,
-                json={"name": target_name, "username": target_user.username or "", "context": context},
-                timeout=aiohttp.ClientTimeout(total=15)
+                "https://ai-gateway.vercel.sh/v1/messages",
+                json={
+                    "model": "anthropic/claude-haiku-4-20250514",
+                    "max_tokens": 200,
+                    "messages": [{"role": "user", "content": (
+                        f"Based on this person's messages, write a short cinematic video prompt in English for Kling AI. "
+                        f"Describe a vivid scene that captures their personality. Max 80 words, no quotes.\n\n"
+                        f"Person: {target_name}\nMessages:\n{context}"
+                    )}]
+                },
+                headers={
+                    "Authorization": f"Bearer {ai_gateway_key}",
+                    "Content-Type": "application/json",
+                    "anthropic-version": "2023-06-01"
+                },
+                timeout=aiohttp.ClientTimeout(total=20)
             ) as resp:
                 if resp.status != 200:
-                    await processing.edit_text(f"❌ Ошибка генерации промпта: {await resp.text()}")
+                    await processing.edit_text(f"❌ Ошибка генерации промпта: {(await resp.text())[:200]}")
                     return
                 result = await resp.json()
 
-            video_prompt = result.get("prompt", "")
+            video_prompt = result.get("content", [{}])[0].get("text", "").strip()
             if not video_prompt:
                 await processing.edit_text("❌ Промпт не сгенерировался")
                 return
