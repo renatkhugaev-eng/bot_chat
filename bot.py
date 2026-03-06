@@ -2547,10 +2547,16 @@ async def cmd_video(message: Message, command: CommandObject):
                 },
                 timeout=aiohttp.ClientTimeout(total=20)
             ) as resp:
+                raw_text = await resp.text()
+                logger.info(f"VIDEO prompt API status={resp.status} body={raw_text[:300]}")
                 if resp.status != 200:
-                    await processing.edit_text(f"❌ Ошибка генерации промпта: {(await resp.text())[:200]}")
+                    await processing.edit_text(f"❌ Ошибка генерации промпта ({resp.status}): {raw_text[:200]}")
                     return
-                result = await resp.json()
+                try:
+                    result = json.loads(raw_text)
+                except Exception:
+                    await processing.edit_text(f"❌ Не JSON от Gateway: {raw_text[:200]}")
+                    return
 
             video_prompt = result.get("content", [{}])[0].get("text", "").strip()
             if not video_prompt:
