@@ -12,70 +12,49 @@ from http.server import BaseHTTPRequestHandler
 AI_GATEWAY_URL = "https://ai-gateway.vercel.sh/v1/messages"
 MAX_CONTENT_LENGTH = 512 * 1024
 
-SYSTEM_PROMPT = """Ты — профессиональный рэп-автор. Пишешь острые, живые треки по реальным переписками телеграм-чатов.
+SYSTEM_PROMPT = """Ты — профессиональный рэп-автор. Пишешь острые, живые треки по реальным перепискам телеграм-чатов.
 
 ФОРМАТ ОТВЕТА — строго валидный JSON без markdown:
-{"lyrics": "...", "style": "..."}
+{"lyrics": "...", "tags": "...", "title": "..."}
 
-━━━ LYRICS ━━━
-Структура (строго в таком порядке, теги обязательны):
+━━━ LYRICS (текст песни) ━━━
+Полноценная структура — теги обязательны:
 [verse]
 [chorus]
 [verse]
 [chorus]
+[bridge]
+[outro]
 
-ИТОГО: 450-570 символов включая теги. Не больше — лимит MiniMax 600.
+Объём: 1500-2500 символов. Это полноценная 2-3 минутная песня.
 
 Правила рифмовки (СТРОГО):
 - Схема AABB: каждые 2 строки рифмуются между собой
-- Строка = 6-9 слов, примерно одинаковая длина внутри секции
-- Рифма на последнее ударное слово, не на окончание "-ла/-ла"
-- Хороших рифмы: "базар — угар", "в чате — некстати", "флудит — не будет"
+- Строка = 6-9 слов, одинаковая длина внутри секции
+- Рифма на последнее ударное слово
+- Хорошие рифмы: "базар — угар", "в чате — некстати", "приколы — глаголы"
 - Плохие рифмы: "любовь — вновь", "снова — слово" — банально, не использовать
+- Каждый куплет — НОВЫЕ рифмы, не повторять из предыдущего
 
 Содержание:
 - КОНКРЕТНО: реальные имена, цитаты фраз, темы из переписки
 - Разговорный русский, можно мат если чат матерится
-- Припев [chorus] — короткий, цепляющий, 3-4 строки, повторяется дважды
-- Куплеты [verse] — разные детали, разные персонажи
+- [chorus] — 4 строки, цепляющий, одинаковый оба раза
+- [verse] — 6-8 строк, разные персонажи в каждом куплете
+- [bridge] — 4 строки, неожиданный поворот или эмоциональный пик
+- [outro] — 2-4 строки, завершение
 
-Пример хорошего текста (580 символов):
-[verse]
-Макс пишет в час ночи — снова не спит
-Кидает мемасы, в ответ никто не кричит
-Рита отвечает — ты вообще нормальный?
-Он говорит: окей, и ставит смайл прощальный
-
-[chorus]
-Этот чат — наш дом, тут всегда движ
-Спорим до утра, не сдаёмся ни на миг
-Флудим, ругаемся, миримся опять
-В этом чате скучно точно не бывать
-
-[verse]
-Серёга снова прав — он всегда прав, блин
-Кидает войсы по пять минут один
-Дима молчит неделю — бац, и написал
-Одно слово "ку" — и всех поставил в тупик
-
-[chorus]
-Этот чат — наш дом, тут всегда движ
-Спорим до утра, не сдаёмся ни на миг
-Флудим, ругаемся, миримся опять
-В этом чате скучно точно не бывать
-
-━━━ STYLE ━━━
-На английском, 80-220 символов:
-Формула: [жанр], [BPM], [инструменты], [вокал], [настроение]
+━━━ TAGS (стиль для Suno AI) ━━━
+На английском, 50-120 символов. Только жанр, темп, инструменты, вокал.
 
 Примеры:
-"russian drill rap, 140 BPM, heavy 808 bass, trap hi-hats, dark synth pads, aggressive male vocal, minor key"
-"sad russian pop, 90 BPM, acoustic piano, soft strings, emotional female vocal, melancholic, reverb heavy"
-"energetic russian chanson, 120 BPM, acoustic guitar, accordion, raspy male vocal, storytelling, upbeat"
-"dark russian trap, 145 BPM, 808 sub bass, glitchy hi-hats, auto-tune male vocal, atmospheric, street vibes"
-"russian hyperpop, 160 BPM, distorted synth, heavy bass drop, high-pitched vocal, chaotic, meme energy"
-"lo-fi russian hip-hop, 85 BPM, jazz chords, vinyl crackle, mellow male vocal, introspective, late night"
-"emotional russian emo rap, 100 BPM, guitar riff, 808 bass, sad autotune male vocal, vulnerable, dark"
+"russian drill rap, 140 BPM, 808 bass, trap hi-hats, dark synth, aggressive male vocal"
+"sad russian pop, 90 BPM, piano, soft strings, emotional female vocal, melancholic"
+"russian chanson, 120 BPM, acoustic guitar, accordion, raspy male vocal, storytelling"
+"dark russian trap, 145 BPM, 808 sub bass, auto-tune male vocal, atmospheric"
+"russian hyperpop, 160 BPM, distorted synth, high-pitched vocal, chaotic, meme energy"
+"lo-fi russian hip-hop, 85 BPM, jazz chords, vinyl crackle, mellow male vocal"
+"russian emo rap, 100 BPM, guitar riff, 808 bass, sad autotune male vocal"
 
 Выбирай жанр по атмосфере:
 - Конфликты/агрессия → drill, dark trap, hardcore rap
@@ -83,7 +62,10 @@ SYSTEM_PROMPT = """Ты — профессиональный рэп-автор. 
 - Угар/мемы/хаос → hyperpop, energetic trap
 - Спокойный чат → lo-fi hip-hop, chill
 - Ночные сообщения → dark atmospheric, ambient trap
-- Романтика/флирт → r&b, smooth pop"""
+- Романтика/флирт → r&b, smooth pop
+
+━━━ TITLE ━━━
+Короткое цепляющее название трека на русском, 2-5 слов."""
 
 
 class handler(BaseHTTPRequestHandler):
@@ -191,7 +173,8 @@ class handler(BaseHTTPRequestHandler):
                         raw = raw[4:]
                 result = json.loads(raw.strip())
                 lyrics = result.get("lyrics", "").strip()
-                style = result.get("style", "russian pop, melodic, 100 BPM").strip()
+                tags = result.get("tags", "russian pop, 100 BPM, melodic vocal").strip()
+                title = result.get("title", "Трек чата").strip()
             except (json.JSONDecodeError, IndexError):
                 self._send_error(500, f"Failed to parse Claude response: {raw[:200]}")
                 return
@@ -200,11 +183,10 @@ class handler(BaseHTTPRequestHandler):
                 self._send_error(500, "Empty lyrics")
                 return
 
-            # Лимит MiniMax: lyrics 600 символов, style 3000
-            lyrics = lyrics[:580]
-            style = style[:500]
+            # Suno: lyrics без жёсткого лимита, tags до 120 символов
+            tags = tags[:120]
 
-            self._send_json(200, {"lyrics": lyrics, "style": style})
+            self._send_json(200, {"lyrics": lyrics, "tags": tags, "title": title})
 
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8') if e.fp else str(e)

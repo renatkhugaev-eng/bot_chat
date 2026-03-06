@@ -2834,9 +2834,9 @@ async def cmd_music(message: Message, command: CommandObject):
         await message.answer("Команда работает только в групповых чатах")
         return
 
-    fal_key = os.getenv("FAL_KEY", "")
-    if not fal_key:
-        await message.answer("❌ FAL_KEY не настроен")
+    apiframe_key = os.getenv("APIFRAME_KEY", "")
+    if not apiframe_key:
+        await message.answer("❌ APIFRAME_KEY не настроен")
         return
 
     music_api_url = get_api_url("music")
@@ -2876,7 +2876,6 @@ async def cmd_music(message: Message, command: CommandObject):
     try:
         session = await get_http_session()
         text_msgs = []
-        stats = {}
 
         if target_user:
             # Режим персонального трека — берём сообщения конкретного человека
@@ -2938,66 +2937,92 @@ async def cmd_music(message: Message, command: CommandObject):
             music_data = await resp.json()
 
         lyrics = music_data.get("lyrics", "")
-        style = music_data.get("style", "russian pop, melodic")
+        tags = music_data.get("tags", "russian pop, melodic")
+        song_title = music_data.get("title", "Трек чата")
 
         if not lyrics:
             await processing.edit_text("❌ Не смог сочинить текст")
             return
 
         await processing.edit_text(
-            f"🎼 Текст готов, записываю трек...\n\n<i>Стиль: {style}</i>",
+            f"🎼 Текст готов, записываю трек...\n\n<i>{song_title} • {tags}</i>",
             parse_mode=ParseMode.HTML
         )
 
-        # Шаг 2: генерим музыку через MiniMax Music на fal.ai
-        fal_headers = {"Authorization": f"Key {fal_key}", "Content-Type": "application/json"}
+        # Шаг 2: генерим музыку через Suno на apiframe.ai
+        suno_headers = {
+            "Authorization": f"Bearer {apiframe_key}",
+            "Content-Type": "application/json"
+        }
 
         async with session.post(
-            "https://fal.run/fal-ai/minimax-music/v1.5",
+            "https://api.apiframe.pro/suno-imagine",
             json={
-                "prompt": lyrics,
-                "lyrics_prompt": style,
-                "audio_setting": {"sample_rate": 44100, "bitrate": 256000, "format": "mp3"}
+                "lyrics": lyrics,
+                "tags": tags,
+                "title": song_title,
+                "model": "chirp-v4"
             },
-            headers=fal_headers,
-            timeout=aiohttp.ClientTimeout(total=120)
-        ) as fal_resp:
-            if fal_resp.status != 200:
-                await processing.edit_text(f"❌ MiniMax Music ошибка: {(await fal_resp.text())[:200]}")
+            headers=suno_headers,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as suno_resp:
+            if suno_resp.status != 200:
+                await processing.edit_text(f"❌ Suno ошибка: {(await suno_resp.text())[:200]}")
                 return
-            fal_result = await fal_resp.json()
+            suno_result = await suno_resp.json()
 
-        audio_url = fal_result.get("audio", {}).get("url", "")
-        if not audio_url:
-            await processing.edit_text("❌ Пустой URL аудио")
+        task_id = suno_result.get("task_id", "")
+        if not task_id:
+            await processing.edit_text("❌ Suno не вернул task_id")
             return
 
-        async with session.get(audio_url, timeout=aiohttp.ClientTimeout(total=30)) as audio_resp:
+        # Шаг 3: полинг статуса (до 5 минут, каждые 8 сек)
+        audio_url = ""
+        for _ in range(38):
+            await asyncio.sleep(8)
+            async with session.post(
+                "https://api.apiframe.pro/fetch",
+                json={"task_id": task_id},
+                headers=suno_headers,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as fetch_resp:
+                if fetch_resp.status != 200:
+                    continue
+                fetch_data = await fetch_resp.json()
+
+            status = fetch_data.get("status", "")
+            if status == "finished":
+                songs = fetch_data.get("songs", [])
+                if songs:
+                    audio_url = songs[0].get("audio_url", "")
+                break
+
+        if not audio_url:
+            await processing.edit_text("⏰ Suno думает слишком долго, попробуй позже")
+            return
+
+        async with session.get(audio_url, timeout=aiohttp.ClientTimeout(total=60)) as audio_resp:
             audio_data = await audio_resp.read()
 
         await processing.delete()
 
         if target_user:
             caption = f"🎵 Трек про {clickable}"
-            title = f"{target_name} — AI Portrait"
             performer = target_name
         else:
-            top = stats.get("top_authors", [])[:3]
-            top_names = ", ".join(a.get("first_name", "Аноним") for a in top) if top else ""
-            caption = f"🎵 Трек по мотивам этого чата\n🎤 Starring: {top_names}" if top_names else "🎵 Трек по мотивам этого чата"
-            title = f"Трек чата — {message.chat.title or 'Беспредел'}"
-            performer = "AI x fal.ai"
+            caption = f"🎵 {song_title}"
+            performer = "AI x Suno"
 
         await message.answer_audio(
             BufferedInputFile(audio_data, filename="track.mp3"),
             caption=caption,
-            title=title,
+            title=song_title,
             performer=performer,
             parse_mode=ParseMode.HTML if target_user else None
         )
 
     except asyncio.TimeoutError:
-        await processing.edit_text("⏰ MiniMax думает слишком долго, попробуй позже")
+        await processing.edit_text("⏰ Suno думает слишком долго, попробуй позже")
     except Exception as e:
         logger.warning(f"MUSIC error: {e}")
         try:
