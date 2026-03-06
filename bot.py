@@ -2464,6 +2464,371 @@ async def cmd_imagine(message: Message):
             pass
 
 
+# ==================== ВИДЕО (TEXT-TO-VIDEO) ====================
+
+@router.message(Command("видео", "video", "клип", "снять"))
+async def cmd_video(message: Message):
+    """Снять видео через Kling AI — /видео описание или реплай на человека"""
+    if message.chat.type == "private":
+        await message.answer("Команда работает только в групповых чатах")
+        return
+
+    fal_key = os.getenv("FAL_KEY", "")
+    if not fal_key:
+        await message.answer("❌ FAL_KEY не настроен")
+        return
+
+    can_do, cooldown_remaining = check_cooldown(message.from_user.id, message.chat.id, "video", 300)
+    if not can_do:
+        await message.answer(f"⏳ Подожди ещё {cooldown_remaining:.0f} сек (видео — дорогая штука)")
+        return
+
+    # Извлекаем текст после команды
+    command_text = message.text or ""
+    custom_prompt = ""
+    for cmd in ["/видео", "/video", "/клип", "/снять"]:
+        if command_text.lower().startswith(cmd):
+            custom_prompt = command_text[len(cmd):].strip()
+            break
+
+    # Режим: видео-портрет человека (реплай без кастомного текста)
+    target_user = None
+    target_name = None
+    clickable = None
+    if message.reply_to_message and message.reply_to_message.from_user and not custom_prompt:
+        target_user = message.reply_to_message.from_user
+        target_name = target_user.first_name or target_user.username or "Аноним"
+        clickable = f'<a href="tg://user?id={target_user.id}">{target_name}</a>'
+
+    if not custom_prompt and not target_user:
+        await message.answer(
+            "🎬 <b>Как использовать:</b>\n"
+            "<code>/видео описание сцены</code> — снять видео по описанию\n"
+            "Или ответь на сообщение человека — снимем видео-портрет\n\n"
+            "Примеры: <code>/видео закат над морем, волны бьются о скалы</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    processing = await message.answer("🎬 Готовлю сцену...")
+
+    video_prompt = ""
+    try:
+        session = await get_http_session()
+        fal_headers = {"Authorization": f"Key {fal_key}", "Content-Type": "application/json"}
+
+        if target_user:
+            # Получаем контекст человека и генерим промпт через Vercel
+            context = ""
+            if USE_POSTGRES:
+                try:
+                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=30)
+                    if user_msgs:
+                        context = "\n".join([m.get("text", "") for m in user_msgs if m.get("text")])[:2000]
+                except Exception:
+                    pass
+
+            video_api_url = get_api_url("video")
+            if not video_api_url:
+                await processing.edit_text("❌ Video API не настроен (нужна VERCEL_API_URL)")
+                return
+
+            async with session.post(
+                video_api_url,
+                json={"name": target_name, "username": target_user.username or "", "context": context},
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status != 200:
+                    await processing.edit_text(f"❌ Ошибка генерации промпта: {await resp.text()}")
+                    return
+                result = await resp.json()
+
+            video_prompt = result.get("prompt", "")
+            if not video_prompt:
+                await processing.edit_text("❌ Промпт не сгенерировался")
+                return
+
+            await processing.edit_text(f"🎬 Снимаю {clickable}...", parse_mode=ParseMode.HTML)
+        else:
+            video_prompt = custom_prompt
+            await processing.edit_text("🎬 Снимаю...")
+
+        # Kling 2.1 standard через queue
+        kling_endpoint = "fal-ai/kling-video/v2.1/standard/text-to-video"
+        async with session.post(
+            f"https://queue.fal.run/{kling_endpoint}",
+            json={"prompt": video_prompt, "duration": "5", "aspect_ratio": "16:9"},
+            headers=fal_headers,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as resp:
+            if resp.status not in (200, 201):
+                await processing.edit_text(f"❌ Kling ошибка: {(await resp.text())[:200]}")
+                return
+            submit_result = await resp.json()
+
+        request_id = submit_result.get("request_id")
+        if not request_id:
+            await processing.edit_text("❌ Не получил request_id от Kling")
+            return
+
+        # Polling — Kling генерирует ~60-90 секунд
+        for attempt in range(36):  # max 3 минуты
+            await asyncio.sleep(5)
+            async with session.get(
+                f"https://queue.fal.run/{kling_endpoint}/requests/{request_id}/status",
+                headers=fal_headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                status_data = await resp.json()
+
+            status = status_data.get("status", "")
+            if status == "COMPLETED":
+                break
+            elif status in ("FAILED", "CANCELLED"):
+                await processing.edit_text(f"❌ Генерация провалилась: {status}")
+                return
+            if attempt % 4 == 0:
+                eta = max(0, (36 - attempt) * 5)
+                try:
+                    await processing.edit_text(f"🎬 Рендерим... (~{eta}с)")
+                except Exception:
+                    pass
+        else:
+            await processing.edit_text("⏰ Kling думает слишком долго, попробуй позже")
+            return
+
+        # Получаем результат
+        async with session.get(
+            f"https://queue.fal.run/{kling_endpoint}/requests/{request_id}",
+            headers=fal_headers,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            video_result = await resp.json()
+
+        video_url = video_result.get("video", {}).get("url", "")
+        if not video_url:
+            await processing.edit_text("❌ Пустой URL видео")
+            return
+
+        async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=60)) as vid_resp:
+            vid_data = await vid_resp.read()
+
+        await processing.delete()
+        caption = f"🎬 Видео-портрет {clickable}" if target_user else "🎬 Готово"
+        await message.answer_video(
+            BufferedInputFile(vid_data, filename="video.mp4"),
+            caption=caption,
+            parse_mode=ParseMode.HTML if target_user else None
+        )
+
+    except asyncio.TimeoutError:
+        await processing.edit_text("⏰ Нейросеть думает слишком долго, попробуй позже")
+    except Exception as e:
+        logger.warning(f"VIDEO error: {e}")
+        try:
+            await processing.edit_text(f"❌ Не смог снять: {e}")
+        except Exception:
+            pass
+
+
+# ==================== ОЖИВИ ФОТО (IMAGE-TO-VIDEO) ====================
+
+@router.message(Command("оживи", "animate", "анимация", "анимировать"))
+async def cmd_animate(message: Message):
+    """Анимировать фотографию через Kling AI image-to-video"""
+    if message.chat.type == "private":
+        await message.answer("Команда работает только в групповых чатах")
+        return
+
+    fal_key = os.getenv("FAL_KEY", "")
+    if not fal_key:
+        await message.answer("❌ FAL_KEY не настроен")
+        return
+
+    # Ищем фото: в реплае или в самом сообщении
+    photo = None
+    if message.reply_to_message and message.reply_to_message.photo:
+        photo = message.reply_to_message.photo[-1]
+    elif message.photo:
+        photo = message.photo[-1]
+
+    if not photo:
+        await message.answer(
+            "📸 Ответь на фото командой /оживи — и я его анимирую!\n"
+            "Или отправь фото с подписью /оживи"
+        )
+        return
+
+    can_do, cooldown_remaining = check_cooldown(message.from_user.id, message.chat.id, "animate", 300)
+    if not can_do:
+        await message.answer(f"⏳ Подожди ещё {cooldown_remaining:.0f} сек")
+        return
+
+    processing = await message.answer("✨ Оживляю фото...")
+
+    try:
+        file = await bot.get_file(photo.file_id)
+        image_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+
+        session = await get_http_session()
+        fal_headers = {"Authorization": f"Key {fal_key}", "Content-Type": "application/json"}
+        kling_endpoint = "fal-ai/kling-video/v2.1/standard/image-to-video"
+
+        # Промпт для анимации — берём из подписи если есть
+        extra_caption = ""
+        if message.reply_to_message and message.reply_to_message.caption:
+            extra_caption = message.reply_to_message.caption[:200]
+        elif message.caption:
+            parts = message.caption.split(None, 1)
+            extra_caption = parts[1] if len(parts) > 1 else ""
+
+        prompt = extra_caption.strip() or "smooth natural motion, realistic movement, cinematic quality"
+
+        async with session.post(
+            f"https://queue.fal.run/{kling_endpoint}",
+            json={"prompt": prompt, "image_url": image_url, "duration": "5"},
+            headers=fal_headers,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as resp:
+            if resp.status not in (200, 201):
+                await processing.edit_text(f"❌ Kling ошибка: {(await resp.text())[:200]}")
+                return
+            submit_result = await resp.json()
+
+        request_id = submit_result.get("request_id")
+        if not request_id:
+            await processing.edit_text("❌ Не получил request_id")
+            return
+
+        for attempt in range(36):
+            await asyncio.sleep(5)
+            async with session.get(
+                f"https://queue.fal.run/{kling_endpoint}/requests/{request_id}/status",
+                headers=fal_headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                status_data = await resp.json()
+
+            status = status_data.get("status", "")
+            if status == "COMPLETED":
+                break
+            elif status in ("FAILED", "CANCELLED"):
+                await processing.edit_text(f"❌ Анимация провалилась: {status}")
+                return
+            if attempt % 4 == 0:
+                eta = max(0, (36 - attempt) * 5)
+                try:
+                    await processing.edit_text(f"✨ Оживляю... (~{eta}с)")
+                except Exception:
+                    pass
+        else:
+            await processing.edit_text("⏰ Слишком долго, попробуй позже")
+            return
+
+        async with session.get(
+            f"https://queue.fal.run/{kling_endpoint}/requests/{request_id}",
+            headers=fal_headers,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            video_result = await resp.json()
+
+        video_url = video_result.get("video", {}).get("url", "")
+        if not video_url:
+            await processing.edit_text("❌ Пустой URL видео")
+            return
+
+        async with session.get(video_url, timeout=aiohttp.ClientTimeout(total=60)) as vid_resp:
+            vid_data = await vid_resp.read()
+
+        await processing.delete()
+        await message.answer_video(
+            BufferedInputFile(vid_data, filename="animation.mp4"),
+            caption="✨ Ожило!"
+        )
+
+    except asyncio.TimeoutError:
+        await processing.edit_text("⏰ Слишком долго, попробуй позже")
+    except Exception as e:
+        logger.warning(f"ANIMATE error: {e}")
+        try:
+            await processing.edit_text(f"❌ Не смог оживить: {e}")
+        except Exception:
+            pass
+
+
+# ==================== УЛУЧШИ ФОТО (UPSCALE 4x) ====================
+
+@router.message(Command("улучши", "upscale", "enhance", "улучшить", "апскейл"))
+async def cmd_enhance(message: Message):
+    """Улучшить качество фото в 4x через AuraSR"""
+    fal_key = os.getenv("FAL_KEY", "")
+    if not fal_key:
+        await message.answer("❌ FAL_KEY не настроен")
+        return
+
+    # Ищем фото
+    photo = None
+    if message.reply_to_message and message.reply_to_message.photo:
+        photo = message.reply_to_message.photo[-1]
+    elif message.photo:
+        photo = message.photo[-1]
+
+    if not photo:
+        await message.answer(
+            "📸 Ответь на фото командой /улучши — увеличу качество в 4 раза!\n"
+            "Или отправь фото с подписью /улучши"
+        )
+        return
+
+    can_do, cooldown_remaining = check_cooldown(message.from_user.id, message.chat.id, "enhance", 60)
+    if not can_do:
+        await message.answer(f"⏳ Подожди ещё {cooldown_remaining:.0f} сек")
+        return
+
+    processing = await message.answer("🔍 Улучшаю качество 4x...")
+
+    try:
+        file = await bot.get_file(photo.file_id)
+        image_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+
+        session = await get_http_session()
+        fal_headers = {"Authorization": f"Key {fal_key}", "Content-Type": "application/json"}
+
+        async with session.post(
+            "https://fal.run/fal-ai/aura-sr",
+            json={"image_url": image_url, "upscaling_factor": 4, "overlapping_tiles": True, "checkpoint": "v2"},
+            headers=fal_headers,
+            timeout=aiohttp.ClientTimeout(total=90)
+        ) as resp:
+            if resp.status != 200:
+                await processing.edit_text(f"❌ AuraSR ошибка: {(await resp.text())[:200]}")
+                return
+            result = await resp.json()
+
+        enhanced_url = result.get("image", {}).get("url", "")
+        if not enhanced_url:
+            await processing.edit_text("❌ Не получил улучшенное изображение")
+            return
+
+        async with session.get(enhanced_url, timeout=aiohttp.ClientTimeout(total=30)) as img_resp:
+            img_data = await img_resp.read()
+
+        await processing.delete()
+        await message.answer_photo(
+            BufferedInputFile(img_data, filename="enhanced.jpg"),
+            caption="🔍 Готово! Качество улучшено в 4 раза"
+        )
+
+    except asyncio.TimeoutError:
+        await processing.edit_text("⏰ AuraSR думает слишком долго, попробуй позже")
+    except Exception as e:
+        logger.warning(f"ENHANCE error: {e}")
+        try:
+            await processing.edit_text(f"❌ Не смог улучшить: {e}")
+        except Exception:
+            pass
+
+
 # ==================== СЖЕЧЬ ЧЕЛОВЕКА ====================
 
 @router.message(Command("burn", "сжечь", "кремация", "костёр", "поджечь"))
@@ -8841,6 +9206,10 @@ async def setup_bot_commands():
         BotCommand(command="suck", description="🍭 Послать сосать"),
         BotCommand(command="dream", description="💤 Грязный сон про юзера"),
         BotCommand(command="ventilate", description="🪟 Проветрить чат"),
+        BotCommand(command="нарисуй", description="🎨 Нарисовать портрет через Flux"),
+        BotCommand(command="видео", description="🎬 Снять видео через Kling AI"),
+        BotCommand(command="оживи", description="✨ Анимировать фото (реплай на фото)"),
+        BotCommand(command="улучши", description="🔍 Улучшить фото 4x (реплай на фото)"),
         
         # Анализ и профили
         BotCommand(command="dossier", description="📋 AI-досье на юзера"),
