@@ -2339,6 +2339,88 @@ async def cmd_diagnosis(message: Message):
         await processing_msg.edit_text("❌ Диспансер закрыт. Приходи позже!")
 
 
+# ==================== НАРИСУЙ ====================
+
+@router.message(Command("нарисуй", "imagine", "draw", "нарисовать", "портрет"))
+async def cmd_imagine(message: Message):
+    """Нарисовать портрет человека через Flux"""
+    if message.chat.type == "private":
+        await message.answer("Команда работает только в групповых чатах")
+        return
+
+    # Определяем цель
+    target_user = None
+    target_name = None
+    target_username = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        target_name = target_user.first_name or target_user.username or "Аноним"
+        target_username = target_user.username or ""
+    else:
+        # Без реплая — рисуем самого отправителя
+        target_user = message.from_user
+        target_name = target_user.first_name or target_user.username or "Аноним"
+        target_username = target_user.username or ""
+
+    imagine_url = get_api_url("imagine")
+    if not imagine_url:
+        await message.answer("❌ API для генерации картинок не настроен (нужна переменная VERCEL_API_URL)")
+        return
+
+    can_do, cooldown_remaining = check_cooldown(message.from_user.id, message.chat.id, "imagine", 60)
+    if not can_do:
+        await message.answer(f"⏳ Подожди ещё {cooldown_remaining:.0f} сек")
+        return
+
+    clickable = f'<a href="tg://user?id={target_user.id}">{target_name}</a>'
+    processing = await message.answer(f"🎨 Рисую портрет {clickable}...", parse_mode=ParseMode.HTML)
+
+    # Собираем сообщения цели для персонализации
+    context = ""
+    if USE_POSTGRES:
+        try:
+            user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=30)
+            if user_msgs:
+                context = "\n".join([m.get("text", "") for m in user_msgs if m.get("text")])[:2000]
+        except Exception:
+            pass
+
+    try:
+        metrics.track_api_call("imagine")
+        session = await get_http_session()
+        async with session.post(
+            imagine_url,
+            json={"name": target_name, "username": target_username, "context": context},
+            timeout=aiohttp.ClientTimeout(total=90)
+        ) as resp:
+            if resp.status != 200:
+                error = await resp.text()
+                await processing.edit_text(f"❌ Ошибка генерации: {error[:200]}")
+                return
+            result = await resp.json()
+
+        image_url = result.get("image_url", "")
+        if not image_url:
+            await processing.edit_text("❌ Картинка не вернулась")
+            return
+
+        # Скачиваем и отправляем
+        async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=30)) as img_resp:
+            img_data = await img_resp.read()
+
+        await processing.delete()
+        await message.answer_photo(
+            BufferedInputFile(img_data, filename="portrait.jpg"),
+            caption=f"🎨 Портрет {clickable}",
+            parse_mode=ParseMode.HTML
+        )
+
+    except Exception as e:
+        logger.warning(f"IMAGINE error: {e}")
+        await processing.edit_text(f"❌ Не смог нарисовать: {e}")
+
+
 # ==================== СЖЕЧЬ ЧЕЛОВЕКА ====================
 
 @router.message(Command("burn", "сжечь", "кремация", "костёр", "поджечь"))
