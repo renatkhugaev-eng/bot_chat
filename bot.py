@@ -3122,6 +3122,185 @@ async def cmd_music(message: Message, command: CommandObject):
             pass
 
 
+# ==================== ПОДКАСТ ====================
+
+@router.message(Command("подкаст", "podcast"))
+async def cmd_podcast(message: Message, command: CommandObject):
+    google_key = os.getenv("GOOGLE_API_KEY", "")
+    if not google_key:
+        await message.answer("❌ GOOGLE_API_KEY не настроен")
+        return
+
+    ai_gateway_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
+    if not ai_gateway_key:
+        await message.answer("❌ VERCEL_AI_GATEWAY_KEY не настроен")
+        return
+
+    can_do, cooldown_remaining = check_cooldown(message.from_user.id, message.chat.id, "podcast", 300)
+    if not can_do:
+        await message.answer(f"⏳ Подожди ещё {cooldown_remaining:.0f} сек")
+        return
+
+    processing = await message.answer("🎙️ Изучаю чат и готовлю подкаст...")
+
+    try:
+        session = await get_http_session()
+
+        # Берём случайные сообщения из всей истории
+        all_msgs = await get_random_messages_for_music(message.chat.id, limit=800)
+        if len(all_msgs) < 5:
+            await processing.edit_text("📭 Слишком мало сообщений — не о чём говорить!")
+            cooldowns.pop((message.from_user.id, message.chat.id, "podcast"), None)
+            return
+
+        # Балансировка по авторам
+        author_counts: dict = {}
+        balanced = []
+        for m in all_msgs:
+            author = m.get("first_name") or m.get("username") or "?"
+            if author_counts.get(author, 0) < 12:
+                balanced.append(m)
+                author_counts[author] = author_counts.get(author, 0) + 1
+
+        import datetime as _dt2
+        lines = []
+        for m in balanced[:400]:
+            text = m.get("message_text", "")
+            if not text:
+                continue
+            name = m.get("first_name") or m.get("username") or "Аноним"
+            ts = m.get("created_at")
+            time_tag = ""
+            if ts:
+                try:
+                    h = _dt2.datetime.fromtimestamp(int(ts)).hour
+                    time_tag = "[ночь] " if h < 6 else "[утро] " if h < 12 else "[день] " if h < 18 else "[вечер] "
+                except Exception:
+                    pass
+            lines.append(f"{time_tag}{name}: {text}")
+        messages_text = "\n".join(lines)[:15000]
+
+        chat_title = message.chat.title or "чат"
+
+        podcast_system = """Ты — сценарист подкаста. Пишешь живой, остроумный диалог двух ведущих на русском языке.
+
+Ведущие:
+- Макс — саркастичный, острый, любит подколоть
+- Катя — живая, эмоциональная, часто удивляется
+
+ФОРМАТ — строго чередующийся диалог:
+Макс: ...
+Катя: ...
+Макс: ...
+
+Правила:
+- 20-30 реплик итого, каждая 1-3 предложения
+- Обсуждают реальные события, цитируют конкретных людей из переписки
+- Шутят, комментируют, спорят — живо и естественно
+- Начало: приветствие слушателей и анонс темы
+- Конец: итог и прощание
+- Только русский язык
+- Никаких ремарок типа (смеётся) — только чистый текст реплик"""
+
+        async with session.post(
+            "https://ai-gateway.vercel.sh/v1/messages",
+            json={
+                "model": "anthropic/claude-sonnet-4-20250514",
+                "max_tokens": 2000,
+                "temperature": 0.9,
+                "system": podcast_system,
+                "messages": [{"role": "user", "content": f"Чат «{chat_title}». Сообщения:\n{messages_text}\n\nНапиши подкаст-эпизод про этот чат."}]
+            },
+            headers={
+                "Authorization": f"Bearer {ai_gateway_key}",
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01"
+            },
+            timeout=aiohttp.ClientTimeout(total=60)
+        ) as resp:
+            if resp.status != 200:
+                await processing.edit_text(f"❌ Ошибка генерации скрипта: {(await resp.text())[:200]}")
+                return
+            claude_result = await resp.json()
+
+        script = claude_result.get("content", [{}])[0].get("text", "").strip()
+        if not script:
+            await processing.edit_text("❌ Не смог написать скрипт")
+            return
+
+        await processing.edit_text("🔊 Скрипт готов, озвучиваю...")
+
+        # Gemini TTS — multi-speaker
+        import asyncio as _asyncio
+        from google import genai as _genai
+        from google.genai import types as _gtypes
+        import wave as _wave
+        import io as _io
+
+        def _generate_audio(api_key: str, script_text: str) -> bytes:
+            client = _genai.Client(api_key=api_key)
+            prompt = f"TTS the following podcast conversation between Макс and Катя:\n{script_text}"
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-preview-tts",
+                contents=prompt,
+                config=_gtypes.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=_gtypes.SpeechConfig(
+                        multi_speaker_voice_config=_gtypes.MultiSpeakerVoiceConfig(
+                            speaker_voice_configs=[
+                                _gtypes.SpeakerVoiceConfig(
+                                    speaker="Макс",
+                                    voice_config=_gtypes.VoiceConfig(
+                                        prebuilt_voice_config=_gtypes.PrebuiltVoiceConfig(
+                                            voice_name="Fenrir"
+                                        )
+                                    )
+                                ),
+                                _gtypes.SpeakerVoiceConfig(
+                                    speaker="Катя",
+                                    voice_config=_gtypes.VoiceConfig(
+                                        prebuilt_voice_config=_gtypes.PrebuiltVoiceConfig(
+                                            voice_name="Aoede"
+                                        )
+                                    )
+                                ),
+                            ]
+                        )
+                    )
+                )
+            )
+            pcm_data = response.candidates[0].content.parts[0].inline_data.data
+
+            # PCM → WAV в памяти
+            buf = _io.BytesIO()
+            with _wave.open(buf, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(24000)
+                wf.writeframes(pcm_data)
+            return buf.getvalue()
+
+        loop = _asyncio.get_event_loop()
+        wav_bytes = await loop.run_in_executor(None, _generate_audio, google_key, script)
+
+        await processing.delete()
+
+        await message.answer_audio(
+            BufferedInputFile(wav_bytes, filename="podcast.wav"),
+            caption=f"🎙️ Подкаст про «{chat_title}»\n<i>Ведущие: Макс и Катя</i>",
+            title=f"Подкаст — {chat_title}",
+            performer="AI Podcast",
+            parse_mode=ParseMode.HTML
+        )
+
+    except Exception as e:
+        logger.warning(f"PODCAST error: {e}")
+        try:
+            await processing.edit_text(f"❌ Ошибка подкаста: {e}")
+        except Exception:
+            pass
+
+
 # ==================== СЖЕЧЬ ЧЕЛОВЕКА ====================
 
 @router.message(Command("burn", "сжечь", "кремация", "костёр", "поджечь"))
@@ -9503,8 +9682,9 @@ async def setup_bot_commands():
         BotCommand(command="видео", description="🎬 Снять видео через Kling AI"),
         BotCommand(command="оживи", description="✨ Анимировать фото (реплай на фото)"),
         BotCommand(command="улучши", description="🔍 Улучшить фото 4x (реплай на фото)"),
-        BotCommand(command="музыка", description="🎵 Трек по мотивам чата через MiniMax"),
-        
+        BotCommand(command="музыка", description="🎵 Трек по мотивам чата"),
+        BotCommand(command="подкаст", description="🎙️ AI подкаст про чат — два ведущих"),
+
         # Анализ и профили
         BotCommand(command="dossier", description="📋 AI-досье на юзера"),
         BotCommand(command="psycho", description="🧠 Психоанализ личности"),
