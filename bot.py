@@ -2898,13 +2898,13 @@ async def cmd_music(message: Message, command: CommandObject):
                 cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
                 return
         else:
-            # Режим чата — берём сообщения за 24ч с равномерной выборкой по авторам
-            stats = await get_chat_statistics(message.chat.id, hours=24, random_sample=True)
+            # Режим чата — берём сообщения за 3 дня с равномерной выборкой по авторам
+            stats = await get_chat_statistics(message.chat.id, hours=72, random_sample=True)
             recent = stats.get("recent_messages", [])
 
             if len(recent) < 5:
                 await processing.edit_text(
-                    "📭 Слишком мало сообщений за последние 24 часа — не о чём петь!\n"
+                    "📭 Слишком мало сообщений за последние 3 дня — не о чём петь!\n"
                     "Напишите хоть что-нибудь сначала."
                 )
                 cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
