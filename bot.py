@@ -2514,54 +2514,31 @@ async def cmd_video(message: Message, command: CommandObject):
         fal_headers = {"Authorization": f"Key {fal_key}", "Content-Type": "application/json"}
 
         if target_user:
-            # Получаем контекст человека
-            context = ""
+            # Получаем контекст человека и строим промпт локально
+            keywords = []
             if USE_POSTGRES:
                 try:
-                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=30)
-                    if user_msgs:
-                        context = "\n".join([m.get("message_text", "") for m in reversed(user_msgs) if m.get("message_text")])[:2000]
+                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=20)
+                    for m in user_msgs:
+                        txt = m.get("message_text", "")
+                        if txt and len(txt) > 5:
+                            keywords.append(txt[:60].strip())
+                        if len(keywords) >= 5:
+                            break
                 except Exception:
                     pass
 
-            ai_gateway_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
-            if not ai_gateway_key:
-                await processing.edit_text("❌ VERCEL_AI_GATEWAY_KEY не настроен")
-                return
-
-            async with session.post(
-                "https://ai-gateway.vercel.sh/v1/messages",
-                json={
-                    "model": "anthropic/claude-sonnet-4-20250514",
-                    "max_tokens": 200,
-                    "messages": [{"role": "user", "content": (
-                        f"Based on this person's messages, write a short cinematic video prompt in English for Kling AI. "
-                        f"Describe a vivid scene that captures their personality. Max 80 words, no quotes.\n\n"
-                        f"Person: {target_name}\nMessages:\n{context}"
-                    )}]
-                },
-                headers={
-                    "Authorization": f"Bearer {ai_gateway_key}",
-                    "Content-Type": "application/json",
-                    "anthropic-version": "2023-06-01"
-                },
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as resp:
-                raw_text = await resp.text()
-                logger.info(f"VIDEO prompt API status={resp.status} body={raw_text[:300]}")
-                if resp.status != 200:
-                    await processing.edit_text(f"❌ Ошибка генерации промпта ({resp.status}): {raw_text[:200]}")
-                    return
-                try:
-                    result = json.loads(raw_text)
-                except Exception:
-                    await processing.edit_text(f"❌ Не JSON от Gateway: {raw_text[:200]}")
-                    return
-
-            video_prompt = result.get("content", [{}])[0].get("text", "").strip()
-            if not video_prompt:
-                await processing.edit_text("❌ Промпт не сгенерировался")
-                return
+            import random as _rnd
+            styles = [
+                "cinematic portrait, dramatic golden hour lighting, shallow depth of field, film grain, 4K",
+                "walking through foggy city streets at night, neon reflections, cinematic atmosphere, 4K",
+                "epic close-up, emotional expression, stormy sky background, dramatic shadows, cinematic",
+                "slow motion urban scene, sunrise, atmospheric haze, documentary style, 4K",
+                "sitting in a cafe, warm light, candid moment, bokeh background, cinematic 35mm",
+            ]
+            style = _rnd.choice(styles)
+            kw_str = (", ".join(keywords[:3])[:80] + ", ") if keywords else ""
+            video_prompt = f"Cinematic video of a person named {target_name}, {kw_str}{style}"
 
             await processing.edit_text(f"🎬 Снимаю {clickable}...", parse_mode=ParseMode.HTML)
         else:
