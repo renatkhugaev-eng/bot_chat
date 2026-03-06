@@ -2921,7 +2921,7 @@ async def cmd_music(message: Message, command: CommandObject):
                 if author_counts.get(author, 0) < 15:
                     balanced.append(m)
                     author_counts[author] = author_counts.get(author, 0) + 1
-            text_msgs = balanced[:250]
+            text_msgs = balanced[:300]
 
         # Шаг 1: генерим текст + стиль через Vercel/Claude Sonnet
         async with session.post(

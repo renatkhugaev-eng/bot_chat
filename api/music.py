@@ -138,7 +138,7 @@ class handler(BaseHTTPRequestHandler):
                 reply_to = m.get('reply_to_first_name')
                 reply_tag = f"→{reply_to} " if reply_to else ""
                 lines.append(f"{time_tag}{name} {reply_tag}: {text}")
-            messages_text = "\n".join(lines)[:8000]
+            messages_text = "\n".join(lines)[:12000]
 
             ai_key = os.environ.get("VERCEL_AI_GATEWAY_KEY", "").strip()
             if not ai_key:
