@@ -1199,6 +1199,21 @@ async def get_random_messages_for_music(chat_id: int, limit: int = 300) -> List[
         return [dict(row) for row in rows]
 
 
+async def get_random_user_messages_for_music(chat_id: int, user_id: int, limit: int = 500) -> List[Dict[str, Any]]:
+    """Случайная выборка сообщений конкретного пользователя из всей истории"""
+    async with (await get_pool()).acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT first_name, username, message_text, reply_to_first_name, created_at
+            FROM chat_messages
+            WHERE chat_id = $1 AND user_id = $2
+            AND message_type IN ('text', 'photo')
+            AND message_text IS NOT NULL AND message_text != ''
+            ORDER BY RANDOM()
+            LIMIT $3
+        """, chat_id, user_id, limit)
+        return [dict(row) for row in rows]
+
+
 async def get_chat_statistics(chat_id: int, hours: int = 5, random_sample: bool = False) -> Dict[str, Any]:
     """Получить статистику чата за последние N часов"""
     since_time = int(time.time()) - (hours * 3600)

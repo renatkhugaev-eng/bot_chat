@@ -77,7 +77,7 @@ if USE_POSTGRES:
         get_user_profile_for_ai, get_enriched_chat_data_for_ai, get_chat_social_data_for_ai,
         find_user_in_chat, get_all_chat_profiles, get_user_memories,
         get_active_chats_for_auto_summary,
-        get_random_messages_for_music
+        get_random_messages_for_music, get_random_user_messages_for_music
     )
 else:
     from database import (
@@ -2878,14 +2878,13 @@ async def cmd_music(message: Message, command: CommandObject):
         text_msgs = []
 
         if target_user:
-            # Режим персонального трека — берём сообщения конкретного человека
+            # Режим персонального трека — случайные сообщения из всей истории человека
             if USE_POSTGRES:
                 try:
-                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=200)
-                    # reversed() — DESC→ASC (хронологический порядок)
+                    user_msgs = await get_random_user_messages_for_music(message.chat.id, target_user.id, limit=500)
                     text_msgs = [
-                        {"first_name": target_name, "message_text": m["message_text"]}
-                        for m in reversed(user_msgs)
+                        {"first_name": target_name, "message_text": m["message_text"], "created_at": m.get("created_at")}
+                        for m in user_msgs
                         if m.get("message_text")
                     ]
                 except Exception:
@@ -2899,7 +2898,7 @@ async def cmd_music(message: Message, command: CommandObject):
                 return
         else:
             # Режим чата — случайные сообщения из всей истории чата
-            all_msgs = await get_random_messages_for_music(message.chat.id, limit=500)
+            all_msgs = await get_random_messages_for_music(message.chat.id, limit=1000)
 
             if len(all_msgs) < 5:
                 await processing.edit_text(
@@ -2909,16 +2908,16 @@ async def cmd_music(message: Message, command: CommandObject):
                 cooldowns.pop((message.from_user.id, message.chat.id, "music"), None)
                 return
 
-            # Равномерная выборка: не более 8 сообщений на автора,
+            # Равномерная выборка: не более 15 сообщений на автора,
             # чтобы даже самые активные не доминировали
             author_counts: dict = {}
             balanced = []
             for m in all_msgs:
                 author = m.get("first_name") or m.get("username") or "?"
-                if author_counts.get(author, 0) < 8:
+                if author_counts.get(author, 0) < 15:
                     balanced.append(m)
                     author_counts[author] = author_counts.get(author, 0) + 1
-            text_msgs = balanced[:300]
+            text_msgs = balanced[:500]
 
         # Шаг 1: форматируем сообщения для Claude
         import datetime as _dt
@@ -2939,7 +2938,7 @@ async def cmd_music(message: Message, command: CommandObject):
             reply_to = m.get("reply_to_first_name")
             reply_tag = f"→{reply_to} " if reply_to else ""
             lines.append(f"{time_tag}{name} {reply_tag}: {text}")
-        messages_text = "\n".join(lines)[:12000]
+        messages_text = "\n".join(lines)[:20000]
 
         hint_line = f"\nПожелание по стилю: {style_hint}" if style_hint else ""
         if target_name:
@@ -3059,7 +3058,7 @@ async def cmd_music(message: Message, command: CommandObject):
 
         # Шаг 3: полинг статуса (до 5 минут, каждые 8 сек)
         audio_url = ""
-        for _ in range(38):
+        for attempt in range(38):
             await asyncio.sleep(8)
             async with session.post(
                 "https://api.apiframe.pro/fetch",
@@ -3068,15 +3067,26 @@ async def cmd_music(message: Message, command: CommandObject):
                 timeout=aiohttp.ClientTimeout(total=15)
             ) as fetch_resp:
                 if fetch_resp.status != 200:
+                    logger.warning(f"SUNO fetch HTTP {fetch_resp.status}: {await fetch_resp.text()}")
                     continue
                 fetch_data = await fetch_resp.json()
 
             status = fetch_data.get("status", "")
-            if status == "finished":
-                songs = fetch_data.get("songs", [])
-                if songs:
-                    audio_url = songs[0].get("audio_url", "")
+            logger.info(f"SUNO poll #{attempt+1} status={status!r} full={fetch_data}")
+
+            if status in ("finished", "completed", "success", "FINISHED", "COMPLETED", "SUCCESS", "done", "DONE"):
+                # Пробуем разные варианты структуры ответа
+                songs = fetch_data.get("songs") or fetch_data.get("output") or []
+                if isinstance(songs, list) and songs:
+                    audio_url = (songs[0].get("audio_url") or songs[0].get("url") or "")
+                elif isinstance(fetch_data.get("audio_url"), str):
+                    audio_url = fetch_data["audio_url"]
+                logger.info(f"SUNO finished, audio_url={audio_url!r}")
                 break
+            elif status in ("failed", "error", "FAILED", "ERROR", "cancelled", "CANCELLED"):
+                logger.warning(f"SUNO task failed: {fetch_data}")
+                await processing.edit_text(f"❌ Suno не смог создать трек: {fetch_data.get('error', 'unknown error')}")
+                return
 
         if not audio_url:
             await processing.edit_text("⏰ Suno думает слишком долго, попробуй позже")
