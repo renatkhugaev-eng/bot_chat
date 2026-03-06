@@ -2532,7 +2532,7 @@ async def cmd_video(message: Message, command: CommandObject):
             async with session.post(
                 "https://ai-gateway.vercel.sh/v1/messages",
                 json={
-                    "model": "anthropic/claude-haiku-4-20250514",
+                    "model": "anthropic/claude-sonnet-4-20250514",
                     "max_tokens": 200,
                     "messages": [{"role": "user", "content": (
                         f"Based on this person's messages, write a short cinematic video prompt in English for Kling AI. "
