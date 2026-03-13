@@ -8027,7 +8027,7 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         await processing.edit_text(f"❌ Ошибка: {e}")
 
 
-@router.message(Command("картинка", "illus", "visual"))
+@router.message(Command("зарисовка", "sketch", "illus"))
 async def cmd_ai_visual(message: Message, command: CommandObject):
     """Минималистичная иллюстрация через Supermeme Text-to-visuals — по теме или про участника"""
     supermeme_key = os.getenv("SUPERMEME_API_KEY", "")
@@ -8048,10 +8048,10 @@ async def cmd_ai_visual(message: Message, command: CommandObject):
         await message.answer(
             "🎨 <b>Минималистичная иллюстрация</b>\n\n"
             "По теме (сравнения и метафоры работают лучше всего):\n"
-            "<code>/картинка программист vs дедлайн</code>\n"
-            "<code>/картинка ожидание vs реальность</code>\n\n"
+            "<code>/зарисовка программист vs дедлайн</code>\n"
+            "<code>/зарисовка ожидание vs реальность</code>\n\n"
             "Про участника (реплай на его сообщение):\n"
-            "<code>/картинка</code> → ответь на сообщение человека",
+            "<code>/зарисовка</code> → ответь на сообщение человека",
             parse_mode=ParseMode.HTML
         )
         return
