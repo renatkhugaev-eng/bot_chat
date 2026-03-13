@@ -7948,7 +7948,7 @@ async def cmd_random_meme(message: Message):
 
 @router.message(Command("мемчик", "makememe"))
 async def cmd_ai_meme(message: Message, command: CommandObject):
-    """Генерация мема через Supermeme AI — по теме или по участнику чата"""
+    """Генерация мема через Supermeme AI"""
     supermeme_key = os.getenv("SUPERMEME_API_KEY", "")
     if not supermeme_key:
         await message.answer("❌ SUPERMEME_API_KEY не настроен")
@@ -7960,15 +7960,13 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         return
 
     args = (command.args or "").strip()
-
-    # Определяем цель: реплай или просто текст
     target_user = None
+
     if message.reply_to_message:
         if message.reply_to_message.from_user:
             target_user = message.reply_to_message.from_user
         else:
-            # Реплай есть, но from_user пустой (канал, анон-admin)
-            await message.answer("❌ Не могу определить пользователя — попробуй реплай на обычное сообщение")
+            await message.answer("❌ Не могу определить пользователя — реплай на обычное сообщение")
             return
 
     if not target_user and not args:
@@ -7976,7 +7974,7 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
             "🤣 <b>Генератор мемов</b>\n\n"
             "По теме:\n"
             "<code>/мемчик когда пятница но завтра понедельник</code>\n\n"
-            "Про участника (реплай на его сообщение):\n"
+            "Про участника — реплай на его сообщение:\n"
             "<code>/мемчик</code> → ответь на сообщение человека",
             parse_mode=ParseMode.HTML
         )
@@ -7988,7 +7986,7 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         meme_text = args
 
         if target_user:
-            # Режим персонального мема — берём фразы из переписки
+            import random as _rnd
             target_name = target_user.first_name or target_user.username or "Аноним"
             quotes = []
             if USE_POSTGRES:
@@ -7996,27 +7994,26 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
                     user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=30)
                     for m in user_msgs:
                         txt = (m.get("message_text") or "").strip()
-                        if txt and len(txt) > 5 and len(txt) < 80:
+                        if txt and 5 < len(txt) < 80:
                             quotes.append(txt)
                         if len(quotes) >= 5:
                             break
                 except Exception:
                     pass
 
-            import random as _rnd
+            q = quotes[0] if quotes else "сейчас приду"
             templates = [
-                f"{target_name} когда {quotes[0] if quotes else 'пишет в чат'}",
-                f"{target_name} vs реальность",
-                f"когда {target_name} говорит '{quotes[0][:40] if quotes else 'сейчас приду'}'",
+                f"{target_name} когда {q}",
+                f"когда {target_name} говорит «{q[:40]}»",
                 f"{target_name} в {_rnd.choice(['понедельник', 'пятницу', '3 ночи', 'рабочее время'])}",
-                f"все: нормально. {target_name}: {quotes[0][:40] if quotes else 'а вот и нет'}",
+                f"все: нормально. {target_name}: {q[:40]}",
+                f"{target_name} vs реальность",
             ]
             meme_text = _rnd.choice(templates)
 
-        # Генерируем мем через Supermeme
         async with session.post(
             "https://app.supermeme.ai/api/v2/meme/image",
-            json={"text": meme_text, "count": 4, "aspectRatio": "1:1", "magic": True},
+            json={"text": meme_text, "count": 4, "aspectRatio": "1:1"},
             headers={
                 "Authorization": f"Bearer {supermeme_key}",
                 "Content-Type": "application/json"
@@ -8024,7 +8021,7 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
             timeout=aiohttp.ClientTimeout(total=30)
         ) as resp:
             raw = await resp.text()
-            logger.info(f"Supermeme status={resp.status} body={raw[:200]}")
+            logger.info(f"Supermeme meme status={resp.status} body={raw[:200]}")
             if resp.status != 200:
                 await processing.edit_text(f"❌ Supermeme ошибка ({resp.status}): {raw[:150]}")
                 return
@@ -8039,7 +8036,6 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
             img_data = await img_resp.read()
 
         await processing.delete()
-        # Отправляем без кнопки, потом добавим с реальным message_id
         sent = await message.answer_photo(
             BufferedInputFile(img_data, filename="meme.png"),
             caption=f"🤣 <i>{meme_text}</i>",
@@ -8150,41 +8146,48 @@ async def cmd_ai_visual(message: Message, command: CommandObject):
         await processing.edit_text(f"❌ Ошибка: {e}")
 
 
-@router.message(Command("гифка", "гиф", "gifmeme", "animeme"))
-async def cmd_ai_gif(message: Message, command: CommandObject):
-    """Анимированный GIF-мем через Supermeme"""
-    supermeme_key = os.getenv("SUPERMEME_API_KEY", "")
-    if not supermeme_key:
-        await message.answer("❌ SUPERMEME_API_KEY не настроен")
+@router.message(Command("гифка", "гиф", "gif"))
+async def cmd_gif(message: Message, command: CommandObject):
+    """GIF по теме или про участника чата через Tenor API"""
+    tenor_key = os.getenv("TENOR_API_KEY", "")
+    if not tenor_key:
+        await message.answer("❌ TENOR_API_KEY не настроен")
         return
 
-    can_do, remaining = check_cooldown(message.from_user.id, message.chat.id, "gifmeme", 30)
+    can_do, remaining = check_cooldown(message.from_user.id, message.chat.id, "gifmeme", 15)
     if not can_do:
         await message.answer(f"⏳ Подожди {remaining:.0f} сек")
         return
 
     args = (command.args or "").strip()
     target_user = None
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_user = message.reply_to_message.from_user
-    elif not args:
+
+    if message.reply_to_message:
+        if message.reply_to_message.from_user:
+            target_user = message.reply_to_message.from_user
+        else:
+            await message.answer("❌ Не могу определить пользователя — реплай на обычное сообщение")
+            return
+
+    if not target_user and not args:
         await message.answer(
             "🎞 <b>GIF-мем</b>\n\n"
             "По теме:\n"
-            "<code>/гифка когда наконец пятница</code>\n"
-            "<code>/гифка boss baby mode on</code>\n\n"
-            "Про участника — реплай на его сообщение + /гифка",
+            "<code>/гифка пятница наконец-то</code>\n"
+            "<code>/гифка mission impossible</code>\n\n"
+            "Про участника — реплай на его сообщение:\n"
+            "<code>/гифка</code> → ответь на сообщение человека",
             parse_mode=ParseMode.HTML
         )
         return
 
-    processing = await message.answer("🎞 Делаю гифку...")
+    processing = await message.answer("🎞 Ищу гифку...")
     try:
+        import random as _rnd
         session = await get_http_session()
-        gif_text = args
+        query = args
 
         if target_user:
-            target_name = target_user.first_name or target_user.username or "Аноним"
             quotes = []
             if USE_POSTGRES:
                 try:
@@ -8198,50 +8201,47 @@ async def cmd_ai_gif(message: Message, command: CommandObject):
                 except Exception:
                     pass
 
-            import random as _rnd
-            templates = [
-                f"{target_name} когда {quotes[0] if quotes else 'всё идёт по плану'}",
-                f"{target_name} заходит в чат",
-                f"все смотрят на {target_name}",
-                f"{target_name} услышал своё имя",
-                f"{target_name} читает этот мем",
-            ]
-            gif_text = _rnd.choice(templates)
+            moods = ["excited", "shocked", "deal with it", "walking away", "seriously", "mind blown", "really", "waiting"]
+            query = _rnd.choice(moods)
 
-        async with session.post(
-            "https://app.supermeme.ai/api/v2/meme/image",
-            json={"text": gif_text, "count": 1, "gif": True, "animated": True},
-            headers={
-                "Authorization": f"Bearer {supermeme_key}",
-                "Content-Type": "application/json"
+        async with session.get(
+            "https://tenor.googleapis.com/v2/search",
+            params={
+                "q": query,
+                "key": tenor_key,
+                "limit": 10,
+                "media_filter": "gif",
+                "contentfilter": "medium",
+                "locale": "ru_RU",
             },
-            timeout=aiohttp.ClientTimeout(total=40)
+            timeout=aiohttp.ClientTimeout(total=15)
         ) as resp:
-            raw = await resp.text()
-            logger.info(f"Supermeme GIF status={resp.status} body={raw[:200]}")
             if resp.status != 200:
-                await processing.edit_text(f"❌ Supermeme ошибка ({resp.status}): {raw[:150]}")
+                raw = await resp.text()
+                await processing.edit_text(f"❌ Tenor ошибка ({resp.status}): {raw[:100]}")
                 return
-            result = json.loads(raw)
+            data = await resp.json()
 
-        # API может вернуть gifs или memes
-        gifs = result.get("gifs") or result.get("memes") or []
-        if not gifs:
-            await processing.edit_text(f"❌ GIF не сгенерировался. Ответ: {raw[:150]}")
+        results = data.get("results", [])
+        if not results:
+            await processing.edit_text("❌ GIF не найден, попробуй другой запрос")
             return
 
-        gif_url = gifs[0]
+        item = _rnd.choice(results[:8])
+        gif_url = item["media_formats"]["gif"]["url"]
+
         async with session.get(gif_url, timeout=aiohttp.ClientTimeout(total=30)) as gif_resp:
             gif_data = await gif_resp.read()
 
+        caption = f"🎞 <i>{target_user.first_name if target_user else query}</i>"
         await processing.delete()
         await message.answer_animation(
             BufferedInputFile(gif_data, filename="meme.gif"),
-            caption=f"🎞 <i>{gif_text}</i>",
+            caption=caption,
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
-        logger.error(f"AI gif error: {e}")
+        logger.error(f"GIF error: {e}")
         await processing.edit_text(f"❌ Ошибка: {e}")
 
 
