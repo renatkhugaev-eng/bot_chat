@@ -8012,6 +8012,7 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         import random as _rnd
         session = await get_http_session()
         meme_text = args
+        funny_caption = None
 
         if target_id:
             # Берём больше сообщений для лучшей персонализации
@@ -8028,29 +8029,35 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
                 except Exception:
                     pass
 
-            # Генерируем текст мема через AI для максимальной смешности
+            # Генерируем два варианта текста через AI:
+            # clean_text — для Supermeme (без мата, чтобы не фильтровало)
+            # funny_caption — для подписи в Telegram (с матом и угаром)
             ai_gateway_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
+            clean_text = None
+            funny_caption = None
             if ai_gateway_key and quotes:
                 try:
                     quotes_str = "\n".join(f"- {q}" for q in quotes[:8])
-                    ai_prompt = f"""Придумай ОДИН короткий смешной текст для мема про человека по имени {target_name}.
-Его реальные сообщения из чата:
+                    ai_prompt = f"""Ты генератор мемов для русскоязычного чата. Придумай мем про {target_name}.
+
+Его реальные сообщения:
 {quotes_str}
 
-Требования:
-- Текст на РУССКОМ языке
-- Максимум 12 слов
-- Используй его реальные слова/темы из сообщений выше
-- Формат: ситуация или противоречие ("когда...", "X vs Y", "все: ... а {target_name}: ...")
-- Должно быть смешно и узнаваемо для участников чата
-- НЕ используй кавычки и скобки
+Верни РОВНО ДВЕ строки и ничего больше:
+CLEAN: <текст без мата, 8-12 слов, для подбора шаблона мема>
+FUNNY: <тот же смысл но с матом и угаром, максимально смешно, 8-15 слов>
 
-Напиши ТОЛЬКО текст мема, без пояснений."""
+Требования для обоих:
+- Только русский язык
+- Используй темы/слова из его сообщений выше
+- Формат: "когда...", "X vs Y", "все: ... {target_name}: ..." или похожий
+- Узнаваемо для людей в этом чате
+- Без кавычек вокруг всей строки"""
                     async with session.post(
                         "https://ai-gateway.vercel.sh/v1/messages",
                         json={
                             "model": "anthropic/claude-sonnet-4-20250514",
-                            "max_tokens": 100,
+                            "max_tokens": 150,
                             "messages": [{"role": "user", "content": ai_prompt}]
                         },
                         headers={
@@ -8063,9 +8070,14 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
                         if ai_resp.status == 200:
                             ai_result = await ai_resp.json()
                             ai_text = ai_result.get("content", [{}])[0].get("text", "").strip()
-                            if ai_text and len(ai_text) < 150:
-                                meme_text = ai_text
-                                logger.info(f"AI meme text: {meme_text}")
+                            logger.info(f"AI meme raw: {ai_text}")
+                            for line in ai_text.splitlines():
+                                if line.startswith("CLEAN:"):
+                                    clean_text = line.replace("CLEAN:", "").strip()
+                                elif line.startswith("FUNNY:"):
+                                    funny_caption = line.replace("FUNNY:", "").strip()
+                            if clean_text:
+                                meme_text = clean_text
                 except Exception as e:
                     logger.warning(f"AI meme text gen error: {e}")
 
@@ -8104,6 +8116,8 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
 
         await processing.delete()
 
+        display_caption = funny_caption or meme_text
+
         if len(memes) >= 2:
             # Отправляем первые 4 как альбом
             album_urls = memes[:4]
@@ -8111,7 +8125,7 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
             for i, url in enumerate(album_urls):
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as img_resp:
                     img_data = await img_resp.read()
-                caption_text = f"🤣 <i>{meme_text}</i>" if i == 0 else None
+                caption_text = f"🤣 <i>{display_caption}</i>" if i == 0 else None
                 media_items.append(InputMediaPhoto(
                     media=BufferedInputFile(img_data, filename=f"meme_{i}.png"),
                     caption=caption_text,
@@ -8123,7 +8137,7 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
                 img_data = await img_resp.read()
             await message.answer_photo(
                 BufferedInputFile(img_data, filename="meme.png"),
-                caption=f"🤣 <i>{meme_text}</i>",
+                caption=f"🤣 <i>{display_caption}</i>",
                 parse_mode=ParseMode.HTML
             )
     except Exception as e:
