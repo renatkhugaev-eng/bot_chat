@@ -7926,9 +7926,15 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
 
     # Определяем цель: реплай или просто текст
     target_user = None
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_user = message.reply_to_message.from_user
-    elif not args:
+    if message.reply_to_message:
+        if message.reply_to_message.from_user:
+            target_user = message.reply_to_message.from_user
+        else:
+            # Реплай есть, но from_user пустой (канал, анон-admin)
+            await message.answer("❌ Не могу определить пользователя — попробуй реплай на обычное сообщение")
+            return
+
+    if not target_user and not args:
         await message.answer(
             "🤣 <b>Генератор мемов</b>\n\n"
             "По теме:\n"
