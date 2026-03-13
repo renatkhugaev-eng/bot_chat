@@ -7961,37 +7961,63 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
 
     args = (command.args or "").strip()
     target_user = None
+    target_id = None
+    target_name = None
 
+    # Приоритет 1: реплай
     if message.reply_to_message:
         if message.reply_to_message.from_user:
             target_user = message.reply_to_message.from_user
+            target_id = target_user.id
+            target_name = target_user.first_name or target_user.username or "Аноним"
         else:
             await message.answer("❌ Не могу определить пользователя — реплай на обычное сообщение")
             return
 
-    if not target_user and not args:
+    # Приоритет 2: @упоминание в тексте
+    if not target_user and message.entities:
+        for entity in message.entities:
+            if entity.type == "mention":
+                mentioned_username = message.text[entity.offset:entity.offset + entity.length].lstrip("@")
+                target_name = mentioned_username
+                if USE_POSTGRES:
+                    try:
+                        found = await find_user_in_chat(message.chat.id, mentioned_username)
+                        if found:
+                            target_id = found["user_id"]
+                            target_name = found["first_name"] or mentioned_username
+                    except Exception:
+                        pass
+                args = ""  # убираем @username из текста мема
+                break
+            elif entity.type == "text_mention" and entity.user:
+                target_id = entity.user.id
+                target_name = entity.user.first_name or entity.user.username or "Аноним"
+                args = ""
+                break
+
+    if not target_id and not args:
         await message.answer(
             "🤣 <b>Генератор мемов</b>\n\n"
             "По теме:\n"
             "<code>/мемчик когда пятница но завтра понедельник</code>\n\n"
-            "Про участника — реплай на его сообщение:\n"
-            "<code>/мемчик</code> → ответь на сообщение человека",
+            "Про участника:\n"
+            "<code>/мемчик @username</code> или реплай на его сообщение",
             parse_mode=ParseMode.HTML
         )
         return
 
     processing = await message.answer("🤣 Делаю мем...")
     try:
+        import random as _rnd
         session = await get_http_session()
         meme_text = args
 
-        if target_user:
-            import random as _rnd
-            target_name = target_user.first_name or target_user.username or "Аноним"
+        if target_id:
             quotes = []
             if USE_POSTGRES:
                 try:
-                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=30)
+                    user_msgs = await get_user_messages(message.chat.id, target_id, limit=30)
                     for m in user_msgs:
                         txt = (m.get("message_text") or "").strip()
                         if txt and 5 < len(txt) < 80:
