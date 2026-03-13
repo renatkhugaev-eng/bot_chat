@@ -11,7 +11,7 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     ChatMemberUpdated, BufferedInputFile, TelegramObject,
     BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats,
-    BotCommandScopeChat
+    BotCommandScopeChat, InputMediaPhoto
 )
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.enums import ParseMode
@@ -8014,32 +8014,76 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         meme_text = args
 
         if target_id:
+            # Берём больше сообщений для лучшей персонализации
             quotes = []
             if USE_POSTGRES:
                 try:
-                    user_msgs = await get_user_messages(message.chat.id, target_id, limit=30)
+                    user_msgs = await get_user_messages(message.chat.id, target_id, limit=50)
                     for m in user_msgs:
                         txt = (m.get("message_text") or "").strip()
-                        if txt and 5 < len(txt) < 80:
+                        if txt and 5 < len(txt) < 120 and not txt.startswith("/"):
                             quotes.append(txt)
-                        if len(quotes) >= 5:
+                        if len(quotes) >= 10:
                             break
                 except Exception:
                     pass
 
-            q = quotes[0] if quotes else "сейчас приду"
-            templates = [
-                f"{target_name} когда {q}",
-                f"когда {target_name} говорит «{q[:40]}»",
-                f"{target_name} в {_rnd.choice(['понедельник', 'пятницу', '3 ночи', 'рабочее время'])}",
-                f"все: нормально. {target_name}: {q[:40]}",
-                f"{target_name} vs реальность",
-            ]
-            meme_text = _rnd.choice(templates)
+            # Генерируем текст мема через AI для максимальной смешности
+            ai_gateway_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
+            if ai_gateway_key and quotes:
+                try:
+                    quotes_str = "\n".join(f"- {q}" for q in quotes[:8])
+                    ai_prompt = f"""Придумай ОДИН короткий смешной текст для мема про человека по имени {target_name}.
+Его реальные сообщения из чата:
+{quotes_str}
 
+Требования:
+- Текст на РУССКОМ языке
+- Максимум 12 слов
+- Используй его реальные слова/темы из сообщений выше
+- Формат: ситуация или противоречие ("когда...", "X vs Y", "все: ... а {target_name}: ...")
+- Должно быть смешно и узнаваемо для участников чата
+- НЕ используй кавычки и скобки
+
+Напиши ТОЛЬКО текст мема, без пояснений."""
+                    async with session.post(
+                        "https://ai-gateway.vercel.sh/v1/messages",
+                        json={
+                            "model": "anthropic/claude-sonnet-4-20250514",
+                            "max_tokens": 100,
+                            "messages": [{"role": "user", "content": ai_prompt}]
+                        },
+                        headers={
+                            "Authorization": f"Bearer {ai_gateway_key}",
+                            "Content-Type": "application/json",
+                            "anthropic-version": "2023-06-01"
+                        },
+                        timeout=aiohttp.ClientTimeout(total=15)
+                    ) as ai_resp:
+                        if ai_resp.status == 200:
+                            ai_result = await ai_resp.json()
+                            ai_text = ai_result.get("content", [{}])[0].get("text", "").strip()
+                            if ai_text and len(ai_text) < 150:
+                                meme_text = ai_text
+                                logger.info(f"AI meme text: {meme_text}")
+                except Exception as e:
+                    logger.warning(f"AI meme text gen error: {e}")
+
+            # Fallback если AI не сработал
+            if not meme_text:
+                q = quotes[0] if quotes else "сейчас приду"
+                meme_text = _rnd.choice([
+                    f"{target_name} когда {q[:50]}",
+                    f"когда {target_name} говорит «{q[:40]}»",
+                    f"все: нормально. {target_name}: {q[:40]}",
+                    f"{target_name} vs реальность",
+                    f"{target_name} в {_rnd.choice(['понедельник', 'пятницу', '3 ночи', 'рабочее время'])}",
+                ])
+
+        # Запрашиваем сразу 6 вариантов мема
         async with session.post(
             "https://app.supermeme.ai/api/v2/meme/image",
-            json={"text": meme_text, "count": 4, "aspectRatio": "1:1"},
+            json={"text": meme_text, "count": 6},
             headers={
                 "Authorization": f"Bearer {supermeme_key}",
                 "Content-Type": "application/json"
@@ -8058,21 +8102,30 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
             await processing.edit_text("❌ Мем не сгенерировался")
             return
 
-        async with session.get(memes[0], timeout=aiohttp.ClientTimeout(total=30)) as img_resp:
-            img_data = await img_resp.read()
-
         await processing.delete()
-        sent = await message.answer_photo(
-            BufferedInputFile(img_data, filename="meme.png"),
-            caption=f"🤣 <i>{meme_text}</i>",
-            parse_mode=ParseMode.HTML
-        )
-        if len(memes) > 1:
-            cache_key = str(sent.message_id)
-            _meme_cache[cache_key] = {"urls": memes[1:], "text": meme_text}
-            await sent.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🔄 Другой мем", callback_data=f"nextmeme_{cache_key}")
-            ]]))
+
+        if len(memes) >= 2:
+            # Отправляем первые 4 как альбом
+            album_urls = memes[:4]
+            media_items = []
+            for i, url in enumerate(album_urls):
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as img_resp:
+                    img_data = await img_resp.read()
+                caption_text = f"🤣 <i>{meme_text}</i>" if i == 0 else None
+                media_items.append(InputMediaPhoto(
+                    media=BufferedInputFile(img_data, filename=f"meme_{i}.png"),
+                    caption=caption_text,
+                    parse_mode=ParseMode.HTML if caption_text else None
+                ))
+            await message.answer_media_group(media=media_items)
+        else:
+            async with session.get(memes[0], timeout=aiohttp.ClientTimeout(total=30)) as img_resp:
+                img_data = await img_resp.read()
+            await message.answer_photo(
+                BufferedInputFile(img_data, filename="meme.png"),
+                caption=f"🤣 <i>{meme_text}</i>",
+                parse_mode=ParseMode.HTML
+            )
     except Exception as e:
         logger.error(f"AI meme error: {e}")
         await processing.edit_text(f"❌ Ошибка: {e}")
