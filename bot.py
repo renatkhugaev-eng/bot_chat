@@ -8148,10 +8148,11 @@ async def cmd_ai_visual(message: Message, command: CommandObject):
 
 @router.message(Command("гифка", "гиф", "gif"))
 async def cmd_gif(message: Message, command: CommandObject):
-    """GIF по теме или про участника чата через Tenor API"""
+    """GIF-мем через Supermeme (с fallback на Tenor)"""
+    supermeme_key = os.getenv("SUPERMEME_API_KEY", "")
     tenor_key = os.getenv("TENOR_API_KEY", "")
-    if not tenor_key:
-        await message.answer("❌ TENOR_API_KEY не настроен")
+    if not supermeme_key and not tenor_key:
+        await message.answer("❌ SUPERMEME_API_KEY или TENOR_API_KEY не настроен")
         return
 
     can_do, remaining = check_cooldown(message.from_user.id, message.chat.id, "gifmeme", 15)
@@ -8181,11 +8182,11 @@ async def cmd_gif(message: Message, command: CommandObject):
         )
         return
 
-    processing = await message.answer("🎞 Ищу гифку...")
+    processing = await message.answer("🎞 Делаю гифку...")
     try:
         import random as _rnd
         session = await get_http_session()
-        query = args
+        gif_text = args
 
         if target_user:
             quotes = []
@@ -8200,32 +8201,64 @@ async def cmd_gif(message: Message, command: CommandObject):
                             break
                 except Exception:
                     pass
+            q = quotes[0] if quotes else "сейчас приду"
+            templates = [
+                f"{target_user.first_name} когда {q}",
+                f"все смотрят на {target_user.first_name}",
+                f"{target_user.first_name} услышал своё имя",
+                f"{target_user.first_name} читает этот мем",
+            ]
+            gif_text = _rnd.choice(templates)
 
-            moods = ["excited", "shocked", "deal with it", "walking away", "seriously", "mind blown", "really", "waiting"]
-            query = _rnd.choice(moods)
+        # Сначала пробуем Supermeme
+        gif_data = None
+        if supermeme_key:
+            for param in [{"isGif": True}, {"mediaType": "gif"}, {"outputFormat": "gif"}]:
+                try:
+                    payload = {"text": gif_text, "count": 1} | param
+                    async with session.post(
+                        "https://app.supermeme.ai/api/v2/meme/image",
+                        json=payload,
+                        headers={"Authorization": f"Bearer {supermeme_key}", "Content-Type": "application/json"},
+                        timeout=aiohttp.ClientTimeout(total=20)
+                    ) as resp:
+                        if resp.status == 200:
+                            result = await resp.json()
+                            urls = result.get("memes", [])
+                            if urls:
+                                async with session.get(urls[0], timeout=aiohttp.ClientTimeout(total=20)) as r:
+                                    candidate = await r.read()
+                                # Проверяем что это реально GIF (заголовок GIF89a или GIF87a)
+                                if candidate[:6] in (b"GIF89a", b"GIF87a"):
+                                    gif_data = candidate
+                                    logger.info(f"Supermeme GIF работает с параметром: {param}")
+                                    break
+                except Exception:
+                    pass
 
-        async with session.get(
-            "https://tenor.googleapis.com/v2/search",
-            params={
-                "q": query,
-                "key": tenor_key,
-                "limit": 10,
-                "media_filter": "gif",
-                "contentfilter": "medium",
-                "locale": "ru_RU",
-            },
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            if resp.status != 200:
-                raw = await resp.text()
-                await processing.edit_text(f"❌ Tenor ошибка ({resp.status}): {raw[:100]}")
+        # Fallback на Tenor если Supermeme не дал GIF
+        if not gif_data:
+            if not tenor_key:
+                await processing.edit_text("❌ Supermeme не поддерживает GIF через API, добавь TENOR_API_KEY")
                 return
-            data = await resp.json()
-
-        results = data.get("results", [])
-        if not results:
-            await processing.edit_text("❌ GIF не найден, попробуй другой запрос")
-            return
+            tenor_query = gif_text if not target_user else _rnd.choice(["reaction shocked", "mind blown", "seriously", "excited"])
+            async with session.get(
+                "https://tenor.googleapis.com/v2/search",
+                params={"q": tenor_query, "key": tenor_key, "limit": 10, "media_filter": "gif", "contentfilter": "medium"},
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status != 200:
+                    await processing.edit_text(f"❌ Ошибка поиска GIF")
+                    return
+                data = await resp.json()
+            results = data.get("results", [])
+            if not results:
+                await processing.edit_text("❌ GIF не найден")
+                return
+            item = _rnd.choice(results[:8])
+            gif_url = item["media_formats"]["gif"]["url"]
+            async with session.get(gif_url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                gif_data = await r.read()
 
         item = _rnd.choice(results[:8])
         gif_url = item["media_formats"]["gif"]["url"]
@@ -8233,7 +8266,7 @@ async def cmd_gif(message: Message, command: CommandObject):
         async with session.get(gif_url, timeout=aiohttp.ClientTimeout(total=30)) as gif_resp:
             gif_data = await gif_resp.read()
 
-        caption = f"🎞 <i>{target_user.first_name if target_user else query}</i>"
+        caption = f"🎞 <i>{gif_text}</i>"
         await processing.delete()
         await message.answer_animation(
             BufferedInputFile(gif_data, filename="meme.gif"),
