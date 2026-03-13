@@ -8026,6 +8026,69 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         await processing.edit_text(f"❌ Ошибка: {e}")
 
 
+@router.message(Command("виза", "illus", "иллюстрация"))
+async def cmd_ai_visual(message: Message, command: CommandObject):
+    """Минималистичная иллюстрация через Supermeme Text-to-visuals"""
+    supermeme_key = os.getenv("SUPERMEME_API_KEY", "")
+    if not supermeme_key:
+        await message.answer("❌ SUPERMEME_API_KEY не настроен")
+        return
+
+    text = (command.args or "").strip()
+    if not text:
+        await message.answer(
+            "🎨 <b>Минималистичная иллюстрация</b>\n\n"
+            "Лучше всего работает со сравнениями и метафорами:\n"
+            "<code>/виза программист vs дедлайн</code>\n"
+            "<code>/виза ожидание vs реальность</code>\n"
+            "<code>/виза утро понедельника</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    can_do, remaining = check_cooldown(message.from_user.id, message.chat.id, "visual", 30)
+    if not can_do:
+        await message.answer(f"⏳ Подожди {remaining:.0f} сек")
+        return
+
+    processing = await message.answer("🎨 Рисую...")
+    try:
+        session = await get_http_session()
+        async with session.post(
+            "https://app.supermeme.ai/api/v1/minimalist-visual",
+            json={"text": text, "count": 1, "aspectRatio": "1:1"},
+            headers={
+                "Authorization": f"Bearer {supermeme_key}",
+                "Content-Type": "application/json"
+            },
+            timeout=aiohttp.ClientTimeout(total=40)
+        ) as resp:
+            raw = await resp.text()
+            logger.info(f"Supermeme visual status={resp.status} body={raw[:200]}")
+            if resp.status != 200:
+                await processing.edit_text(f"❌ Ошибка ({resp.status}): {raw[:150]}")
+                return
+            result = json.loads(raw)
+
+        images = result.get("images", [])
+        if not images:
+            await processing.edit_text("❌ Иллюстрация не сгенерировалась")
+            return
+
+        async with session.get(images[0], timeout=aiohttp.ClientTimeout(total=30)) as img_resp:
+            img_data = await img_resp.read()
+
+        await processing.delete()
+        await message.answer_photo(
+            BufferedInputFile(img_data, filename="visual.png"),
+            caption=f"🎨 <i>{text}</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"AI visual error: {e}")
+        await processing.edit_text(f"❌ Ошибка: {e}")
+
+
 @router.message(Command("memestats", "мемы"))
 async def cmd_meme_stats(message: Message):
     """Статистика коллекции мемов"""
