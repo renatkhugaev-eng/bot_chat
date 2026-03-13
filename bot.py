@@ -8242,9 +8242,9 @@ async def cmd_gif(message: Message, command: CommandObject):
         if supermeme_key:
             try:
                 async with session.post(
-                    "https://api-prd.supermeme.ai/api/v1/meme/text-to-gif",
+                    "https://app.supermeme.ai/api/v1/meme/text-to-gif",
                     json={"text": gif_text},
-                    headers={"Authorization": f"Bearer {supermeme_key}", "Content-Type": "application/json"},
+                    headers={"Authorization": f"Bearer {supermeme_key}", "Content-Type": "application/json", "x-api-key": supermeme_key},
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as resp:
                     if resp.status == 200:
