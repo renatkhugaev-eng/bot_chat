@@ -8209,7 +8209,7 @@ async def cmd_ai_gif(message: Message, command: CommandObject):
             gif_text = _rnd.choice(templates)
 
         async with session.post(
-            "https://app.supermeme.ai/api/v2/gif",
+            "https://app.supermeme.ai/api/v1/gif",
             json={"text": gif_text, "count": 1},
             headers={
                 "Authorization": f"Bearer {supermeme_key}",
