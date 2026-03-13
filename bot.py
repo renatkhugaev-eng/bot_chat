@@ -8150,6 +8150,101 @@ async def cmd_ai_visual(message: Message, command: CommandObject):
         await processing.edit_text(f"❌ Ошибка: {e}")
 
 
+@router.message(Command("гифка", "гиф", "gifmeme", "animeme"))
+async def cmd_ai_gif(message: Message, command: CommandObject):
+    """Анимированный GIF-мем через Supermeme"""
+    supermeme_key = os.getenv("SUPERMEME_API_KEY", "")
+    if not supermeme_key:
+        await message.answer("❌ SUPERMEME_API_KEY не настроен")
+        return
+
+    can_do, remaining = check_cooldown(message.from_user.id, message.chat.id, "gifmeme", 30)
+    if not can_do:
+        await message.answer(f"⏳ Подожди {remaining:.0f} сек")
+        return
+
+    args = (command.args or "").strip()
+    target_user = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+    elif not args:
+        await message.answer(
+            "🎞 <b>GIF-мем</b>\n\n"
+            "По теме:\n"
+            "<code>/гифка когда наконец пятница</code>\n"
+            "<code>/гифка boss baby mode on</code>\n\n"
+            "Про участника — реплай на его сообщение + /гифка",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    processing = await message.answer("🎞 Делаю гифку...")
+    try:
+        session = await get_http_session()
+        gif_text = args
+
+        if target_user:
+            target_name = target_user.first_name or target_user.username or "Аноним"
+            quotes = []
+            if USE_POSTGRES:
+                try:
+                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=30)
+                    for m in user_msgs:
+                        txt = (m.get("message_text") or "").strip()
+                        if txt and 5 < len(txt) < 80:
+                            quotes.append(txt)
+                        if len(quotes) >= 3:
+                            break
+                except Exception:
+                    pass
+
+            import random as _rnd
+            templates = [
+                f"{target_name} когда {quotes[0] if quotes else 'всё идёт по плану'}",
+                f"{target_name} заходит в чат",
+                f"все смотрят на {target_name}",
+                f"{target_name} услышал своё имя",
+                f"{target_name} читает этот мем",
+            ]
+            gif_text = _rnd.choice(templates)
+
+        async with session.post(
+            "https://app.supermeme.ai/api/v2/gif",
+            json={"text": gif_text, "count": 1},
+            headers={
+                "Authorization": f"Bearer {supermeme_key}",
+                "Content-Type": "application/json"
+            },
+            timeout=aiohttp.ClientTimeout(total=40)
+        ) as resp:
+            raw = await resp.text()
+            logger.info(f"Supermeme GIF status={resp.status} body={raw[:200]}")
+            if resp.status != 200:
+                await processing.edit_text(f"❌ Supermeme ошибка ({resp.status}): {raw[:150]}")
+                return
+            result = json.loads(raw)
+
+        # API может вернуть gifs или memes
+        gifs = result.get("gifs") or result.get("memes") or []
+        if not gifs:
+            await processing.edit_text(f"❌ GIF не сгенерировался. Ответ: {raw[:150]}")
+            return
+
+        gif_url = gifs[0]
+        async with session.get(gif_url, timeout=aiohttp.ClientTimeout(total=30)) as gif_resp:
+            gif_data = await gif_resp.read()
+
+        await processing.delete()
+        await message.answer_animation(
+            BufferedInputFile(gif_data, filename="meme.gif"),
+            caption=f"🎞 <i>{gif_text}</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"AI gif error: {e}")
+        await processing.edit_text(f"❌ Ошибка: {e}")
+
+
 @router.message(Command("memestats", "мемы"))
 async def cmd_meme_stats(message: Message):
     """Статистика коллекции мемов"""
