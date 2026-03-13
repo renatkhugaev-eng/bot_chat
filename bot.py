@@ -8016,7 +8016,7 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         # Генерируем мем через Supermeme
         async with session.post(
             "https://app.supermeme.ai/api/v2/meme/image",
-            json={"text": meme_text, "count": 4, "aspectRatio": "1:1"},
+            json={"text": meme_text, "count": 4, "aspectRatio": "1:1", "magic": True},
             headers={
                 "Authorization": f"Bearer {supermeme_key}",
                 "Content-Type": "application/json"
