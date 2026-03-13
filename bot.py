@@ -7909,7 +7909,7 @@ async def cmd_random_meme(message: Message):
         await message.answer("❌ Мем сломался. Попробуй ещё раз.")
 
 
-@router.message(Command("нейромем", "аймем", "genmeme", "нейро_мем"))
+@router.message(Command("мемчик", "makememe"))
 async def cmd_ai_meme(message: Message, command: CommandObject):
     """Генерация мема через Supermeme AI"""
     supermeme_key = os.getenv("SUPERMEME_API_KEY", "")
@@ -7922,8 +7922,8 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         await message.answer(
             "🤣 <b>Генератор мемов</b>\n\n"
             "Напиши тему — получи мем:\n"
-            "<code>/нейромем когда пятница но завтра понедельник</code>\n"
-            "<code>/нейромем программисты и дедлайны</code>",
+            "<code>/мемчик когда пятница но завтра понедельник</code>\n"
+            "<code>/мемчик программисты и дедлайны</code>",
             parse_mode=ParseMode.HTML
         )
         return
