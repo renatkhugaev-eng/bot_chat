@@ -7911,21 +7911,10 @@ async def cmd_random_meme(message: Message):
 
 @router.message(Command("мемчик", "makememe"))
 async def cmd_ai_meme(message: Message, command: CommandObject):
-    """Генерация мема через Supermeme AI"""
+    """Генерация мема через Supermeme AI — по теме или по участнику чата"""
     supermeme_key = os.getenv("SUPERMEME_API_KEY", "")
     if not supermeme_key:
         await message.answer("❌ SUPERMEME_API_KEY не настроен")
-        return
-
-    text = (command.args or "").strip()
-    if not text:
-        await message.answer(
-            "🤣 <b>Генератор мемов</b>\n\n"
-            "Напиши тему — получи мем:\n"
-            "<code>/мемчик когда пятница но завтра понедельник</code>\n"
-            "<code>/мемчик программисты и дедлайны</code>",
-            parse_mode=ParseMode.HTML
-        )
         return
 
     can_do, remaining = check_cooldown(message.from_user.id, message.chat.id, "aimeme", 30)
@@ -7933,12 +7922,78 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         await message.answer(f"⏳ Подожди {remaining:.0f} сек")
         return
 
-    processing = await message.answer("🤣 Генерирую мем...")
+    args = (command.args or "").strip()
+
+    # Определяем цель: реплай или просто текст
+    target_user = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+    elif not args:
+        await message.answer(
+            "🤣 <b>Генератор мемов</b>\n\n"
+            "По теме:\n"
+            "<code>/мемчик когда пятница но завтра понедельник</code>\n\n"
+            "Про участника (реплай на его сообщение):\n"
+            "<code>/мемчик</code> → ответь на сообщение человека",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    processing = await message.answer("🤣 Делаю мем...")
     try:
         session = await get_http_session()
+        meme_text = args
+
+        if target_user:
+            # Режим персонального мема — читаем сообщения человека
+            target_name = target_user.first_name or target_user.username or "Аноним"
+            context = ""
+            if USE_POSTGRES:
+                try:
+                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=25)
+                    if user_msgs:
+                        context = "\n".join([m.get("message_text", "") for m in reversed(user_msgs) if m.get("message_text")])[:1500]
+                except Exception:
+                    pass
+
+            ai_gateway_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
+            if not ai_gateway_key:
+                await processing.edit_text("❌ VERCEL_AI_GATEWAY_KEY не настроен")
+                return
+
+            async with session.post(
+                "https://ai-gateway.vercel.sh/v1/chat/completions",
+                json={
+                    "model": "anthropic/claude-sonnet-4-20250514",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": (
+                        f"Придумай одну смешную фразу для мема про человека по имени {target_name}. "
+                        f"Используй его реальные высказывания из переписки. "
+                        f"Формат: короткая ситуация как в мемах (например: 'Андрей когда говорит щас и появляется через час'). "
+                        f"Только фраза, без кавычек и объяснений. На русском.\n\n"
+                        f"Его сообщения:\n{context}"
+                    )}]
+                },
+                headers={
+                    "Authorization": f"Bearer {ai_gateway_key}",
+                    "Content-Type": "application/json"
+                },
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
+                raw = await resp.text()
+                if resp.status != 200:
+                    await processing.edit_text(f"❌ Ошибка генерации текста: {raw[:150]}")
+                    return
+                gw_result = json.loads(raw)
+            meme_text = gw_result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if not meme_text:
+                await processing.edit_text("❌ Текст для мема не придумался")
+                return
+
+        # Генерируем мем через Supermeme
         async with session.post(
             "https://app.supermeme.ai/api/v2/meme/image",
-            json={"text": text, "count": 1, "aspectRatio": "1:1"},
+            json={"text": meme_text, "count": 1, "aspectRatio": "1:1"},
             headers={
                 "Authorization": f"Bearer {supermeme_key}",
                 "Content-Type": "application/json"
@@ -7957,14 +8012,13 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
             await processing.edit_text("❌ Мем не сгенерировался")
             return
 
-        meme_url = memes[0]
-        async with session.get(meme_url, timeout=aiohttp.ClientTimeout(total=30)) as img_resp:
+        async with session.get(memes[0], timeout=aiohttp.ClientTimeout(total=30)) as img_resp:
             img_data = await img_resp.read()
 
         await processing.delete()
         await message.answer_photo(
             BufferedInputFile(img_data, filename="meme.png"),
-            caption=f"🤣 <i>{text}</i>",
+            caption=f"🤣 <i>{meme_text}</i>",
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
