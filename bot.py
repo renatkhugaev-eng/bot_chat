@@ -171,6 +171,9 @@ FUCK_OFF_REPLIES = [
     "Нахуя ты меня тегнул командой, дебил?",
 ]
 
+# Кэш мемов для кнопки "Другой мем" {message_id: [url, url, ...]}
+_meme_cache: dict = {}
+
 # Кэш информации о боте (ID и username)
 _cached_bot_id: Optional[int] = None
 _cached_bot_username: Optional[str] = None
@@ -790,6 +793,40 @@ async def cmd_crime(message: Message):
         reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN
     )
+
+
+@router.callback_query(F.data.startswith("nextmeme_"))
+async def next_meme_callback(callback: CallbackQuery):
+    """Показать следующий мем из кэша"""
+    cache_key = callback.data.replace("nextmeme_", "")
+    cached = _meme_cache.get(cache_key)
+
+    if not cached or not cached.get("urls"):
+        await callback.answer("Больше вариантов нет 🤷", show_alert=False)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        return
+
+    await callback.answer("Держи другой!")
+    try:
+        session = await get_http_session()
+        next_url = cached["urls"].pop(0)
+        async with session.get(next_url, timeout=aiohttp.ClientTimeout(total=30)) as img_resp:
+            img_data = await img_resp.read()
+
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔄 Другой мем", callback_data=f"nextmeme_{cache_key}")
+        ]]) if cached["urls"] else None
+
+        await callback.message.answer_photo(
+            BufferedInputFile(img_data, filename="meme.png"),
+            caption=f"🤣 <i>{cached['text']}</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup
+        )
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception as e:
+        logger.error(f"next_meme error: {e}")
+        await callback.answer("Ошибка загрузки мема", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("crime_"))
@@ -7979,7 +8016,7 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         # Генерируем мем через Supermeme
         async with session.post(
             "https://app.supermeme.ai/api/v2/meme/image",
-            json={"text": meme_text, "count": 1, "aspectRatio": "1:1"},
+            json={"text": meme_text, "count": 4, "aspectRatio": "1:1"},
             headers={
                 "Authorization": f"Bearer {supermeme_key}",
                 "Content-Type": "application/json"
@@ -8002,11 +8039,18 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
             img_data = await img_resp.read()
 
         await processing.delete()
-        await message.answer_photo(
+        # Отправляем без кнопки, потом добавим с реальным message_id
+        sent = await message.answer_photo(
             BufferedInputFile(img_data, filename="meme.png"),
             caption=f"🤣 <i>{meme_text}</i>",
             parse_mode=ParseMode.HTML
         )
+        if len(memes) > 1:
+            cache_key = str(sent.message_id)
+            _meme_cache[cache_key] = {"urls": memes[1:], "text": meme_text}
+            await sent.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🔄 Другой мем", callback_data=f"nextmeme_{cache_key}")
+            ]]))
     except Exception as e:
         logger.error(f"AI meme error: {e}")
         await processing.edit_text(f"❌ Ошибка: {e}")
