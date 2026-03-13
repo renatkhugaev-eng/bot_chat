@@ -7945,51 +7945,30 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         meme_text = args
 
         if target_user:
-            # Режим персонального мема — читаем сообщения человека
+            # Режим персонального мема — берём фразы из переписки
             target_name = target_user.first_name or target_user.username or "Аноним"
-            context = ""
+            quotes = []
             if USE_POSTGRES:
                 try:
-                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=25)
-                    if user_msgs:
-                        context = "\n".join([m.get("message_text", "") for m in reversed(user_msgs) if m.get("message_text")])[:1500]
+                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=30)
+                    for m in user_msgs:
+                        txt = (m.get("message_text") or "").strip()
+                        if txt and len(txt) > 5 and len(txt) < 80:
+                            quotes.append(txt)
+                        if len(quotes) >= 5:
+                            break
                 except Exception:
                     pass
 
-            ai_gateway_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
-            if not ai_gateway_key:
-                await processing.edit_text("❌ VERCEL_AI_GATEWAY_KEY не настроен")
-                return
-
-            async with session.post(
-                "https://ai-gateway.vercel.sh/v1/chat/completions",
-                json={
-                    "model": "anthropic/claude-sonnet-4-20250514",
-                    "max_tokens": 100,
-                    "messages": [{"role": "user", "content": (
-                        f"Придумай одну смешную фразу для мема про человека по имени {target_name}. "
-                        f"Используй его реальные высказывания и характер из переписки. "
-                        f"Формат: короткая ситуация как в мемах (например: '{target_name} когда говорит щас и появляется через час'). "
-                        f"ВАЖНО: пиши ТОЛЬКО на русском языке, никакого английского. "
-                        f"Только сама фраза, без кавычек, скобок и объяснений.\n\n"
-                        f"Сообщения {target_name}:\n{context}"
-                    )}]
-                },
-                headers={
-                    "Authorization": f"Bearer {ai_gateway_key}",
-                    "Content-Type": "application/json"
-                },
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as resp:
-                raw = await resp.text()
-                if resp.status != 200:
-                    await processing.edit_text(f"❌ Ошибка генерации текста: {raw[:150]}")
-                    return
-                gw_result = json.loads(raw)
-            meme_text = gw_result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            if not meme_text:
-                await processing.edit_text("❌ Текст для мема не придумался")
-                return
+            import random as _rnd
+            templates = [
+                f"{target_name} когда {quotes[0] if quotes else 'пишет в чат'}",
+                f"{target_name} vs реальность",
+                f"когда {target_name} говорит '{quotes[0][:40] if quotes else 'сейчас приду'}'",
+                f"{target_name} в {_rnd.choice(['понедельник', 'пятницу', '3 ночи', 'рабочее время'])}",
+                f"все: нормально. {target_name}: {quotes[0][:40] if quotes else 'а вот и нет'}",
+            ]
+            meme_text = _rnd.choice(templates)
 
         # Генерируем мем через Supermeme
         async with session.post(
@@ -8063,47 +8042,28 @@ async def cmd_ai_visual(message: Message, command: CommandObject):
 
         if target_user:
             target_name = target_user.first_name or target_user.username or "Аноним"
-            context = ""
+            quotes = []
             if USE_POSTGRES:
                 try:
-                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=25)
-                    if user_msgs:
-                        context = "\n".join([m.get("message_text", "") for m in reversed(user_msgs) if m.get("message_text")])[:1500]
+                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=30)
+                    for m in user_msgs:
+                        txt = (m.get("message_text") or "").strip()
+                        if txt and 5 < len(txt) < 60:
+                            quotes.append(txt)
+                        if len(quotes) >= 3:
+                            break
                 except Exception:
                     pass
 
-            ai_gateway_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
-            if not ai_gateway_key:
-                await processing.edit_text("❌ VERCEL_AI_GATEWAY_KEY не настроен")
-                return
-
-            async with session.post(
-                "https://ai-gateway.vercel.sh/v1/chat/completions",
-                json={
-                    "model": "anthropic/claude-sonnet-4-20250514",
-                    "max_tokens": 80,
-                    "messages": [{"role": "user", "content": (
-                        f"Придумай тему для минималистичной иллюстрации про человека по имени {target_name}. "
-                        f"Формат: короткое сравнение или метафора (например: '{target_name} vs дедлайны', '{target_name} ожидание vs реальность'). "
-                        f"ТОЛЬКО на русском языке. Только сама тема, без объяснений.\n\n"
-                        f"Сообщения {target_name}:\n{context}"
-                    )}]
-                },
-                headers={
-                    "Authorization": f"Bearer {ai_gateway_key}",
-                    "Content-Type": "application/json"
-                },
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as resp:
-                raw = await resp.text()
-                if resp.status != 200:
-                    await processing.edit_text(f"❌ Ошибка генерации темы: {raw[:150]}")
-                    return
-                gw_result = json.loads(raw)
-            visual_text = gw_result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            if not visual_text:
-                await processing.edit_text("❌ Тема не придумалась")
-                return
+            import random as _rnd
+            themes = [
+                f"{target_name} vs дедлайны",
+                f"{target_name} ожидание vs реальность",
+                f"{target_name} до и после {_rnd.choice(['кофе', 'выходных', 'зарплаты'])}",
+                f"жизнь {target_name} в двух картинках",
+                f"{target_name} план vs факт",
+            ]
+            visual_text = _rnd.choice(themes)
 
         async with session.post(
             "https://app.supermeme.ai/api/v1/minimalist-visual",
