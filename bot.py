@@ -8236,61 +8236,40 @@ async def cmd_gif(message: Message, command: CommandObject):
             ]
             gif_text = _rnd.choice(templates)
 
-        # Сначала пробуем Supermeme
+        # Supermeme text-to-gif эндпоинт
         gif_data = None
+        gif_url = None
         if supermeme_key:
-            for param in [{"isGif": True}, {"mediaType": "gif"}, {"outputFormat": "gif"}]:
-                try:
-                    payload = {"text": gif_text, "count": 1} | param
-                    async with session.post(
-                        "https://app.supermeme.ai/api/v2/meme/image",
-                        json=payload,
-                        headers={"Authorization": f"Bearer {supermeme_key}", "Content-Type": "application/json"},
-                        timeout=aiohttp.ClientTimeout(total=20)
-                    ) as resp:
-                        if resp.status == 200:
-                            result = await resp.json()
-                            urls = result.get("memes", [])
-                            if urls:
-                                async with session.get(urls[0], timeout=aiohttp.ClientTimeout(total=20)) as r:
-                                    candidate = await r.read()
-                                # Проверяем что это реально GIF (заголовок GIF89a или GIF87a)
-                                if candidate[:6] in (b"GIF89a", b"GIF87a"):
-                                    gif_data = candidate
-                                    logger.info(f"Supermeme GIF работает с параметром: {param}")
-                                    break
-                except Exception:
-                    pass
+            try:
+                async with session.post(
+                    "https://api-prd.supermeme.ai/api/v1/meme/text-to-gif",
+                    json={"text": gif_text},
+                    headers={"Authorization": f"Bearer {supermeme_key}", "Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        logger.info(f"Supermeme text-to-gif response: {result}")
+                        # Может вернуть url, gifUrl, memes[0], output и т.п.
+                        gif_url = (
+                            result.get("url") or
+                            result.get("gifUrl") or
+                            result.get("gif_url") or
+                            result.get("output") or
+                            (result.get("memes") or [None])[0]
+                        )
+                    else:
+                        body = await resp.text()
+                        logger.warning(f"Supermeme text-to-gif {resp.status}: {body}")
+            except Exception as e:
+                logger.warning(f"Supermeme text-to-gif error: {e}")
 
-        # Fallback на Tenor если Supermeme не дал GIF
-        if not gif_data:
-            if not tenor_key:
-                await processing.edit_text("❌ Supermeme не поддерживает GIF через API, добавь TENOR_API_KEY")
-                return
-            tenor_query = gif_text if not target_user else _rnd.choice(["reaction shocked", "mind blown", "seriously", "excited"])
-            async with session.get(
-                "https://tenor.googleapis.com/v2/search",
-                params={"q": tenor_query, "key": tenor_key, "limit": 10, "media_filter": "gif", "contentfilter": "medium"},
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status != 200:
-                    await processing.edit_text(f"❌ Ошибка поиска GIF")
-                    return
-                data = await resp.json()
-            results = data.get("results", [])
-            if not results:
-                await processing.edit_text("❌ GIF не найден")
-                return
-            item = _rnd.choice(results[:8])
-            gif_url = item["media_formats"]["gif"]["url"]
+        if gif_url:
             async with session.get(gif_url, timeout=aiohttp.ClientTimeout(total=30)) as r:
                 gif_data = await r.read()
-
-        item = _rnd.choice(results[:8])
-        gif_url = item["media_formats"]["gif"]["url"]
-
-        async with session.get(gif_url, timeout=aiohttp.ClientTimeout(total=30)) as gif_resp:
-            gif_data = await gif_resp.read()
+        else:
+            await processing.edit_text("❌ Supermeme не вернул GIF — попробуй ещё раз")
+            return
 
         caption = f"🎞 <i>{gif_text}</i>"
         await processing.delete()
