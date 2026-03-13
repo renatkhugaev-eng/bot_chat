@@ -7968,10 +7968,11 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
                     "max_tokens": 100,
                     "messages": [{"role": "user", "content": (
                         f"Придумай одну смешную фразу для мема про человека по имени {target_name}. "
-                        f"Используй его реальные высказывания из переписки. "
-                        f"Формат: короткая ситуация как в мемах (например: 'Андрей когда говорит щас и появляется через час'). "
-                        f"Только фраза, без кавычек и объяснений. На русском.\n\n"
-                        f"Его сообщения:\n{context}"
+                        f"Используй его реальные высказывания и характер из переписки. "
+                        f"Формат: короткая ситуация как в мемах (например: '{target_name} когда говорит щас и появляется через час'). "
+                        f"ВАЖНО: пиши ТОЛЬКО на русском языке, никакого английского. "
+                        f"Только сама фраза, без кавычек, скобок и объяснений.\n\n"
+                        f"Сообщения {target_name}:\n{context}"
                     )}]
                 },
                 headers={
@@ -8026,24 +8027,12 @@ async def cmd_ai_meme(message: Message, command: CommandObject):
         await processing.edit_text(f"❌ Ошибка: {e}")
 
 
-@router.message(Command("виза", "illus", "иллюстрация"))
+@router.message(Command("картинка", "illus", "visual"))
 async def cmd_ai_visual(message: Message, command: CommandObject):
-    """Минималистичная иллюстрация через Supermeme Text-to-visuals"""
+    """Минималистичная иллюстрация через Supermeme Text-to-visuals — по теме или про участника"""
     supermeme_key = os.getenv("SUPERMEME_API_KEY", "")
     if not supermeme_key:
         await message.answer("❌ SUPERMEME_API_KEY не настроен")
-        return
-
-    text = (command.args or "").strip()
-    if not text:
-        await message.answer(
-            "🎨 <b>Минималистичная иллюстрация</b>\n\n"
-            "Лучше всего работает со сравнениями и метафорами:\n"
-            "<code>/виза программист vs дедлайн</code>\n"
-            "<code>/виза ожидание vs реальность</code>\n"
-            "<code>/виза утро понедельника</code>",
-            parse_mode=ParseMode.HTML
-        )
         return
 
     can_do, remaining = check_cooldown(message.from_user.id, message.chat.id, "visual", 30)
@@ -8051,12 +8040,74 @@ async def cmd_ai_visual(message: Message, command: CommandObject):
         await message.answer(f"⏳ Подожди {remaining:.0f} сек")
         return
 
+    args = (command.args or "").strip()
+    target_user = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+    elif not args:
+        await message.answer(
+            "🎨 <b>Минималистичная иллюстрация</b>\n\n"
+            "По теме (сравнения и метафоры работают лучше всего):\n"
+            "<code>/картинка программист vs дедлайн</code>\n"
+            "<code>/картинка ожидание vs реальность</code>\n\n"
+            "Про участника (реплай на его сообщение):\n"
+            "<code>/картинка</code> → ответь на сообщение человека",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
     processing = await message.answer("🎨 Рисую...")
     try:
         session = await get_http_session()
+        visual_text = args
+
+        if target_user:
+            target_name = target_user.first_name or target_user.username or "Аноним"
+            context = ""
+            if USE_POSTGRES:
+                try:
+                    user_msgs = await get_user_messages(message.chat.id, target_user.id, limit=25)
+                    if user_msgs:
+                        context = "\n".join([m.get("message_text", "") for m in reversed(user_msgs) if m.get("message_text")])[:1500]
+                except Exception:
+                    pass
+
+            ai_gateway_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
+            if not ai_gateway_key:
+                await processing.edit_text("❌ VERCEL_AI_GATEWAY_KEY не настроен")
+                return
+
+            async with session.post(
+                "https://ai-gateway.vercel.sh/v1/chat/completions",
+                json={
+                    "model": "anthropic/claude-sonnet-4-20250514",
+                    "max_tokens": 80,
+                    "messages": [{"role": "user", "content": (
+                        f"Придумай тему для минималистичной иллюстрации про человека по имени {target_name}. "
+                        f"Формат: короткое сравнение или метафора (например: '{target_name} vs дедлайны', '{target_name} ожидание vs реальность'). "
+                        f"ТОЛЬКО на русском языке. Только сама тема, без объяснений.\n\n"
+                        f"Сообщения {target_name}:\n{context}"
+                    )}]
+                },
+                headers={
+                    "Authorization": f"Bearer {ai_gateway_key}",
+                    "Content-Type": "application/json"
+                },
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
+                raw = await resp.text()
+                if resp.status != 200:
+                    await processing.edit_text(f"❌ Ошибка генерации темы: {raw[:150]}")
+                    return
+                gw_result = json.loads(raw)
+            visual_text = gw_result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if not visual_text:
+                await processing.edit_text("❌ Тема не придумалась")
+                return
+
         async with session.post(
             "https://app.supermeme.ai/api/v1/minimalist-visual",
-            json={"text": text, "count": 1, "aspectRatio": "1:1"},
+            json={"text": visual_text, "count": 1, "aspectRatio": "1:1"},
             headers={
                 "Authorization": f"Bearer {supermeme_key}",
                 "Content-Type": "application/json"
@@ -8081,7 +8132,7 @@ async def cmd_ai_visual(message: Message, command: CommandObject):
         await processing.delete()
         await message.answer_photo(
             BufferedInputFile(img_data, filename="visual.png"),
-            caption=f"🎨 <i>{text}</i>",
+            caption=f"🎨 <i>{visual_text}</i>",
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
