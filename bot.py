@@ -8801,14 +8801,23 @@ async def build_news_digest() -> str | None:
             },
             timeout=aiohttp.ClientTimeout(total=25)
         ) as resp:
+            raw = await resp.text()
+            logger.info(f"News AI status={resp.status} body={raw[:300]}")
             if resp.status == 200:
-                result = await resp.json()
+                result = json.loads(raw)
                 digest = result.get("content", [{}])[0].get("text", "").strip()
                 if digest:
                     return digest
+            else:
+                logger.error(f"News AI ошибка {resp.status}: {raw[:200]}")
     except Exception as e:
         logger.error(f"News digest AI error: {e}")
-    return None
+
+    # Fallback: отдаём сырые заголовки без AI-категоризации
+    from datetime import datetime
+    fallback = f"📰 Свежие новости ({datetime.now().strftime('%H:%M')}):\n\n"
+    fallback += "\n".join(f"• {h.split(' / ')[0].lstrip('- ')}" for h in headlines[:15])
+    return fallback
 
 
 # Кэш уже отправленных новостей (title_norm -> timestamp)
@@ -10689,8 +10698,8 @@ async def main():
         scheduler.add_job(scheduled_auto_summaries, 'interval', hours=6, id='auto_summaries')
         scheduler.add_job(scheduled_greeting, 'interval', hours=2, id='greeting')
 
-    # Real-time мониторинг новостей каждые 10 минут
-    scheduler.add_job(scheduled_news_monitor, 'interval', minutes=10, id='news_monitor')
+    # Real-time мониторинг новостей каждые 5 минут
+    scheduler.add_job(scheduled_news_monitor, 'interval', minutes=5, id='news_monitor')
     # Итоговый дайджест раз в 6 часов
     scheduler.add_job(scheduled_news_digest, 'interval', hours=6, id='news_digest')
 
