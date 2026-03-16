@@ -8586,71 +8586,125 @@ async def cleanup_memory():
 
 # ==================== НОВОСТНОЙ ДАЙДЖЕСТ ====================
 
-async def fetch_news_currents(session: aiohttp.ClientSession, language: str = "ru") -> list[dict]:
-    """Получить свежие новости через Currents API"""
+async def _fetch_currents(session: aiohttp.ClientSession) -> list[dict]:
     key = os.getenv("CURRENTS_API_KEY", "")
     if not key:
         return []
     try:
         async with session.get(
             "https://api.currentsapi.services/v1/latest-news",
-            params={"apiKey": key, "language": language, "page_size": 20},
+            params={"apiKey": key, "language": "ru", "page_size": 20},
             timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data.get("news", [])
+        ) as r:
+            if r.status == 200:
+                return (await r.json()).get("news", [])
     except Exception as e:
         logger.warning(f"Currents API error: {e}")
     return []
 
 
-async def fetch_news_gnews(session: aiohttp.ClientSession, lang: str = "ru") -> list[dict]:
-    """Получить свежие новости через GNews API"""
+async def _fetch_gnews(session: aiohttp.ClientSession) -> list[dict]:
     key = os.getenv("GNEWS_API_KEY", "")
     if not key:
         return []
     try:
         async with session.get(
             "https://gnews.io/api/v4/top-headlines",
-            params={"token": key, "lang": lang, "max": 20},
+            params={"token": key, "lang": "ru", "country": "ru", "max": 20},
             timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                # Приводим к единому формату
+        ) as r:
+            if r.status == 200:
                 return [
                     {"title": a.get("title", ""), "description": a.get("description", ""), "url": a.get("url", "")}
-                    for a in data.get("articles", [])
+                    for a in (await r.json()).get("articles", [])
                 ]
     except Exception as e:
         logger.warning(f"GNews API error: {e}")
     return []
 
 
+async def _fetch_thenewsapi(session: aiohttp.ClientSession) -> list[dict]:
+    key = os.getenv("THENEWSAPI_KEY", "")
+    if not key:
+        return []
+    try:
+        async with session.get(
+            "https://api.thenewsapi.com/v1/news/top",
+            params={"api_token": key, "language": "ru", "limit": 20},
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as r:
+            if r.status == 200:
+                return [
+                    {"title": a.get("title", ""), "description": a.get("description", ""), "url": a.get("url", "")}
+                    for a in (await r.json()).get("data", [])
+                ]
+    except Exception as e:
+        logger.warning(f"TheNewsAPI error: {e}")
+    return []
+
+
+async def _fetch_gdelt(session: aiohttp.ClientSession) -> list[dict]:
+    """GDELT DOC API — полностью бесплатно, все мировые СМИ"""
+    try:
+        async with session.get(
+            "https://api.gdeltproject.org/api/v2/doc/doc",
+            params={
+                "query": "sourcelang:russian",
+                "mode": "artlist",
+                "maxrecords": 20,
+                "format": "json",
+                "sort": "datedesc"
+            },
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                return [
+                    {"title": a.get("title", ""), "description": "", "url": a.get("url", "")}
+                    for a in data.get("articles", [])
+                ]
+    except Exception as e:
+        logger.warning(f"GDELT error: {e}")
+    return []
+
+
 async def build_news_digest() -> str | None:
-    """Формирует новостной дайджест через AI. Возвращает готовый текст или None."""
+    """Формирует новостной дайджест через AI из всех доступных источников."""
     ai_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
     if not ai_key:
         return None
 
     session = await get_http_session()
 
-    # Пробуем оба источника
-    news = await fetch_news_currents(session, language="ru")
-    if not news:
-        news = await fetch_news_gnews(session, lang="ru")
-    if not news:
-        # English fallback
-        news = await fetch_news_currents(session, language="en")
-    if not news:
-        news = await fetch_news_gnews(session, lang="en")
-    if not news:
+    # Запрашиваем все источники параллельно
+    results = await asyncio.gather(
+        _fetch_currents(session),
+        _fetch_gnews(session),
+        _fetch_thenewsapi(session),
+        _fetch_gdelt(session),
+        return_exceptions=True
+    )
+
+    # Объединяем и дедуплицируем по заголовку
+    seen_titles: set[str] = set()
+    all_news: list[dict] = []
+    for batch in results:
+        if isinstance(batch, list):
+            for item in batch:
+                title = (item.get("title") or "").strip()
+                key_norm = title.lower()[:60]
+                if title and key_norm not in seen_titles:
+                    seen_titles.add(key_norm)
+                    all_news.append(item)
+
+    if not all_news:
         return None
+
+    logger.info(f"News digest: собрано {len(all_news)} уникальных новостей из {sum(1 for r in results if isinstance(r, list) and r)} источников")
 
     # Собираем заголовки для AI
     headlines = []
-    for item in news[:25]:
+    for item in all_news[:30]:
         title = item.get("title") or ""
         desc = item.get("description") or ""
         url = item.get("url") or item.get("link") or ""
