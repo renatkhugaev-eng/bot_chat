@@ -8643,6 +8643,39 @@ async def _fetch_thenewsapi(session: aiohttp.ClientSession) -> list[dict]:
     return []
 
 
+async def _fetch_newsapi(session: aiohttp.ClientSession) -> list[dict]:
+    """NewsAPI.org — 150,000+ источников (Bloomberg, Fortune, Reuters и др.)"""
+    key = os.getenv("NEWSAPI_KEY", "")
+    if not key:
+        return []
+    try:
+        # Топ мировые заголовки
+        async with session.get(
+            "https://newsapi.org/v2/top-headlines",
+            params={"apiKey": key, "language": "ru", "pageSize": 20},
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as r:
+            if r.status == 200:
+                data = await r.json()
+                articles = data.get("articles", [])
+                # Если русских нет — берём английские
+                if not articles:
+                    async with session.get(
+                        "https://newsapi.org/v2/top-headlines",
+                        params={"apiKey": key, "language": "en", "pageSize": 20},
+                        timeout=aiohttp.ClientTimeout(total=15)
+                    ) as r2:
+                        if r2.status == 200:
+                            articles = (await r2.json()).get("articles", [])
+                return [
+                    {"title": a.get("title", ""), "description": a.get("description", ""), "url": a.get("url", "")}
+                    for a in articles if a.get("title") and "[Removed]" not in a.get("title", "")
+                ]
+    except Exception as e:
+        logger.warning(f"NewsAPI error: {e}")
+    return []
+
+
 async def _fetch_gdelt(session: aiohttp.ClientSession) -> list[dict]:
     """GDELT DOC API — полностью бесплатно, все мировые СМИ"""
     try:
@@ -8682,6 +8715,7 @@ async def build_news_digest() -> str | None:
         _fetch_gnews(session),
         _fetch_thenewsapi(session),
         _fetch_gdelt(session),
+        _fetch_newsapi(session),
         return_exceptions=True
     )
 
@@ -8902,10 +8936,12 @@ async def cmd_news_digest(message: Message):
         )
         return
 
+    newsapi_key = os.getenv("NEWSAPI_KEY", "")
     sources_info = (
         f"• Currents API: {'✅' if currents_key else '❌ нет ключа'}\n"
         f"• GNews: {'✅' if gnews_key else '❌ нет ключа'}\n"
         f"• TheNewsAPI: {'✅' if thenews_key else '❌ нет ключа'}\n"
+        f"• NewsAPI.org: {'✅' if newsapi_key else '❌ нет ключа'}\n"
         f"• GDELT: ✅ (бесплатно, без ключа)"
     )
 
