@@ -8584,6 +8584,167 @@ async def cleanup_memory():
         logger.error(f"❌ Ошибка очистки памяти: {e}")
 
 
+# ==================== НОВОСТНОЙ ДАЙДЖЕСТ ====================
+
+async def fetch_news_currents(session: aiohttp.ClientSession, language: str = "ru") -> list[dict]:
+    """Получить свежие новости через Currents API"""
+    key = os.getenv("CURRENTS_API_KEY", "")
+    if not key:
+        return []
+    try:
+        async with session.get(
+            "https://api.currentsapi.services/v1/latest-news",
+            params={"apiKey": key, "language": language, "page_size": 20},
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get("news", [])
+    except Exception as e:
+        logger.warning(f"Currents API error: {e}")
+    return []
+
+
+async def fetch_news_gnews(session: aiohttp.ClientSession, lang: str = "ru") -> list[dict]:
+    """Получить свежие новости через GNews API"""
+    key = os.getenv("GNEWS_API_KEY", "")
+    if not key:
+        return []
+    try:
+        async with session.get(
+            "https://gnews.io/api/v4/top-headlines",
+            params={"token": key, "lang": lang, "max": 20},
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                # Приводим к единому формату
+                return [
+                    {"title": a.get("title", ""), "description": a.get("description", ""), "url": a.get("url", "")}
+                    for a in data.get("articles", [])
+                ]
+    except Exception as e:
+        logger.warning(f"GNews API error: {e}")
+    return []
+
+
+async def build_news_digest() -> str | None:
+    """Формирует новостной дайджест через AI. Возвращает готовый текст или None."""
+    ai_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
+    if not ai_key:
+        return None
+
+    session = await get_http_session()
+
+    # Пробуем оба источника
+    news = await fetch_news_currents(session, language="ru")
+    if not news:
+        news = await fetch_news_gnews(session, lang="ru")
+    if not news:
+        # English fallback
+        news = await fetch_news_currents(session, language="en")
+    if not news:
+        news = await fetch_news_gnews(session, lang="en")
+    if not news:
+        return None
+
+    # Собираем заголовки для AI
+    headlines = []
+    for item in news[:25]:
+        title = item.get("title") or ""
+        desc = item.get("description") or ""
+        url = item.get("url") or item.get("link") or ""
+        if title:
+            line = f"- {title}"
+            if desc and len(desc) < 120:
+                line += f" / {desc}"
+            if url:
+                line += f" ({url})"
+            headlines.append(line)
+
+    if not headlines:
+        return None
+
+    headlines_str = "\n".join(headlines)
+    prompt = f"""Ты редактор новостного дайджеста для русскоязычной аудитории.
+
+Вот список свежих новостей:
+{headlines_str}
+
+Выбери самые интересные и раздели по категориям. Напиши дайджест строго в таком формате:
+
+🔥 ВАЖНОЕ
+• [новость 1]
+• [новость 2]
+• [новость 3]
+
+😂 СМЕШНОЕ / АБСУРДНОЕ
+• [новость]
+• [новость]
+
+😢 ГРУСТНОЕ
+• [новость]
+• [новость]
+
+💀 ЖЁСТКОЕ / ШОК
+• [новость]
+• [новость]
+
+Требования:
+- Все на русском языке (переведи если нужно)
+- Каждая новость — 1 короткое предложение (максимум 20 слов), суть без воды
+- Если категория пустая — пропусти её
+- Минимум 2-3 новости на категорию где есть
+- Будь честным: не натягивай грустное на смешное
+- НЕ добавляй ссылки и комментарии от себя"""
+
+    try:
+        async with session.post(
+            "https://ai-gateway.vercel.sh/v1/messages",
+            json={
+                "model": "anthropic/claude-sonnet-4-20250514",
+                "max_tokens": 800,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            headers={
+                "Authorization": f"Bearer {ai_key}",
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01"
+            },
+            timeout=aiohttp.ClientTimeout(total=25)
+        ) as resp:
+            if resp.status == 200:
+                result = await resp.json()
+                digest = result.get("content", [{}])[0].get("text", "").strip()
+                if digest:
+                    return digest
+    except Exception as e:
+        logger.error(f"News digest AI error: {e}")
+    return None
+
+
+async def scheduled_news_digest():
+    """Отправляет новостной дайджест всем админам"""
+    if not ADMIN_IDS:
+        return
+    try:
+        digest = await build_news_digest()
+        if not digest:
+            logger.info("News digest: нет новостей или ключей API")
+            return
+        from datetime import datetime
+        now = datetime.now().strftime("%d.%m %H:%M")
+        text = f"📰 <b>Дайджест {now}</b>\n\n{digest}"
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            except Exception as e:
+                logger.warning(f"Не удалось отправить дайджест админу {admin_id}: {e}")
+        logger.info(f"📰 Новостной дайджест отправлен {len(ADMIN_IDS)} админам")
+    except Exception as e:
+        logger.error(f"❌ Ошибка scheduled_news_digest: {e}")
+
+
 # ==================== АДМИНКА ====================
 
 # ID администраторов (добавь свой Telegram ID)
@@ -8662,6 +8823,40 @@ async def cmd_admin(message: Message):
 """.format(message.from_user.id)
     
     await message.answer(text, parse_mode=ParseMode.MARKDOWN)
+
+
+@router.message(Command("новости", "digest", "news"))
+async def cmd_news_digest(message: Message):
+    """Ручной запуск новостного дайджеста (только для админов в личке)"""
+    if message.chat.type != "private":
+        return
+    if not is_admin(message.from_user.id):
+        return
+
+    processing = await message.answer("📰 Собираю новости...")
+    digest = await build_news_digest()
+    if not digest:
+        currents_key = os.getenv("CURRENTS_API_KEY", "")
+        gnews_key = os.getenv("GNEWS_API_KEY", "")
+        if not currents_key and not gnews_key:
+            await processing.edit_text(
+                "❌ Нет ключей новостных API\n\n"
+                "Добавь одну из переменных в Railway:\n"
+                "• <code>CURRENTS_API_KEY</code> — currentsapi.services (бесплатно 600 req/день)\n"
+                "• <code>GNEWS_API_KEY</code> — gnews.io (бесплатно 100 req/день)",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await processing.edit_text("❌ Не удалось получить новости — попробуй позже")
+        return
+
+    from datetime import datetime
+    now = datetime.now().strftime("%d.%m %H:%M")
+    await processing.edit_text(
+        f"📰 <b>Дайджест {now}</b>\n\n{digest}",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
 
 
 @router.message(Command("dbstats", "stats_db"))
@@ -10252,6 +10447,9 @@ async def main():
         scheduler.add_job(log_database_stats, 'interval', hours=1, id='stats')
         scheduler.add_job(scheduled_auto_summaries, 'interval', hours=6, id='auto_summaries')
         scheduler.add_job(scheduled_greeting, 'interval', hours=2, id='greeting')
+
+    # Новостной дайджест каждые 4 часа (не зависит от PostgreSQL)
+    scheduler.add_job(scheduled_news_digest, 'interval', hours=4, id='news_digest')
 
     # Очистка памяти (cooldowns и api_calls) каждые 10 минут
     scheduler.add_job(cleanup_memory, 'interval', minutes=10, id='memory_cleanup')
