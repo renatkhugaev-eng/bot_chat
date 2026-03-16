@@ -8741,7 +8741,9 @@ async def _fetch_gdelt(session: aiohttp.ClientSession) -> list[dict]:
             if r.status == 200:
                 data = await r.json(content_type=None)
                 return [
-                    {"title": a.get("title", ""), "description": "", "url": a.get("url", "")}
+                    {"title": a.get("title", ""), "description": a.get("socialimage", ""),
+                     "url": a.get("url", ""), "image": a.get("socialimage", ""),
+                     "published_at": _parse_pub_date(a.get("seendate", ""))}
                     for a in data.get("articles", [])
                 ]
     except Exception as e:
@@ -8919,8 +8921,8 @@ async def scheduled_news_monitor():
     try:
         import time
         now = time.time()
-        # Принимаем только новости опубликованные за последние 30 минут
-        freshness_cutoff = now - 1800
+        # Статьи старше 6 часов не отправляем (защита от старья после рестарта)
+        max_age = now - 21600
 
         session = await get_http_session()
 
@@ -8933,7 +8935,7 @@ async def scheduled_news_monitor():
             return_exceptions=True
         )
 
-        # Собираем уникальные СВЕЖИЕ новости
+        # Собираем уникальные новые новости из всех источников
         seen_in_batch: set[str] = set()
         fresh_news: list[dict] = []
         for batch in results:
@@ -8947,10 +8949,10 @@ async def scheduled_news_monitor():
                 if key in seen_in_batch or key in _sent_news:
                     continue
                 seen_in_batch.add(key)
-                # Фильтр по дате публикации — только последние 30 минут
+                # Отсекаем статьи старше 6 часов (если дата известна)
                 pub_ts = item.get("published_at") or 0
-                if pub_ts and pub_ts < freshness_cutoff:
-                    _sent_news[key] = pub_ts  # запоминаем но не шлём
+                if pub_ts and pub_ts < max_age:
+                    _sent_news[key] = pub_ts  # помечаем как виденное, не шлём
                     continue
                 fresh_news.append(item)
 
