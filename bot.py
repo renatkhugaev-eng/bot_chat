@@ -8726,10 +8726,11 @@ async def _fetch_gdelt(session: aiohttp.ClientSession) -> list[dict]:
         from datetime import datetime, timedelta, timezone
         # Берём новости за последние 2 часа (30 мин часто пусто)
         since = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y%m%d%H%M%S")
+        # Исключаем технические сайты, берём политику/экономику/общество
         async with session.get(
             "https://api.gdeltproject.org/api/v2/doc/doc",
             params={
-                "query": "sourcelang:russian",
+                "query": "(sourcelang:russian OR sourcelang:english) -domain:ixbt.com -domain:3dnews.ru -domain:overclockers.ru -domain:habr.com",
                 "mode": "artlist",
                 "maxrecords": 25,
                 "format": "json",
@@ -8912,9 +8913,12 @@ _CATEGORY_EMOJI = {
 }
 
 
+_news_first_run: bool = True
+
+
 async def scheduled_news_monitor():
     """Real-time мониторинг новостей — каждые 5 минут шлёт НОВЫЕ новости админам."""
-    global _sent_news
+    global _sent_news, _news_first_run
     if not ADMIN_IDS:
         return
 
@@ -8956,12 +8960,20 @@ async def scheduled_news_monitor():
                     continue
                 fresh_news.append(item)
 
-        logger.info(f"📰 Мониторинг: {len(fresh_news)} новых свежих новостей (из {sum(len(b) for b in results if isinstance(b, list))} всего)")
+        total = sum(len(b) for b in results if isinstance(b, list))
+        logger.info(f"📰 Мониторинг: {len(fresh_news)} новых (из {total} всего), first_run={_news_first_run}")
+
+        # При первом запуске после рестарта только строим кэш, не шлём
+        if _news_first_run:
+            for item in fresh_news:
+                key = (item.get("title") or "").lower()[:60]
+                _sent_news[key] = now
+            _news_first_run = False
+            logger.info(f"📰 Первый запуск: {len(fresh_news)} статей добавлено в кэш, отправка начнётся со следующего цикла")
+            return
 
         if not fresh_news:
             return
-
-        logger.info(f"📰 Найдено {len(fresh_news)} новых новостей")
 
         # Категоризируем и отправляем каждую новую новость
         from datetime import datetime
