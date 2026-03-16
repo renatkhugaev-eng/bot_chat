@@ -8887,21 +8887,37 @@ async def cmd_news_digest(message: Message):
     if not is_admin(message.from_user.id):
         return
 
-    processing = await message.answer("📰 Собираю новости...")
+    # Диагностика переменных окружения
+    ai_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
+    currents_key = os.getenv("CURRENTS_API_KEY", "")
+    gnews_key = os.getenv("GNEWS_API_KEY", "")
+    thenews_key = os.getenv("THENEWSAPI_KEY", "")
+
+    if not ai_key:
+        await message.answer(
+            "❌ <b>VERCEL_AI_GATEWAY_KEY не настроен</b>\n\n"
+            "Без него AI не может сформировать дайджест.\n"
+            "Добавь ключ в Railway → Variables.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    sources_info = (
+        f"• Currents API: {'✅' if currents_key else '❌ нет ключа'}\n"
+        f"• GNews: {'✅' if gnews_key else '❌ нет ключа'}\n"
+        f"• TheNewsAPI: {'✅' if thenews_key else '❌ нет ключа'}\n"
+        f"• GDELT: ✅ (бесплатно, без ключа)"
+    )
+
+    processing = await message.answer(f"📰 Собираю новости...\n\n{sources_info}")
     digest = await build_news_digest()
     if not digest:
-        currents_key = os.getenv("CURRENTS_API_KEY", "")
-        gnews_key = os.getenv("GNEWS_API_KEY", "")
-        if not currents_key and not gnews_key:
-            await processing.edit_text(
-                "❌ Нет ключей новостных API\n\n"
-                "Добавь одну из переменных в Railway:\n"
-                "• <code>CURRENTS_API_KEY</code> — currentsapi.services (бесплатно 600 req/день)\n"
-                "• <code>GNEWS_API_KEY</code> — gnews.io (бесплатно 100 req/день)",
-                parse_mode=ParseMode.HTML
-            )
-        else:
-            await processing.edit_text("❌ Не удалось получить новости — попробуй позже")
+        await processing.edit_text(
+            f"❌ Не удалось получить новости\n\n"
+            f"Источники:\n{sources_info}\n\n"
+            f"Смотри логи Railway для деталей.",
+            parse_mode=ParseMode.HTML
+        )
         return
 
     from datetime import datetime
