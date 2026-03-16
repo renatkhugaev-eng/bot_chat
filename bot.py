@@ -8597,7 +8597,12 @@ async def _fetch_currents(session: aiohttp.ClientSession) -> list[dict]:
             timeout=aiohttp.ClientTimeout(total=15)
         ) as r:
             if r.status == 200:
-                return (await r.json()).get("news", [])
+                items = (await r.json()).get("news", [])
+                # Currents уже отдаёт нужные поля, нормализуем image
+                for item in items:
+                    if "image" not in item:
+                        item["image"] = ""
+                return items
     except Exception as e:
         logger.warning(f"Currents API error: {e}")
     return []
@@ -8615,7 +8620,8 @@ async def _fetch_gnews(session: aiohttp.ClientSession) -> list[dict]:
         ) as r:
             if r.status == 200:
                 return [
-                    {"title": a.get("title", ""), "description": a.get("description", ""), "url": a.get("url", "")}
+                    {"title": a.get("title", ""), "description": a.get("description", ""),
+                     "url": a.get("url", ""), "image": a.get("image", "")}
                     for a in (await r.json()).get("articles", [])
                 ]
     except Exception as e:
@@ -8635,7 +8641,8 @@ async def _fetch_thenewsapi(session: aiohttp.ClientSession) -> list[dict]:
         ) as r:
             if r.status == 200:
                 return [
-                    {"title": a.get("title", ""), "description": a.get("description", ""), "url": a.get("url", "")}
+                    {"title": a.get("title", ""), "description": a.get("description", ""),
+                     "url": a.get("url", ""), "image": a.get("image_url", "")}
                     for a in (await r.json()).get("data", [])
                 ]
     except Exception as e:
@@ -8649,7 +8656,6 @@ async def _fetch_newsapi(session: aiohttp.ClientSession) -> list[dict]:
     if not key:
         return []
     try:
-        # Топ мировые заголовки
         async with session.get(
             "https://newsapi.org/v2/top-headlines",
             params={"apiKey": key, "language": "ru", "pageSize": 20},
@@ -8658,7 +8664,6 @@ async def _fetch_newsapi(session: aiohttp.ClientSession) -> list[dict]:
             if r.status == 200:
                 data = await r.json()
                 articles = data.get("articles", [])
-                # Если русских нет — берём английские
                 if not articles:
                     async with session.get(
                         "https://newsapi.org/v2/top-headlines",
@@ -8668,7 +8673,8 @@ async def _fetch_newsapi(session: aiohttp.ClientSession) -> list[dict]:
                         if r2.status == 200:
                             articles = (await r2.json()).get("articles", [])
                 return [
-                    {"title": a.get("title", ""), "description": a.get("description", ""), "url": a.get("url", "")}
+                    {"title": a.get("title", ""), "description": a.get("description", ""),
+                     "url": a.get("url", ""), "image": a.get("urlToImage", "")}
                     for a in articles if a.get("title") and "[Removed]" not in a.get("title", "")
                 ]
     except Exception as e:
@@ -8920,26 +8926,43 @@ async def scheduled_news_monitor():
         logger.info(f"📰 Найдено {len(fresh_news)} новых новостей")
 
         # Категоризируем и отправляем каждую новую новость
+        from datetime import datetime
         now = time.time()
         for item in fresh_news[:10]:  # Не больше 10 за раз чтобы не спамить
             title = (item.get("title") or "").strip()
             desc = (item.get("description") or "").strip()
             url = (item.get("url") or item.get("link") or "").strip()
+            image_url = (item.get("image") or item.get("urlToImage") or "").strip()
             key = title.lower()[:60]
 
             category = _categorize_news_item(title, desc)
             emoji = _CATEGORY_EMOJI.get(category, "🔥")
+            ts = datetime.now().strftime("%d мар, %H:%M")
 
-            # Формируем сообщение
-            text = f"{emoji} <b>{category}</b>\n\n{title}"
-            if desc and len(desc) < 200:
-                text += f"\n\n<i>{desc}</i>"
+            # Формируем подпись
+            caption = f"{emoji} <b>{category}</b>  •  {ts}\n\n<b>{title}</b>"
+            if desc and len(desc) < 250:
+                caption += f"\n\n{desc}"
             if url:
-                text += f"\n\n<a href='{url}'>Читать →</a>"
+                caption += f'\n\n<a href="{url}">🔗 Читать →</a>'
 
             for admin_id in ADMIN_IDS:
                 try:
-                    await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+                    if image_url:
+                        try:
+                            await bot.send_photo(
+                                admin_id,
+                                photo=image_url,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML
+                            )
+                        except Exception:
+                            # Если картинка не грузится — шлём без неё
+                            await bot.send_message(admin_id, caption, parse_mode=ParseMode.HTML,
+                                                   disable_web_page_preview=True)
+                    else:
+                        await bot.send_message(admin_id, caption, parse_mode=ParseMode.HTML,
+                                               disable_web_page_preview=True)
                 except Exception as e:
                     logger.warning(f"Не удалось отправить новость админу {admin_id}: {e}")
 
