@@ -8612,22 +8612,35 @@ async def _fetch_currents(session: aiohttp.ClientSession) -> list[dict]:
     key = os.getenv("CURRENTS_API_KEY", "")
     if not key:
         return []
+
+    def _parse_items(items: list) -> list[dict]:
+        return [
+            {"title": a.get("title", ""), "description": a.get("description", ""),
+             "url": a.get("url", ""), "image": a.get("image", ""),
+             "published_at": _parse_pub_date(a.get("published", ""))}
+            for a in items if a.get("title")
+        ]
+
+    results = []
+    # Берём русские И английские новости параллельно для разнообразия
     try:
-        async with session.get(
-            "https://api.currentsapi.services/v1/latest-news",
-            params={"apiKey": key, "language": "ru", "page_size": 20},
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as r:
+        ru, en = await asyncio.gather(
+            session.get("https://api.currentsapi.services/v1/latest-news",
+                        params={"apiKey": key, "language": "ru", "page_size": 20},
+                        timeout=aiohttp.ClientTimeout(total=15)),
+            session.get("https://api.currentsapi.services/v1/latest-news",
+                        params={"apiKey": key, "language": "en", "page_size": 20},
+                        timeout=aiohttp.ClientTimeout(total=15)),
+        )
+        async with ru as r:
             if r.status == 200:
-                return [
-                    {"title": a.get("title", ""), "description": a.get("description", ""),
-                     "url": a.get("url", ""), "image": a.get("image", ""),
-                     "published_at": _parse_pub_date(a.get("published", ""))}
-                    for a in (await r.json()).get("news", [])
-                ]
+                results += _parse_items((await r.json()).get("news", []))
+        async with en as r:
+            if r.status == 200:
+                results += _parse_items((await r.json()).get("news", []))
     except Exception as e:
         logger.warning(f"Currents API error: {e}")
-    return []
+    return results
 
 
 async def _fetch_gnews(session: aiohttp.ClientSession) -> list[dict]:
@@ -8711,8 +8724,8 @@ async def _fetch_gdelt(session: aiohttp.ClientSession) -> list[dict]:
     """GDELT DOC API — полностью бесплатно, только свежие новости (последние 30 мин)"""
     try:
         from datetime import datetime, timedelta, timezone
-        # Берём новости за последние 30 минут
-        since = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime("%Y%m%d%H%M%S")
+        # Берём новости за последние 2 часа (30 мин часто пусто)
+        since = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y%m%d%H%M%S")
         async with session.get(
             "https://api.gdeltproject.org/api/v2/doc/doc",
             params={
