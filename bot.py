@@ -8811,14 +8811,149 @@ async def build_news_digest() -> str | None:
     return None
 
 
+# Кэш уже отправленных новостей (title_norm -> timestamp)
+_sent_news: dict[str, float] = {}
+_news_monitor_initialized: bool = False
+
+
+async def _categorize_news_item(session: aiohttp.ClientSession, ai_key: str, title: str, description: str) -> str:
+    """Быстро определяет категорию одной новости через AI."""
+    try:
+        prompt = (
+            f"Определи категорию новости ОДНИМ словом из списка: ВАЖНОЕ, СМЕШНОЕ, ГРУСТНОЕ, ЖЁСТКОЕ, ОБЫЧНОЕ\n"
+            f"Новость: {title}. {description}\n"
+            f"Ответь только одним словом."
+        )
+        async with session.post(
+            "https://ai-gateway.vercel.sh/v1/messages",
+            json={
+                "model": "anthropic/claude-sonnet-4-20250514",
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            headers={
+                "Authorization": f"Bearer {ai_key}",
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01"
+            },
+            timeout=aiohttp.ClientTimeout(total=8)
+        ) as resp:
+            if resp.status == 200:
+                result = await resp.json()
+                cat = result.get("content", [{}])[0].get("text", "").strip().upper()
+                for c in ["ВАЖНОЕ", "СМЕШНОЕ", "ГРУСТНОЕ", "ЖЁСТКОЕ"]:
+                    if c in cat:
+                        return c
+    except Exception:
+        pass
+    return "ВАЖНОЕ"
+
+
+_CATEGORY_EMOJI = {
+    "ВАЖНОЕ": "🔥",
+    "СМЕШНОЕ": "😂",
+    "ГРУСТНОЕ": "😢",
+    "ЖЁСТКОЕ": "💀",
+}
+
+
+async def scheduled_news_monitor():
+    """Real-time мониторинг новостей — каждые 10 минут шлёт НОВЫЕ новости админам."""
+    global _news_monitor_initialized, _sent_news
+    if not ADMIN_IDS:
+        return
+
+    ai_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
+    if not ai_key:
+        return
+
+    try:
+        import time
+        session = await get_http_session()
+
+        # Получаем все источники параллельно
+        results = await asyncio.gather(
+            _fetch_currents(session),
+            _fetch_gnews(session),
+            _fetch_thenewsapi(session),
+            _fetch_gdelt(session),
+            _fetch_newsapi(session),
+            return_exceptions=True
+        )
+
+        # Собираем уникальные новости
+        seen_in_batch: set[str] = set()
+        fresh_news: list[dict] = []
+        for batch in results:
+            if not isinstance(batch, list):
+                continue
+            for item in batch:
+                title = (item.get("title") or "").strip()
+                if not title or "[Removed]" in title:
+                    continue
+                key = title.lower()[:60]
+                if key in seen_in_batch:
+                    continue
+                seen_in_batch.add(key)
+                if key not in _sent_news:
+                    fresh_news.append(item)
+
+        # При первом запуске только инициализируем кэш, не шлём
+        if not _news_monitor_initialized:
+            now = time.time()
+            for item in fresh_news:
+                key = (item.get("title") or "").lower()[:60]
+                _sent_news[key] = now
+            _news_monitor_initialized = True
+            logger.info(f"📰 Мониторинг новостей инициализирован: {len(_sent_news)} новостей в кэше")
+            return
+
+        if not fresh_news:
+            return
+
+        logger.info(f"📰 Найдено {len(fresh_news)} новых новостей")
+
+        # Категоризируем и отправляем каждую новую новость
+        now = time.time()
+        for item in fresh_news[:10]:  # Не больше 10 за раз чтобы не спамить
+            title = (item.get("title") or "").strip()
+            desc = (item.get("description") or "").strip()
+            url = (item.get("url") or item.get("link") or "").strip()
+            key = title.lower()[:60]
+
+            category = await _categorize_news_item(session, ai_key, title, desc)
+            emoji = _CATEGORY_EMOJI.get(category, "🔥")
+
+            # Формируем сообщение
+            text = f"{emoji} <b>{category}</b>\n\n{title}"
+            if desc and len(desc) < 200:
+                text += f"\n\n<i>{desc}</i>"
+            if url:
+                text += f"\n\n<a href='{url}'>Читать →</a>"
+
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+                except Exception as e:
+                    logger.warning(f"Не удалось отправить новость админу {admin_id}: {e}")
+
+            _sent_news[key] = now
+
+        # Чистим старые записи (старше 24 часов) чтобы память не росла
+        cutoff = now - 86400
+        _sent_news = {k: v for k, v in _sent_news.items() if v > cutoff}
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка news_monitor: {e}")
+
+
 async def scheduled_news_digest():
-    """Отправляет новостной дайджест всем админам"""
+    """Итоговый дайджест раз в 6 часов — AI категоризирует накопленное."""
     if not ADMIN_IDS:
         return
     try:
         digest = await build_news_digest()
         if not digest:
-            logger.info("News digest: нет новостей или ключей API")
             return
         from datetime import datetime
         now = datetime.now().strftime("%d.%m %H:%M")
@@ -8828,7 +8963,7 @@ async def scheduled_news_digest():
                 await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
             except Exception as e:
                 logger.warning(f"Не удалось отправить дайджест админу {admin_id}: {e}")
-        logger.info(f"📰 Новостной дайджест отправлен {len(ADMIN_IDS)} админам")
+        logger.info(f"📰 Дайджест отправлен {len(ADMIN_IDS)} админам")
     except Exception as e:
         logger.error(f"❌ Ошибка scheduled_news_digest: {e}")
 
@@ -10554,8 +10689,10 @@ async def main():
         scheduler.add_job(scheduled_auto_summaries, 'interval', hours=6, id='auto_summaries')
         scheduler.add_job(scheduled_greeting, 'interval', hours=2, id='greeting')
 
-    # Новостной дайджест каждые 4 часа (не зависит от PostgreSQL)
-    scheduler.add_job(scheduled_news_digest, 'interval', hours=4, id='news_digest')
+    # Real-time мониторинг новостей каждые 10 минут
+    scheduler.add_job(scheduled_news_monitor, 'interval', minutes=10, id='news_monitor')
+    # Итоговый дайджест раз в 6 часов
+    scheduler.add_job(scheduled_news_digest, 'interval', hours=6, id='news_digest')
 
     # Очистка памяти (cooldowns и api_calls) каждые 10 минут
     scheduler.add_job(cleanup_memory, 'interval', minutes=10, id='memory_cleanup')
