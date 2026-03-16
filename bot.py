@@ -8677,16 +8677,20 @@ async def _fetch_newsapi(session: aiohttp.ClientSession) -> list[dict]:
 
 
 async def _fetch_gdelt(session: aiohttp.ClientSession) -> list[dict]:
-    """GDELT DOC API — полностью бесплатно, все мировые СМИ"""
+    """GDELT DOC API — полностью бесплатно, только свежие новости (последние 30 мин)"""
     try:
+        from datetime import datetime, timedelta, timezone
+        # Берём новости за последние 30 минут
+        since = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime("%Y%m%d%H%M%S")
         async with session.get(
             "https://api.gdeltproject.org/api/v2/doc/doc",
             params={
                 "query": "sourcelang:russian",
                 "mode": "artlist",
-                "maxrecords": 20,
+                "maxrecords": 25,
                 "format": "json",
-                "sort": "datedesc"
+                "sort": "datedesc",
+                "startdatetime": since,
             },
             timeout=aiohttp.ClientTimeout(total=15)
         ) as r:
@@ -8825,36 +8829,33 @@ _sent_news: dict[str, float] = {}
 _news_monitor_initialized: bool = False
 
 
-async def _categorize_news_item(session: aiohttp.ClientSession, ai_key: str, title: str, description: str) -> str:
-    """Быстро определяет категорию одной новости через AI."""
-    try:
-        prompt = (
-            f"Определи категорию новости ОДНИМ словом из списка: ВАЖНОЕ, СМЕШНОЕ, ГРУСТНОЕ, ЖЁСТКОЕ, ОБЫЧНОЕ\n"
-            f"Новость: {title}. {description}\n"
-            f"Ответь только одним словом."
-        )
-        async with session.post(
-            "https://ai-gateway.vercel.sh/v1/messages",
-            json={
-                "model": "anthropic/claude-sonnet-4-20250514",
-                "max_tokens": 10,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            headers={
-                "Authorization": f"Bearer {ai_key}",
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01"
-            },
-            timeout=aiohttp.ClientTimeout(total=8)
-        ) as resp:
-            if resp.status == 200:
-                result = await resp.json()
-                cat = result.get("content", [{}])[0].get("text", "").strip().upper()
-                for c in ["ВАЖНОЕ", "СМЕШНОЕ", "ГРУСТНОЕ", "ЖЁСТКОЕ"]:
-                    if c in cat:
-                        return c
-    except Exception:
-        pass
+def _categorize_news_item(title: str, description: str) -> str:
+    """Определяет категорию новости по ключевым словам — без AI, мгновенно."""
+    text = (title + " " + description).lower()
+
+    harsh = ["убит", "убили", "погиб", "погибли", "взрыв", "теракт", "война", "атака",
+             "катастроф", "авиакрушен", "крушен", "стрельб", "расстрел", "арест",
+             "задержан", "осуждён", "тюрьм", "убийств", "нападен", "жертв"]
+    sad = ["трагедия", "скончался", "умер", "умерла", "похороны", "смерть", "горе",
+           "пожар", "наводнение", "землетрясение", "голод", "бедствие", "эпидемия"]
+    funny = ["смешн", "абсурд", "курьёз", "нелепо", "странн", "забавн", "анекдот",
+             "пьяный", "пьяная", "случайно", "перепутал", "обнаружили на"]
+    important = ["санкции", "выборы", "президент", "министр", "правительство", "закон",
+                 "цб", "цена", "инфляция", "ввп", "нато", "оон", "байден", "трамп",
+                 "путин", "экономик", "кризис", "переговоры", "договор", "ядерн"]
+
+    for kw in harsh:
+        if kw in text:
+            return "ЖЁСТКОЕ"
+    for kw in sad:
+        if kw in text:
+            return "ГРУСТНОЕ"
+    for kw in funny:
+        if kw in text:
+            return "СМЕШНОЕ"
+    for kw in important:
+        if kw in text:
+            return "ВАЖНОЕ"
     return "ВАЖНОЕ"
 
 
@@ -8870,10 +8871,6 @@ async def scheduled_news_monitor():
     """Real-time мониторинг новостей — каждые 10 минут шлёт НОВЫЕ новости админам."""
     global _news_monitor_initialized, _sent_news
     if not ADMIN_IDS:
-        return
-
-    ai_key = os.getenv("VERCEL_AI_GATEWAY_KEY", "")
-    if not ai_key:
         return
 
     try:
@@ -8930,7 +8927,7 @@ async def scheduled_news_monitor():
             url = (item.get("url") or item.get("link") or "").strip()
             key = title.lower()[:60]
 
-            category = await _categorize_news_item(session, ai_key, title, desc)
+            category = _categorize_news_item(title, desc)
             emoji = _CATEGORY_EMOJI.get(category, "🔥")
 
             # Формируем сообщение
