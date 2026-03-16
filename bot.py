@@ -8586,6 +8586,28 @@ async def cleanup_memory():
 
 # ==================== НОВОСТНОЙ ДАЙДЖЕСТ ====================
 
+def _parse_pub_date(raw: str) -> float:
+    """Парсит дату публикации в unix timestamp. Возвращает 0 если не удалось."""
+    if not raw:
+        return 0.0
+    from datetime import datetime, timezone
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S %z",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y%m%dT%H%M%SZ",
+    ):
+        try:
+            dt = datetime.strptime(raw.strip(), fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
 async def _fetch_currents(session: aiohttp.ClientSession) -> list[dict]:
     key = os.getenv("CURRENTS_API_KEY", "")
     if not key:
@@ -8597,12 +8619,12 @@ async def _fetch_currents(session: aiohttp.ClientSession) -> list[dict]:
             timeout=aiohttp.ClientTimeout(total=15)
         ) as r:
             if r.status == 200:
-                items = (await r.json()).get("news", [])
-                # Currents уже отдаёт нужные поля, нормализуем image
-                for item in items:
-                    if "image" not in item:
-                        item["image"] = ""
-                return items
+                return [
+                    {"title": a.get("title", ""), "description": a.get("description", ""),
+                     "url": a.get("url", ""), "image": a.get("image", ""),
+                     "published_at": _parse_pub_date(a.get("published", ""))}
+                    for a in (await r.json()).get("news", [])
+                ]
     except Exception as e:
         logger.warning(f"Currents API error: {e}")
     return []
@@ -8621,7 +8643,8 @@ async def _fetch_gnews(session: aiohttp.ClientSession) -> list[dict]:
             if r.status == 200:
                 return [
                     {"title": a.get("title", ""), "description": a.get("description", ""),
-                     "url": a.get("url", ""), "image": a.get("image", "")}
+                     "url": a.get("url", ""), "image": a.get("image", ""),
+                     "published_at": _parse_pub_date(a.get("publishedAt", ""))}
                     for a in (await r.json()).get("articles", [])
                 ]
     except Exception as e:
@@ -8642,7 +8665,8 @@ async def _fetch_thenewsapi(session: aiohttp.ClientSession) -> list[dict]:
             if r.status == 200:
                 return [
                     {"title": a.get("title", ""), "description": a.get("description", ""),
-                     "url": a.get("url", ""), "image": a.get("image_url", "")}
+                     "url": a.get("url", ""), "image": a.get("image_url", ""),
+                     "published_at": _parse_pub_date(a.get("published_at", ""))}
                     for a in (await r.json()).get("data", [])
                 ]
     except Exception as e:
@@ -8674,7 +8698,8 @@ async def _fetch_newsapi(session: aiohttp.ClientSession) -> list[dict]:
                             articles = (await r2.json()).get("articles", [])
                 return [
                     {"title": a.get("title", ""), "description": a.get("description", ""),
-                     "url": a.get("url", ""), "image": a.get("urlToImage", "")}
+                     "url": a.get("url", ""), "image": a.get("urlToImage", ""),
+                     "published_at": _parse_pub_date(a.get("publishedAt", ""))}
                     for a in articles if a.get("title") and "[Removed]" not in a.get("title", "")
                 ]
     except Exception as e:
@@ -8830,9 +8855,8 @@ async def build_news_digest() -> str | None:
     return fallback
 
 
-# Кэш уже отправленных новостей (title_norm -> timestamp)
+# Кэш уже отправленных новостей (title_norm -> timestamp публикации)
 _sent_news: dict[str, float] = {}
-_news_monitor_initialized: bool = False
 
 
 def _categorize_news_item(title: str, description: str) -> str:
@@ -8874,16 +8898,19 @@ _CATEGORY_EMOJI = {
 
 
 async def scheduled_news_monitor():
-    """Real-time мониторинг новостей — каждые 10 минут шлёт НОВЫЕ новости админам."""
-    global _news_monitor_initialized, _sent_news
+    """Real-time мониторинг новостей — каждые 5 минут шлёт НОВЫЕ новости админам."""
+    global _sent_news
     if not ADMIN_IDS:
         return
 
     try:
         import time
+        now = time.time()
+        # Принимаем только новости опубликованные за последние 30 минут
+        freshness_cutoff = now - 1800
+
         session = await get_http_session()
 
-        # Получаем все источники параллельно
         results = await asyncio.gather(
             _fetch_currents(session),
             _fetch_gnews(session),
@@ -8893,7 +8920,7 @@ async def scheduled_news_monitor():
             return_exceptions=True
         )
 
-        # Собираем уникальные новости
+        # Собираем уникальные СВЕЖИЕ новости
         seen_in_batch: set[str] = set()
         fresh_news: list[dict] = []
         for batch in results:
@@ -8904,21 +8931,17 @@ async def scheduled_news_monitor():
                 if not title or "[Removed]" in title:
                     continue
                 key = title.lower()[:60]
-                if key in seen_in_batch:
+                if key in seen_in_batch or key in _sent_news:
                     continue
                 seen_in_batch.add(key)
-                if key not in _sent_news:
-                    fresh_news.append(item)
+                # Фильтр по дате публикации — только последние 30 минут
+                pub_ts = item.get("published_at") or 0
+                if pub_ts and pub_ts < freshness_cutoff:
+                    _sent_news[key] = pub_ts  # запоминаем но не шлём
+                    continue
+                fresh_news.append(item)
 
-        # При первом запуске только инициализируем кэш, не шлём
-        if not _news_monitor_initialized:
-            now = time.time()
-            for item in fresh_news:
-                key = (item.get("title") or "").lower()[:60]
-                _sent_news[key] = now
-            _news_monitor_initialized = True
-            logger.info(f"📰 Мониторинг новостей инициализирован: {len(_sent_news)} новостей в кэше")
-            return
+        logger.info(f"📰 Мониторинг: {len(fresh_news)} новых свежих новостей (из {sum(len(b) for b in results if isinstance(b, list))} всего)")
 
         if not fresh_news:
             return
